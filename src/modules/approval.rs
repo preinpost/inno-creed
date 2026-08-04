@@ -18,8 +18,11 @@ fn box_spec(b: &str) -> Result<(&'static str, &'static str, &'static str, &'stat
         "reference" => ("eap105A04", "1000900", "1001200", "REP_DT", "map"),
         "enforcement" => ("eap105A04", "1000900", "1001400", "REP_DT", "map"),
         "sent" => ("eap107A04", "1000300", "1000400", "REP_DT", "list"),
+        // 임시보관(결재작성 중 저장 + 상신취소로 복귀한 문서). eap107A06, menuNo 1000500.
+        // ⚠️ 일부 양식은 같은 form_id의 임시보관 문서가 남아있으면 신규 상신이 막힌다(07 §8.11).
+        "draft" => ("eap107A06", "1000300", "1000500", "REP_DT", "list"),
         _ => return Err(anyhow!(
-            "알 수 없는 함 '{b}'. 사용 가능: pending(미결)/approved(기결)/approved_ongoing(기결진행)/approved_done(기결종결)/reference(수신참조)/enforcement(시행)/sent(상신)"
+            "알 수 없는 함 '{b}'. 사용 가능: pending(미결)/approved(기결)/approved_ongoing(기결진행)/approved_done(기결종결)/reference(수신참조)/enforcement(시행)/sent(상신)/draft(임시보관)"
         )),
     })
 }
@@ -62,11 +65,16 @@ pub async fn list_approvals(
     let docs: Vec<Value> = arr
         .iter()
         .map(|d| {
+            // 상신/수신함은 FORM_NM, 임시보관(draft)은 DRAFT_FORM_NM에 양식명이 있다.
+            let form = {
+                let f = s(d, "FORM_NM");
+                if f.is_empty() { s(d, "DRAFT_FORM_NM") } else { f }
+            };
             json!({
                 "docId": s(d, "DOC_ID"),
                 "docNo": s(d, "DOC_NO"),
                 "title": s(d, "DOC_TITLE"),
-                "form": s(d, "FORM_NM"),
+                "form": form,
                 "formId": s(d, "FORM_ID"),
                 "drafter": s(d, "USER_NM"),
                 "dept": s(d, "DEPT_NM"),

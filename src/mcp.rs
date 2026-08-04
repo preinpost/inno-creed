@@ -248,7 +248,7 @@ pub struct DownloadAttachmentArgs {
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct ListApprovalsArgs {
-    /// 함: pending(미결)/approved(기결)/approved_ongoing(기결진행)/approved_done(기결종결)/reference(수신참조)/enforcement(시행)/sent(상신). 기본 pending.
+    /// 함: pending(미결)/approved(기결)/approved_ongoing(기결진행)/approved_done(기결종결)/reference(수신참조)/enforcement(시행)/sent(상신)/draft(임시보관). 기본 pending.
     #[serde(default = "box_pending")]
     pub box_name: String,
     /// 페이지 번호(기본 1)
@@ -370,6 +370,13 @@ pub struct SubmitApprovalArgs {
 pub struct CancelApprovalArgs {
     /// 상신취소할 문서의 docId(list_approvals/read_approval의 docId).
     pub doc_id: String,
+}
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DeleteTempApprovalArgs {
+    /// 삭제할 임시보관 문서 docId. 여러 건은 콤마구분(예 "140764,140716"). list_approvals(box_name:"draft")의 docId.
+    pub doc_ids: String,
 }
 
 #[derive(Clone)]
@@ -1059,7 +1066,7 @@ impl Amaranth {
     // 전자결재 읽기 도구(/eap/*). 목록/상세는 헤더 인증만으로 완결 → ensure_session 생략.
     // 카운트는 companyInfo 필요 → ensure_session 선행.
     #[tool(
-        description = "전자결재 함별 문서 목록을 조회한다. box_name=pending(미결)/approved(기결)/approved_ongoing/approved_done/reference(수신참조)/enforcement(시행)/sent(상신)."
+        description = "전자결재 함별 문서 목록을 조회한다. box_name=pending(미결)/approved(기결)/approved_ongoing/approved_done/reference(수신참조)/enforcement(시행)/sent(상신)/draft(임시보관). draft는 상신 안 된 임시저장·상신취소 복귀 문서 — 같은 form_id의 draft가 남아있으면 신규 상신이 막힐 수 있어, 상신 실패/미반영 시 여기서 확인 후 delete_temp_approval로 정리."
     )]
     async fn list_approvals(
         &self,
@@ -1291,6 +1298,20 @@ impl Amaranth {
         let data = modules::approval_submit::cancel_approval(&self.client, a.doc_id.trim())
             .await
             .map_err(|e| ErrorData::internal_error(format!("상신취소 실패: {e}"), None))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
+
+    #[tool(
+        description = "임시보관 전자결재 문서를 삭제한다(eap107A25). doc_ids는 콤마구분 docId. ⚠️ 실제 삭제(복구 불가). 같은 form_id의 잔여 임시보관 문서가 신규 상신을 막을 때(상신 후 sent 목록에 안 뜰 때) list_approvals(box_name:\"draft\")로 확인 후 정리하는 용도. 삭제 후 draft 재조회로 검증."
+    )]
+    async fn delete_temp_approval(
+        &self,
+        Parameters(a): Parameters<DeleteTempApprovalArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let data = modules::approval_submit::delete_temp_approval(&self.client, a.doc_ids.trim())
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("임시보관 삭제 실패: {e}"), None))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 }

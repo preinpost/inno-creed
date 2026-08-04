@@ -235,7 +235,44 @@ pub async fn submit_approval(
         "title": doc_title,
         "lineCount": line_nodes.len(),
         "referCount": refer_nodes.len(),
-        "note": "상신 완료. list_approvals(box_name:\"sent\") 또는 read_approval로 확인. 취소하려면 cancel_approval(docId)."
+        "note": "상신 응답을 성공으로 단정 말 것. ⚠️ 일부 양식(특히 근태/외근/연차 등 HP 연동 양식)은 draft(임시보관)에 같은 form_id 문서가 남아있으면 상신이 조용히 막히거나 2099로 실패한다. list_approvals(box_name:\"sent\")로 이 문서가 실제로 떴는지 확인하고, sent 목록에 없으면 list_approvals(box_name:\"draft\")로 임시보관을 조회해 delete_temp_approval로 정리한 뒤 재시도하라. 취소는 cancel_approval(docId)."
+    }))
+}
+
+/// 임시보관 전자결재 문서 삭제 — `GET /eap/sse/eap107A25?docIdList=<csv>`(SSE 스트림).
+/// 콤마구분 docId를 한 콜로 일괄삭제. 같은 form_id의 잔여 임시보관 문서가 신규 상신을 막을 때
+/// 정리용(07 §8.11). 응답 이벤트별 resultCode + resultData.failCnt로 성공 판정.
+pub async fn delete_temp_approval(c: &GwClient, doc_ids: &str) -> Result<Value> {
+    let ids = doc_ids.trim();
+    if ids.is_empty() {
+        anyhow::bail!("doc_ids(콤마구분 docId)가 비어있음");
+    }
+    let path = format!("/eap/sse/eap107A25?docIdList={ids}");
+    let events = c.call_get_sse("/eap/sse/eap107A25", &path).await?;
+
+    let mut deleted: Vec<String> = Vec::new();
+    let mut fail: i64 = 0;
+    for e in &events {
+        let code = e.get("resultCode").and_then(|v| v.as_i64()).unwrap_or(-1);
+        if !(code == 0 || code == 200) {
+            fail += 1;
+            continue;
+        }
+        if let Some(rd) = e.get("resultData") {
+            fail += rd.get("failCnt").and_then(|v| v.as_i64()).unwrap_or(0);
+            if let Some(id) = rd.get("docId").and_then(|v| v.as_str()) {
+                if !id.is_empty() {
+                    deleted.push(id.to_string());
+                }
+            }
+        }
+    }
+    Ok(json!({
+        "kind": "tempApprovalDeleted",
+        "requested": ids,
+        "deletedDocIds": deleted,
+        "failCount": fail,
+        "note": "임시보관 문서 삭제(eap107A25). list_approvals(box_name:\"draft\")로 사라졌는지 재확인 권장."
     }))
 }
 

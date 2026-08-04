@@ -358,6 +358,47 @@ impl GwClient {
         Ok(v.get("resultData").cloned().unwrap_or(Value::Null))
     }
 
+    /// GET + SSE(text/event-stream) 호출. eap107A25(임시보관 삭제)처럼 파라미터가 쿼리스트링에
+    /// 있고 응답이 `data:{...}` 스트림인 엔드포인트용. 서명은 pathname만(쿼리 제외 — 프론트 관례).
+    /// 스트림의 모든 `data:` JSON 이벤트를 파싱해 Vec로 반환(성공 판정은 호출부 몫).
+    pub async fn call_get_sse(&self, sign_path: &str, path_with_query: &str) -> Result<Vec<Value>> {
+        let cr = self.creds()?;
+        let tid = sign::transaction_id();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs()
+            .to_string();
+        let sig = sign::wehago_sign(&cr.auth_token, &tid, &ts, sign_path, &cr.sign_key);
+
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base, path_with_query))
+            .header("Authorization", format!("Bearer {}", cr.auth_token))
+            .header("timestamp", &ts)
+            .header("transaction-id", &tid)
+            .header("wehago-sign", sig)
+            .header("Accept", "text/event-stream")
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            bail!("api {sign_path} 실패: http={status} body={}", &text[..text.len().min(300)]);
+        }
+        let events: Vec<Value> = text
+            .lines()
+            .filter_map(|l| l.trim_start().strip_prefix("data:"))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+            .collect();
+        if events.is_empty() {
+            bail!("SSE 응답 파싱 실패({sign_path}): body={}", &text[..text.len().min(300)]);
+        }
+        Ok(events)
+    }
+
     /// 공통 companyInfo. groupSeq/empSeq는 authToken, 나머지는 세션 캐시(ensure_session).
     pub fn company_info(&self) -> Value {
         let c = self.session.read().unwrap();
