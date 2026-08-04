@@ -82,6 +82,62 @@ pub struct ListReservationsArgs {
     /// 조회할 자원 ID 목록(비우면 전체 회의실)
     #[serde(default)]
     pub res_seqs: Vec<String>,
+    /// true면 서버 원본(74필드, 회의 안건 전문 포함)을 그대로 반환. 기본 false(슬림).
+    #[serde(default)]
+    pub verbose: bool,
+}
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct FindFreeRoomsArgs {
+    /// 날짜 YYYYMMDD
+    pub date: String,
+    /// 필요한 시간(분). 예: 2시간=120
+    pub duration_min: i64,
+    /// 탐색 구간 HHmm-HHmm (기본 "0900-1800"). 오전만이면 "0900-1200"
+    #[serde(default)]
+    pub window: String,
+    /// 건물/자원종류: ""(전체) | "본사" | "구로" | attrSeq 숫자
+    #[serde(default)]
+    pub group: String,
+}
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct MyReservationsArgs {
+    /// 시작일 YYYYMMDD
+    pub start: String,
+    /// 종료일 YYYYMMDD
+    pub end: String,
+}
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct FindPersonArgs {
+    /// 이름·로그인ID·이메일 일부. 예: "홍길동"
+    pub query: String,
+}
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct PendingApprovalsArgs {
+    /// 조회 건수(기본 20)
+    #[serde(default)]
+    pub page_size: Option<i64>,
+}
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct AttendanceMonthArgs {
+    /// 조회 월 YYYYMM (예: "202608"). start/end를 주면 그쪽이 우선.
+    #[serde(default)]
+    pub month: String,
+    /// 시작일 YYYYMMDD(선택)
+    #[serde(default)]
+    pub start: String,
+    /// 종료일 YYYYMMDD(선택)
+    #[serde(default)]
+    pub end: String,
 }
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
@@ -454,6 +510,123 @@ impl Amaranth {
         };
         let refs: Vec<&str> = seqs.iter().map(|s| s.as_str()).collect();
         let data = modules::resource::list_reservations(&self.client, &a.start, &a.end, &refs)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        // 기본은 슬림(원본은 74필드 + 회의 안건 전문까지 실려 와 토큰을 크게 먹는다).
+        let out = if a.verbose {
+            data
+        } else {
+            let rows: Vec<serde_json::Value> = data
+                .get("resultList")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().map(modules::resource::slim_reservation).collect())
+                .unwrap_or_default();
+            serde_json::json!({
+                "period": format!("{}~{}", a.start, a.end),
+                "count": rows.len(),
+                "reservations": rows
+            })
+        };
+        Ok(CallToolResult::success(vec![ContentBlock::text(out.to_string())]))
+    }
+
+    #[tool(
+        description = "[아마란스] 회의실 빈 시간을 찾는다. 날짜·필요시간(분)·구간·건물을 주면 자원별 예약을 빼고 가능한 구간만 반환. 예: date=20260805, duration_min=120, window=\"0900-1200\", group=\"본사\""
+    )]
+    async fn find_free_rooms(
+        &self,
+        Parameters(a): Parameters<FindFreeRoomsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let data = modules::resource::find_free_slots(
+            &self.client,
+            &a.date,
+            a.duration_min,
+            &a.window,
+            &a.group,
+        )
+        .await
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
+
+    #[tool(
+        description = "[아마란스] 본인이 예약한 회의실만 조회한다. 예약 수정·취소에 필요한 seqNum/resIdx를 얻는 경로."
+    )]
+    async fn my_reservations(
+        &self,
+        Parameters(a): Parameters<MyReservationsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let data = modules::resource::my_reservations(&self.client, &a.start, &a.end)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
+
+    #[tool(
+        description = "[아마란스] 로그인한 본인 정보(empSeq/부서/이메일 및 근태용 empCd 등)를 반환한다. '내 예약', '내가 결재할 것' 류 필터의 기준값."
+    )]
+    async fn whoami(&self) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let c = &self.client;
+        let info = serde_json::json!({
+            "empSeq": c.emp_seq(),          // UC 계열 사원 ID(결재선·참석자·예약자에 사용)
+            "empName": c.emp_name(),
+            "deptSeq": c.dept_seq(),
+            "compSeq": c.comp_seq(),
+            "groupSeq": c.group_seq(),
+            "email": format!("{}@{}", c.email_addr(), c.email_domain()),
+            "empCd": c.emp_cd(),            // ERP(근태) 계열 — UC seq와 별개 체계
+            "deptCd": c.dept_cd(),
+            "coCd": c.co_cd()
+        });
+        Ok(CallToolResult::success(vec![ContentBlock::text(info.to_string())]))
+    }
+
+    #[tool(
+        description = "[아마란스] 이름·로그인ID·이메일로 사람을 찾아 empSeq/부서/직책/연락처를 반환한다. 결재선 구성·회의 참석자·메일 수신자에 필요한 empSeq의 진입점. 첫 호출은 전사 명부를 조립하느라 수 초 걸리고 이후 30분간 캐시된다."
+    )]
+    async fn find_person(
+        &self,
+        Parameters(a): Parameters<FindPersonArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let data = modules::org::find_person(&self.client, &a.query)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
+
+    #[tool(
+        description = "[아마란스] 미결함 문서를 제목·기안자·대기일수와 함께 요약한다(오래 기다린 순). approval_counts는 건수만 주므로 실제 처리 판단에는 이쪽을 쓸 것."
+    )]
+    async fn pending_approvals(
+        &self,
+        Parameters(a): Parameters<PendingApprovalsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let data = modules::approval::pending_digest(&self.client, a.page_size.unwrap_or(20))
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
+
+    #[tool(
+        description = "[아마란스] 기간(월) 근태 현황을 조회한다. 일자별 출퇴근·근무시간·지각/연차 등 + 기간 합계. month=\"202608\" 또는 start/end(YYYYMMDD)."
+    )]
+    async fn attendance_month(
+        &self,
+        Parameters(a): Parameters<AttendanceMonthArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let (start, end) = if !a.start.trim().is_empty() && !a.end.trim().is_empty() {
+            (a.start.clone(), a.end.clone())
+        } else {
+            modules::attendance::month_range(a.month.trim())
+                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?
+        };
+        let data = modules::attendance::work_time_status(&self.client, &start, &end)
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))

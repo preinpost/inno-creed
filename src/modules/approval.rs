@@ -171,6 +171,71 @@ pub async fn approval_counts(c: &GwClient) -> Result<Value> {
     Ok(Value::Object(counts))
 }
 
+/// 미결함 요약. `approval_counts`가 숫자만 주는 것에 대응 — 실제로 필요한
+/// "무엇을 며칠째 붙들고 있는지"를 낸다. 대기일수는 `ARRIVED_DT`(도착일) 기준.
+pub async fn pending_digest(c: &GwClient, page_size: i64) -> Result<Value> {
+    let listed = list_approvals(c, "pending", 1, page_size, "", "").await?;
+    let docs = listed
+        .get("documents")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let today = {
+        let day = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| ((d.as_secs() as i64) + 9 * 3600) / 86400)
+            .unwrap_or(0);
+        day
+    };
+    // YYYYMMDD → epoch days (days_to_ymd의 역함수, Howard Hinnant days_from_civil).
+    let to_days = |ymd: &str| -> Option<i64> {
+        if ymd.len() < 8 {
+            return None;
+        }
+        let y: i64 = ymd[0..4].parse().ok()?;
+        let m: i64 = ymd[4..6].parse().ok()?;
+        let d: i64 = ymd[6..8].parse().ok()?;
+        let y2 = if m <= 2 { y - 1 } else { y };
+        let era = if y2 >= 0 { y2 } else { y2 - 399 } / 400;
+        let yoe = y2 - era * 400;
+        let mp = if m > 2 { m - 3 } else { m + 9 };
+        let doy = (153 * mp + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        Some(era * 146097 + doe - 719468)
+    };
+
+    let mut out: Vec<Value> = docs
+        .iter()
+        .map(|d| {
+            let arrived = d.get("arrivedDt").and_then(|v| v.as_str()).unwrap_or("");
+            let digits: String = arrived.chars().filter(|c| c.is_ascii_digit()).collect();
+            let waiting = to_days(&digits).map(|a| today - a);
+            json!({
+                "docId": d.get("docId"),
+                "formId": d.get("formId"),
+                "title": d.get("title"),
+                "form": d.get("form"),
+                "drafter": d.get("drafter"),
+                "dept": d.get("dept"),
+                "arrivedDt": arrived,
+                "waitingDays": waiting,
+                "unread": d.get("readYn").and_then(|v| v.as_str()) == Some("N")
+            })
+        })
+        .collect();
+    // 오래 기다린 것부터
+    out.sort_by_key(|d| -d.get("waitingDays").and_then(|v| v.as_i64()).unwrap_or(0));
+
+    Ok(json!({
+        "kind": "pendingDigest",
+        "totalCount": listed.get("totalCount").cloned().unwrap_or(Value::Null),
+        "count": out.len(),
+        "oldestWaitingDays": out.first().and_then(|d| d.get("waitingDays").cloned()),
+        "documents": out
+    }))
+}
+
 /// 날짜 문자열에서 숫자만(YYYY-MM-DD → YYYYMMDD).
 fn digits_only(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_digit()).collect()

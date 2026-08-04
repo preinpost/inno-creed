@@ -5,8 +5,12 @@
 //! ⚠️ 조회 결과는 정확하지만, 여기서 "이 직책 담당자 = 이 문서 결재자"로 단정하지 말 것.
 //! dutyName(직책 텍스트)이 권위 필드이고 dutyCode 숫자 매핑은 불안정 — [[eapproval-server-default-line-untrusted]].
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
+use tokio::task::JoinSet;
 
 use crate::client::GwClient;
 
@@ -76,6 +80,103 @@ pub async fn dept_members(c: &GwClient, dept_id: &str) -> Result<Value> {
         })
         .collect();
     Ok(json!({ "kind": "deptMembers", "deptId": dept_id, "count": members.len(), "members": members }))
+}
+
+/// 부서 순회 동시 호출 수. 서버 부하와 응답시간의 절충(75개 부서 기준).
+const ROSTER_CONCURRENCY: usize = 8;
+
+/// 전사 사원 명부(캐시 30분). `dept_tree`(1콜)로 부서를 뽑고, **인원이 있는 부서마다**
+/// gw102A02를 호출해 합친다. 전사 일괄 조회는 불가능하다 — gw102A02에 회사/사업장 노드
+/// (`orgGubun` c/b)를 주면 **0명**이 오는 것을 실측 확인(2026-08-04). 그래서 부서 단위 순회가
+/// 유일한 경로이고, 비용이 커서 캐시가 필수다.
+pub async fn roster(c: &Arc<GwClient>) -> Result<Vec<Value>> {
+    if let Some(cached) = c.cached_roster() {
+        return Ok(cached);
+    }
+    let tree = dept_tree(c, "0").await?;
+    let depts = tree
+        .get("depts")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // 실제 부서(gubun=="d") + 인원>0 인 곳만. 회사/사업장 노드는 멤버가 안 나온다.
+    let targets: Vec<String> = depts
+        .iter()
+        .filter(|d| d.get("gubun").and_then(|v| v.as_str()) == Some("d"))
+        .filter(|d| d.get("userCount").and_then(|v| v.as_i64()).unwrap_or(0) > 0)
+        .filter_map(|d| d.get("deptId").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+
+    let spawn = |set: &mut JoinSet<Result<Value>>, dept_id: String| {
+        let cc = Arc::clone(c);
+        set.spawn(async move { dept_members(&cc, &dept_id).await });
+    };
+
+    let mut set: JoinSet<Result<Value>> = JoinSet::new();
+    let mut queue = targets.into_iter();
+    for _ in 0..ROSTER_CONCURRENCY {
+        match queue.next() {
+            Some(id) => spawn(&mut set, id),
+            None => break,
+        }
+    }
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut people: Vec<Value> = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        // 개별 부서 실패는 건너뛴다(권한 없는 부서 등) — 명부 전체를 실패시키지 않는다.
+        if let Ok(Ok(v)) = joined {
+            if let Some(members) = v.get("members").and_then(|m| m.as_array()) {
+                for m in members {
+                    let key = m.get("empSeq").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    if !key.is_empty() && seen.insert(key) {
+                        people.push(m.clone());
+                    }
+                }
+            }
+        }
+        if let Some(id) = queue.next() {
+            spawn(&mut set, id);
+        }
+    }
+
+    c.set_roster(people.clone());
+    Ok(people)
+}
+
+/// 이름·로그인ID·이메일로 사람 찾기. 결재선/참석자/수신자에 필요한 `empSeq`를 얻는 진입점.
+/// 매칭은 부분일치(대소문자 무시)이고, **완전일치를 앞에 정렬**한다.
+/// ⚠️ 서버측 인물검색 API는 쓰지 않는다 — gw102A02의 `searchText`는 **서버가 무시**하고
+/// (부서 인원 17명이 검색어와 무관하게 그대로 반환), `/ab/ab099A23`은 JSON이 아닌 응답을
+/// 준다. 둘 다 2026-08-04 실측. 그래서 명부를 받아 클라이언트에서 거른다.
+pub async fn find_person(c: &Arc<GwClient>, query: &str) -> Result<Value> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Err(anyhow!("검색어가 비어 있습니다"));
+    }
+    let people = roster(c).await?;
+    let field = |m: &Value, k: &str| m.get(k).and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+
+    let mut hits: Vec<Value> = people
+        .iter()
+        .filter(|m| {
+            field(m, "name").contains(&q)
+                || field(m, "loginId").contains(&q)
+                || field(m, "email").contains(&q)
+        })
+        .cloned()
+        .collect();
+    // 이름 완전일치 우선 → 동명이인이 있어도 의도한 사람이 먼저 온다.
+    hits.sort_by_key(|m| if field(m, "name") == q { 0 } else { 1 });
+
+    Ok(json!({
+        "kind": "findPerson",
+        "query": query,
+        "count": hits.len(),
+        "rosterSize": people.len(),
+        "people": hits
+    }))
 }
 
 /// 필드를 문자열로(number/string 혼용 흡수).

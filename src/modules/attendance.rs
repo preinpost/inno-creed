@@ -76,6 +76,104 @@ pub async fn punch_and_verify(c: &GwClient, attend_fg: &str) -> Result<Value> {
     }))
 }
 
+/// 기간 근태 현황 — `/human/openapi/worktime/status/getWorkTimeStatusList`(읽기).
+/// `judgeTimeManagement` 계열에는 월별 API가 없고 이 openapi 경로가 담당한다(10 문서 실측).
+/// `start`/`end`=YYYYMMDD. 1행=1일이지만 **누락일이 있다**(마감 전인 오늘 등) → 날짜는
+/// 행 순서가 아니라 `atDt`로 볼 것.
+pub async fn work_time_status(c: &GwClient, start: &str, end: &str) -> Result<Value> {
+    let body = json!({
+        "coCd": c.co_cd(),
+        "startDate": start,
+        "endDate": end,
+        "empCdList": [c.emp_cd()]
+    });
+    let d = c
+        .call("/human/openapi/worktime/status/getWorkTimeStatusList", &body)
+        .await?;
+    let rows = d.as_array().cloned().unwrap_or_default();
+
+    let s = |r: &Value, k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let n = |r: &Value, k: &str| r.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+    // 출퇴근은 HHmm 4자리로 온다(getTodayComeLeaveInfo의 12자리와 형식이 다름).
+    let hm = |t: String| {
+        if t.len() == 4 {
+            format!("{}:{}", &t[0..2], &t[2..4])
+        } else {
+            t
+        }
+    };
+
+    let mut days: Vec<Value> = Vec::new();
+    let (mut work_days, mut total_work, mut total_over, mut late, mut absent) = (0, 0, 0, 0, 0);
+    for r in &rows {
+        let result = s(r, "attresultNm");
+        let holi = s(r, "holiFg") == "1";
+        let basic = n(r, "basicworkTm");
+        let over = n(r, "overworkTm");
+        match result.as_str() {
+            "지각" => late += 1,
+            "결근" => absent += 1,
+            _ => {}
+        }
+        if holi && basic > 0 {
+            work_days += 1;
+            total_work += basic;
+            total_over += over;
+        }
+        days.push(json!({
+            "date": s(r, "atDt"),
+            "dayType": s(r, "holiNm"),          // 근로일/주휴/무휴
+            "result": result,                    // 정상근무/지각/조퇴/결근/휴일
+            "come": hm(s(r, "comeTm")),
+            "leave": hm(s(r, "leaveTm")),
+            "workMin": basic,
+            "overtimeMin": over,
+            "reason": r.get("atNm").cloned().unwrap_or(Value::Null)  // 연차 등
+        }));
+    }
+    days.sort_by(|a, b| a["date"].as_str().cmp(&b["date"].as_str()));
+
+    Ok(json!({
+        "kind": "attendancePeriod",
+        "period": format!("{start}~{end}"),
+        "rowCount": rows.len(),
+        "summary": {
+            "workDays": work_days,
+            "totalWorkMin": total_work,
+            "totalWorkHours": format!("{}h{:02}m", total_work / 60, total_work % 60),
+            "overtimeMin": total_over,
+            "lateCount": late,
+            "absentCount": absent
+        },
+        "days": days
+    }))
+}
+
+/// `YYYYMM` → (해당 월 1일, 말일) YYYYMMDD.
+pub fn month_range(yyyymm: &str) -> Result<(String, String)> {
+    if yyyymm.len() != 6 || !yyyymm.chars().all(|c| c.is_ascii_digit()) {
+        anyhow::bail!("month는 YYYYMM 6자리여야 합니다: '{yyyymm}'");
+    }
+    let y: i64 = yyyymm[0..4].parse()?;
+    let m: i64 = yyyymm[4..6].parse()?;
+    if !(1..=12).contains(&m) {
+        anyhow::bail!("월 범위 오류: '{yyyymm}'");
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let last = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => {
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+    };
+    Ok((format!("{yyyymm}01"), format!("{yyyymm}{last:02}")))
+}
+
 /// 오늘(KST) YYYYMMDD. 근태 workDt는 로컬(KST) 기준이라 UTC에 +9h 보정 후 날짜 산출.
 pub fn today_kst() -> String {
     let secs = std::time::SystemTime::now()

@@ -13,6 +13,17 @@
 | `rs121A11` | 예약 삭제(휴지통) | `delete_reservation` |
 | `rs121A12` | 예약 수정 | `update_reservation` |
 
+### 파생 도구 (새 API 없이 조합)
+
+| 도구 | 기반 | 내용 |
+|---|---|---|
+| `find_free_rooms` | A01+A05 | 자원별 예약을 빼고 `duration_min` 이상 빈 구간만 반환. 종일·다일 예약은 해당일 전체 점유 처리 |
+| `my_reservations` | A01+A05 | `empSeq`==본인 필터 + 슬림화. **수정/취소에 필요한 `seqNum`/`resIdx`를 얻는 정규 경로** |
+
+- **건물 그룹**(`group`): `""`(전체) / `"본사"`→`attrSeq=1` / `"구로"`→`attrSeq=3`. 한 회사의 자원종류 구분이지 별도 시스템이 아니다.
+- **`list_reservations`는 기본 슬림 응답**(`resSeq/resName/seqNum/resIdx/start/end/title/owner/ownerEmpSeq/attendees/allDay`). 원본 74필드는 회의 안건 전문(`descText`)까지 실려 오므로 `verbose:true`일 때만 그대로 준다.
+- 시각은 도구 경계에서 **ISO(`2026-08-04T10:00`)로 정규화**. 서버 원본은 `resStartDate`(`202608041000`)와 `startDate`(`"2026-08-04 10:00:00"`)가 혼재하고 `endDate`는 아예 없다.
+
 ### 자원 ID (resSeq) — 실측
 
 | 회의실 | resSeq |
@@ -333,6 +344,42 @@ body: { deptSeq, userSe:"USER|AT", compSeq, bizSeq(=compSeq), empSeq, groupSeq, 
 
 - **쓰기(상신/승인/반려) 미구현**: 실 결재 발생. 상세의 `btnList`·`outProcessInfo`에 실마리만 확보.
 
+## 근태 — `/human/*`
+
+| API | 용도 | 메서드 래퍼 |
+|---|---|---|
+| `common/judgeTimeManagement/getTodayComeLeaveInfo` | 오늘 출퇴근 조회 | `get_attendance_today` |
+| `common/judgeTimeManagement/getJudgeTimeManagement` | **출퇴근 punch(쓰기)** | `clock_in`/`clock_out` |
+| `openapi/worktime/status/getWorkTimeStatusList` | **기간(월) 근태 현황** | `attendance_month` |
+
+### 기간 근태 현황 (getWorkTimeStatusList)
+
+```json
+{"coCd":"1000","startDate":"20260701","endDate":"20260804","empCdList":["11097"]}
+```
+
+- 응답 = 배열, **1행 = 1일**(74필드). 핵심: `atDt` / `attresultCd`·`attresultNm` / `comeTm`·`leaveTm` / `basicworkTm`·`overworkTm`·`standardworkTm`(분) / `holiFg`·`holiNm` / `atNm`(연차 등 사유).
+- `attresultCd`: `9101`=지각 `9102`=조퇴 `9103`=결근 `9104`=정상근무 `9301`=휴일.
+- ⚠️ **`comeTm`/`leaveTm`이 `HHmm` 4자리**다 — 같은 근태 도메인인 `getTodayComeLeaveInfo`의 12자리(`YYYYMMDDHHmm`)와 형식이 다르다.
+- ⚠️ **누락일이 있다**(마감 전인 당일 등). 요청 35일 → 29행 실측. 날짜는 행 순서가 아니라 `atDt`로 인덱싱할 것.
+- ⚠️ 연차 사용일은 `comeTm`/`leaveTm`이 비었는데 `basicworkTm`=480(인정근무). **출퇴근 기록 유무로 근무일을 판정하지 말 것** — `attresultNm`/`atNm`을 같이 봐야 한다.
+- `judgeTimeManagement` 계열에는 월별 API가 **없다**. 이 openapi 경로가 담당(2026-08-04 실측).
+
+## 조직 — `/gw/APIHandler/gw102*`
+
+| API | 용도 | 메서드 래퍼 |
+|---|---|---|
+| `gw102A01` | 부서 트리 | `org_chart` |
+| `gw102A02` | 부서별 사원 목록 | (내부) |
+| — | 이름/ID/이메일로 사람 찾기 | `find_person` |
+
+- `find_person`은 **전사 명부를 조립해 클라이언트에서 거른다**(30분 캐시). 실측 75개 부서 중 인원 있는 곳만 동시 8개로 조회, 첫 호출 ~1.1초 / 이후 ~2ms, 명부 326명.
+- ⚠️ **서버측 인물 검색은 존재하지 않는다**(2026-08-04 실측):
+  - `gw102A02`의 `searchText`는 **서버가 조용히 무시** — 검색어와 무관하게 부서 인원 전원(17명)을 그대로 반환.
+  - `/ab/ab099A23`(주소록 검색)은 JSON이 아닌 응답을 반환해 사용 불가.
+- ⚠️ 전사 일괄 조회 불가 — `gw102A02`에 회사/사업장 노드(`orgGubun` `c`/`b`)를 주면 **0명**. 부서(`d`) 단위 순회가 유일.
+- 명부 326명 vs 루트 노드 `childUserCnt` 353 — 차이는 미해소. 부서에 소속되지 않은 인원이 있을 수 있으므로 **"명부에 없음"을 "재직하지 않음"으로 단정하지 말 것**.
+
 ## 세션 정보 (내부) — `gw050A02`
 
 도구가 아니라 **내부 lazy 부트스트랩**. 세션 값이 필요할 때 `ensure_session()`이 호출하고 **10분 TTL 캐시**.
@@ -358,7 +405,12 @@ body: a10Domain=https://gw.innogrid.com        # 유일 파라미터
 
 - **전자결재(`/eap/*`) 읽기 3종 구현 완료**(`list_approvals`/`read_approval`/`approval_counts`). 쓰기(상신/승인/반려)는 미조사(실 결재 부작용).
 - **메신저(대화방)**: gw API 미노출 — 별도 제품(웹 통합알림 `event02A01`도 MAIL/BOARD/HPD만, 메신저 이벤트 없음). 자동화하려면 메신저 서비스 별도 리버싱 필요.
-- 메일 상세 본문·첨부는 구현 완료(read_mail/download_mail_attachment). 메일 검색 미구현.
+- 메일 상세 본문·첨부는 구현 완료(read_mail/download_mail_attachment).
+- **메일·결재 검색 — 차단됨**(2026-08-04). 검색 API의 파라미터명을 못 구했다. 근거와 재시도 방법은 `.claude-workspace/analyze/10-endpoint-discovery-js-bundle.md` §③:
+  - 메인 포털 JS 번들(익명 접근 가능)에 `mail003A01`·`eap105A04`가 **없다** — 메일/결재 본체는 `/mail2/`·`/ea/` 별도 SPA이고 그 번들은 Bearer·쿠키 둘 다 **401**.
+  - 파라미터명 추정(`searchText`/`searchWord`/`sDocTitle`/`keyword` 등 8종) 전부 실패. **서버가 모르는 키를 조용히 버려서** 200 OK가 오지만 결과는 불변 → 추측으로는 못 맞춘다.
+  - 남은 경로: 브라우저에서 검색창 1회 조작 후 요청 body 캡처.
 - 게시판: 읽기(목록/상세/검색/날짜필터/첨부 목록·다운로드) 구현 완료. **미구현** — 쓰기(글/댓글 등록), 특정 게시판별 목록(`ViewBoardArtList`의 "게시판 코드" 라이브 캡처 필요).
-- **근태 출퇴근 punch API는 실측 캡처 완료**(`/human/common/judgeTimeManagement/getJudgeTimeManagement`, `attendFg:"4"`=퇴근; 상세는 `.claude-workspace/approval-analysis/06`) — 세션에 empCd/deptCd/coCd도 확보됨. 단 **아직 MCP 도구로 미구현**(실제 출/퇴근 타이밍 부작용 때문).
+- 근태: punch(`clock_in`/`clock_out`)·오늘 조회·**기간 조회(`attendance_month`)** 구현 완료. 미조사 — 연차 잔여(`/human/hrd0620/0hr00001` 등 경로만 확보), 근태 신청/승인.
+- **회의실 정원(capacity) — 없는 것으로 판단**. `rs121A01` 응답에 없고, 자원 관련 필드 전수(`resSeq/resName/resStatus/resStartDate/…`)에도 정원 계열이 없으며, 번들 전체에 `"…인원…"` 문자열 0건. `rs121A02`(자원 상세 추정)로 확정 가능하나 A02~A04는 **등록·수정(쓰기)일 수 있어** 공용 자원 부작용 위험 → 맹목 호출 금지.
 - 일정 확장 item(schCalendar/schAlarm/schMyMemo/schDisclosure/schPlace/schReservation 등)은 key만 확보, 값 구조 미실측.

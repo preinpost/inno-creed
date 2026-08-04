@@ -17,6 +17,10 @@ const SESSION_TTL: Duration = Duration::from_secs(600);
 /// 진실의 출처 — TTL 만료 시 자동 재조회하므로 캘린더 추가/삭제도 10분 내 반영된다.
 const CALENDAR_TTL: Duration = Duration::from_secs(600);
 
+/// 전사 사원 명부 캐시 TTL(30분). 명부 조립은 부서 수만큼 gw102A02를 호출해야 해서 비싸다
+/// (실측 75개 부서). 인사이동이 분 단위로 바뀌지 않으므로 캘린더보다 긴 TTL을 쓴다.
+const ROSTER_TTL: Duration = Duration::from_secs(1800);
+
 /// application/x-www-form-urlencoded 바디 인코딩(reqwest default-features=false라 `.form()` 미제공).
 fn form_urlencode(params: &[(&str, &str)]) -> String {
     fn enc(s: &str) -> String {
@@ -108,6 +112,13 @@ struct CalendarCache {
     fetched_at: Option<Instant>,
 }
 
+/// 전사 사원 명부 캐시. 조립(부서 전수 순회)은 `modules::org`가 한다.
+#[derive(Default)]
+struct RosterCache {
+    list: Vec<serde_json::Value>,
+    fetched_at: Option<Instant>,
+}
+
 pub struct GwClient {
     /// 크레덴셜은 lazy 로드/캐시. 시작 시 취득 성공하면 Some로 seed, 실패면 None으로 시작(서버는 뜬다).
     /// 미로드 상태에서 도구 호출 시 브라우저 쿠키에서 재취득 시도 → 실패하면 로그인 안내를 반환.
@@ -116,6 +127,7 @@ pub struct GwClient {
     base: String,
     session: RwLock<SessionCache>,
     calendars: RwLock<CalendarCache>,
+    roster: RwLock<RosterCache>,
 }
 
 impl GwClient {
@@ -126,6 +138,24 @@ impl GwClient {
             base: "https://gw.innogrid.com".to_string(),
             session: RwLock::new(SessionCache::default()),
             calendars: RwLock::new(CalendarCache::default()),
+            roster: RwLock::new(RosterCache::default()),
+        }
+    }
+
+    /// 유효한(TTL 내) 사원 명부 캐시. 없거나 만료면 None → 호출부가 부서 순회로 재조립한다.
+    pub fn cached_roster(&self) -> Option<Vec<serde_json::Value>> {
+        let cache = self.roster.read().ok()?;
+        cache
+            .fetched_at
+            .is_some_and(|t| t.elapsed() < ROSTER_TTL)
+            .then(|| cache.list.clone())
+    }
+
+    /// 조립한 사원 명부를 캐시에 넣는다.
+    pub fn set_roster(&self, list: Vec<serde_json::Value>) {
+        if let Ok(mut cache) = self.roster.write() {
+            cache.list = list;
+            cache.fetched_at = Some(Instant::now());
         }
     }
 
