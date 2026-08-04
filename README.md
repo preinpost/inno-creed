@@ -103,6 +103,8 @@
 
 ## 설치
 
+> 📖 **처음이거나 남에게 공유한다면 → [단계별 설치 가이드 `docs/INSTALL.md`](docs/INSTALL.md)** (OS별 절차 · Gatekeeper/SmartScreen 우회 · 문제 해결 포함). 아래는 요약입니다.
+
 ### 프리빌트 바이너리 (권장)
 
 [**릴리즈**](https://github.com/zilhak/inno-creed/releases/latest)에서 OS에 맞는 바이너리를 내려받으세요.
