@@ -1,0 +1,364 @@
+# API 레퍼런스 (확정)
+
+> 모든 호출: `POST https://gw.innogrid.com{path}`, 헤더 4종 + Content-Type, body JSON(달리 표기 없으면). 응답은 [응답 봉투](architecture.md#6-응답-봉투). `companyInfo`는 공통 주입.
+
+## 자원(회의실 예약) — `/schres/rs121*`
+
+| API | 용도 | 메서드 래퍼 |
+|---|---|---|
+| `rs121A01` | 자원(회의실) 목록 | `list_resources` |
+| `rs121A05` | 예약 현황 조회(기간·자원) | `list_reservations` |
+| `rs121A06` | 예약 등록 | `create_reservation` |
+| `rs121A10` | 예약 상세 조회 | `get_reservation` |
+| `rs121A11` | 예약 삭제(휴지통) | `delete_reservation` |
+| `rs121A12` | 예약 수정 | `update_reservation` |
+
+### 자원 ID (resSeq) — 실측
+
+| 회의실 | resSeq |
+|---|---|
+| 회의실 A-1 | 45 |
+| 회의실 A-2 | 46 |
+| 회의실 B | 47 |
+| 회의실 C | 48 |
+| Meeting RM.3 | 57 |
+
+### 날짜 포맷
+
+- 등록/수정 `startDate`/`endDate`: `YYYYMMDDHHmm` (예: `202608071100`)
+- 조회 기간 `startDate`/`endDate`(rs121A05): `YYYYMMDD`
+
+### 예약 식별 키
+
+한 예약은 `(resSeq, seqNum, resIdx)` 3-튜플로 식별된다.
+
+- `resSeq`: 자원 ID(회의실).
+- `seqNum`: 예약 시퀀스(number).
+- `resIdx`: 반복/인스턴스 인덱스.
+
+### ⚠️ 시간 변경 시 재발급 (핵심 함정)
+
+`rs121A12`로 **시간(startDate/endDate)을 바꾸면 예약이 재발급**되어 `seqNum`과 `resIdx`가 **둘 다 새 값으로 바뀐다.** (이름/내용만 바꾸면 `seqNum` 유지.)
+
+- 응답 `resultData`에 **새 `seqNum`(number)** 과 **새 `resIdx`** 가 담겨 온다:
+  ```json
+  {"successTf":true,"resIdx":3,"resSeq":"57","seqNum":71044}
+  ```
+- **`resIdx`는 JSON NUMBER 로 온다**(문자열 `"3"` 아님). 파싱 시 String/Number 양쪽을 처리해야 한다 — `.as_str()`만 쓰면 None → 옛 값 fallback → 다음 read-back이 `(새 seqNum, 옛 resIdx)` 불일치로 **에러 9208**. (`src/mcp.rs`의 `json_idx` 헬퍼가 이를 흡수.)
+- 재발급마다 `resIdx`가 1→2→3…으로 증가.
+
+> 따라서 수정 후에는 **응답에서 받은 새 seqNum/resIdx로** read-back 해야 한다.
+> **자원 수정은 재발급(seqNum/resIdx 변경), 일정 수정은 in-place(schSeq 유지)** — 대비해서 기억할 것.
+
+### 삭제 파라미터 (rs121A11)
+
+- `statusCode: "CA"`, `deleteRangeCode: "UO"`.
+- `resSeqList[]`에 상세조회(rs121A10) 스냅샷 필드(reqText/startDate/endDate/createDate/resName 등) 포함.
+- 삭제=휴지통 이동.
+
+## 일정(캘린더) — `/schres/sc111*`
+
+| API | 용도 | 메서드 래퍼 |
+|---|---|---|
+| `sc111A02` | 캘린더 목록 | `list_calendars` |
+| `sc111A03` | 일정 이벤트 조회(기간·캘린더) | `list_events` |
+| `sc111A05` | 일정 등록 **및 수정**(공용) | `create_event` / `update_event` |
+| `sc111A06` | 일정 삭제(소프트, 30일 휴지통) | `delete_event` |
+
+- 개인 캘린더(등록 기본 대상)는 `sc111A02` 결과에서 `calType:"E"` + `empSeq==본인` 으로 판별. 날짜 `YYYYMMDDHHmm`.
+- **`calRwGbn` ≠ `insertRwGbn`**(실증): 공용 캘린더는 `calRwGbn:"r"`(캘린더 자체는 읽기전용)이지만 `insertRwGbn:"w"` 라 **일정 등록은 된다**. 등록 가능 판정은 `insertRwGbn` 기준.
+- **공용 캘린더 등록 실증 완료**: `mcalSeq:1147`(부서 공용, `calType:"M"`)에 등록 → 재조회 시 해당 공용 캘린더에 그대로 반영(개인 캘린더로 흘러가지 않음), `createSeq`=본인이라 본인이 삭제 가능. no-op 아님.
+- 조회 `sc111A03`: `calList[]`(대상 캘린더)로 서버사이드 필터. 이벤트 식별 = `schSeq`(=`schmSeq`). 소유자 = `createSeq`.
+
+### 등록 (sc111A05, 신규)
+
+- `schSeq`/`schmSeq` **빈 문자열이면 신규(insert)**. 전체 필드(schTitle/startDate/endDate/mcalSeq/schPartEmpList 등) 포함.
+- 응답: `{"schSeq":"89328","schmSeq":"89328"}`.
+
+### ⚠️ 수정 (sc111A05, itemList diff) — 등록과 payload 구조가 완전히 다름
+
+**같은 API(sc111A05)지만 수정은 전혀 다른 형태**다. `schSeq` 채우고 전체 필드를 보내면 **신규 INSERT로 처리됨**(함정). 수정은 반드시:
+
+```json
+{
+  "companyInfo": {...},
+  "schSeq": "89515", "schmSeq": "89515",
+  "schGbnCode": "10",
+  "rangeCode": "UO",                          // ← 수정 표식(필수)
+  "itemList": [ ...변경 항목만 diff... ],
+  "groupSeq": "...", "empSeq": "<본인 empSeq>",
+  "alarmOnModify": false,
+  "repeatType": "10", "alarm_yn": "N", "videoYn": "N",
+  "videoTimeZone": "Asia/Seoul", "mailSend": "N", "langCode": "kr"
+}
+```
+
+- **schSeq 유지(in-place)** — 자원과 달리 재발급 없음. 응답 `{"schSeq":"89515","schmSeq":"89515"}` 그대로.
+- 수정 시 서버가 알림 발송 여부를 물음(UI). MCP는 `mailSend:"N"`으로 미발송.
+
+#### itemList item 형식 (실측 확정)
+
+각 항목은 `{"item":"<key>", ...값}`. **item명과 값 필드명이 다를 수 있음**(주의):
+
+| item | 값 필드 | 형태 |
+|---|---|---|
+| `schTitle` | `schTitle` | `{"item":"schTitle","schTitle":"새제목"}` |
+| `schContents` | **`contents`** | `{"item":"schContents","contents":"새내용"}` ← item≠값키 |
+| `schDate` | `schDate`(객체) | `{"item":"schDate","schDate":{"startDate":"..","endDate":"..","allDay":"N","lunar":"N","lunarDate":""}}` |
+
+- 시간 변경 객체 필드명은 **`allDay`/`lunar`**(등록 body의 `alldayYn`/`lunarYn`과 다름).
+- 폼이 변경 여부와 무관하게 **항상 포함**하는 item: `videoYn`, `schParticipants`(add/update/removeSchPartEmpList), `mailSend`.
+- **전체 item key 목록**(프론트 번들 chunk 20 실측 — 향후 확장 근거): `schCalendar`(캘린더 이동) · `schTitle` · `schDate` · `schAlarm` · `schContents` · `schMyMemo`(비밀메모) · `schParticipants` · `schDisclosure`(공개범위) · `schAddress` · `schPlace`(장소) · `schReservation`(자원예약) · `schAttachFile`(첨부) · `schRelatedWork`(유관업무) · `videoYn` · `mailSend`.
+
+### 삭제 (sc111A06)
+
+- ⚠️ **`companyInfo` 없이** 호출: `{"mcalSeq","schmSeq","schSeq","rangeCode":"","langCode":"kr"}`.
+- 소프트 삭제(30일 휴지통 보관 후 영구삭제). 반복일정은 `rangeCode`로 범위 지정.
+
+### 소유권 (수정/삭제)
+
+- 이벤트 `createSeq == 본인 empSeq`일 때만 MCP가 실행. 아니면 명시적 에러.
+
+## 메일 — `/mail/mail0*`
+
+| API | 용도 | 래퍼 |
+|---|---|---|
+| `mail000A01` | 메일함(폴더) 목록 | `list_mailboxes` |
+| `mail003A01` | 메일 목록 조회 | `list_mails` / `list_inbox` |
+| `mail014A01` → `mail014A04` | 메일 발송(2단계, 첨부 지원) | `send_mail` |
+| `mail014A06` | 발송 첨부 업로드(multipart `file[]`) | `send_mail(attachments)` |
+| `mail002A01` | 메일 상세 읽기(본문·헤더·첨부목록) | `read_mail` |
+| `mail014A08` → `/ecm/ecm001A03` | 첨부 다운로드(2단계) | `download_mail_attachment` |
+| `mail002A05` | 메일 삭제(휴지통) | `delete_mails` |
+
+- 특이점: 메일 API는 body에 **`mainApiCode`**(예 `"mail003A01"`)를 명시해 라우팅(다른 모듈은 URL만). 메일 식별자 = `muid`.
+- 메일함 mboxSeq 실측: INBOX `26986` / SENT `26989` / DRAFTS `26992` / TRASH `26995` / SPAM `26998`.
+
+### 메일 목록 (mail003A01)
+
+- body에 `mainApiCode:"mail003A01"` 필요(누락 시 실패).
+- `pageSize`를 `TotalRecordCount` 이상으로 주면 **1회 호출로 전량 조회**(상한 없음).
+- 정렬 `sort:"rfc822date"`, `sortType:"desc"`.
+
+### 메일 발송 (mail014A01 → A04) — 실측·실증
+
+**2단계**: `mail014A01`(작성폼 초기화, 컨텍스트 확보) → `mail014A04`(multipart 발송).
+
+- `mail014A04`는 `multipart/form-data`. 헤더 서명 + **body 내 `authToken`**(형식 `loginId|groupSeq|empSeq|secret` — 헤더 authToken 앞에 loginId가 추가된 형태)을 함께 요구.
+- 발송에 필요한 값은 **전부 A01 응답에서 동적 취득**(하드코딩 없음):
+
+  | A04 FormData 필드 | 출처 |
+  |---|---|
+  | `from`, `email` | A01 `email` (순수 이메일, **표시형 아님**) |
+  | `fromName` | 사용자명(세션) |
+  | `to` | 수신자(표시형 `"이름 <email>"` 또는 이메일) |
+  | `fileDir` | A01 **`filedir`**(소문자) |
+  | `sessionKey`, `externalSendLimit`, `bigFileDay` | A01 동명 |
+  | `insideDomainArray` | A01 동명(null이면 `"[]"`) |
+  | `neobizaddr`/`neobizIntedAddr`/`neobizOrg` | A01 `groupMailOption.groupMail{Addr,IntedAddr,Org}` |
+  | `mail_kind` | `"me"`(내게쓰기) |
+  | `muid` | `"0"`(신규) |
+  | 그 외 | `immediately:"false"`, `toBeDeleted:"false"`, `bigFileCnt:"0"` 등 실측 고정 |
+
+- **응답은 표준 봉투로 감싸짐**: `{"resultCode":0,"resultData":{"result":true,"muid":..,"resultMessage":"SUCCESS"}}` — 성공 판정은 `resultData.result`(최상위 `result` 아님).
+- 본인 앞 발송 실증(받은메일함 도착 확인).
+
+### 메일 상세 읽기 (mail002A01) → `read_mail`
+
+```
+POST /mail/mail002A01   body(JSON): { uid: <muid> }
+→ resultData.mime.body.{html,plain}   본문
+  resultData.mime.fileList[] : { originalFileName, fileExtsn, fileSize, fileSn }  첨부
+  resultData.decodeMime : { subject, from, to, date, email }  헤더(엔티티 인코딩됨 &lt;&gt;)
+```
+
+- 도구는 본문을 **평문화**해서 반환(HTML은 `html_to_text`, plain 우선). ⚠️ **렌더링하지 않으므로 외부 이미지(추적 픽셀)를 자동 fetch하지 않음** — 외부 리소스가 있으면 `remoteResourceCount`로 개수만 경고. (보안: 열람 유출 방지)
+- 첨부는 메타데이터(name/ext/`fileSizeApprox`/fileSn/isImage)만 반환. `fileSn`은 **호출마다 바뀌는 세션 토큰** → read 직후 다운로드에 사용.
+- ⚠️ `fileList[].fileSize`는 원본 바이트가 아니라 **MIME 본문(base64+줄바꿈) 크기**라 실제보다 ~33% 큼 → 도구는 `fileSizeApprox`(≈ ×3/4)로 근사해 반환. **정확한 크기는 `download_mail_attachment`의 `bytes`**. (게시판 `ecm001A04`의 fileSize는 원본 그대로라 이 보정 불필요)
+- ⚠️ 조회수/읽음처리: UI는 별도 `mail002A15`(seen)를 호출한다. `mail002A01` 단독은 읽음 부작용이 없는 것으로 관측(미확정).
+
+### 메일 첨부 다운로드 (mail014A08 → ecm001A03) → `download_mail_attachment`
+
+**2단계**: `mail014A08`(fileSn→다운로드 fileId 변환) → `/ecm/ecm001A03`(바이트).
+
+```
+1) POST /mail/mail014A08  (x-www-form-urlencoded)
+   moduleGbn=MAIL & authKeyMap={"email","muid","empSeq"} & fileSn=<read_mail의 fileSn>
+   → resultData.list[0].fileId  (256자 다운로드 토큰)
+2) POST /ecm/ecm001A03  (x-www-form-urlencoded, 응답=바이너리)
+   moduleGbn=MAIL & authKeyMap={"muid","email","empSeq"} & fileSn=<fileId> & condition=99
+   → 파일 바이트(Content-Disposition에 원본 파일명)
+```
+
+- **게시판 첨부와 동일한 ECM 다운로드 엔드포인트**(`/ecm/ecm001A03`) — `moduleGbn`만 `MAIL`, authKeyMap이 mail용(muid/email/empSeq)으로 다름. (번들의 `ecmapi/*.do`는 여전히 무관·404)
+- `email` = 수신함 소유자(본인) = `ensure_session`의 `emailAdd@emailDomain`.
+- ⚠️ 바이트를 파일로 **저장만** 한다(열거나 실행하지 않음) → 악성 첨부도 격리 후 정적분석에 안전. 이미지 첨부는 저장 후 그대로 이미지로 판독 가능(실측: PNG 왕복 무손상).
+
+### 메일 발송 시 첨부 (mail014A06 업로드) → `send_mail(attachments)`
+
+`send_mail`에 로컬 파일 경로(`attachments`)를 주면 **2단계**로 첨부 발송:
+
+```
+1) POST /mail/mail014A06  (multipart/form-data)
+   파일마다 field 이름 file[] 로 append (번들 실측: forEach(f => form.append("file[]", f)))
+   → resultData.list[] : { fileId(발송용 토큰), originalFileName, fileExtsn, fileSize, filePath, moduleGbn:"MAIL" }
+2) POST /mail/mail014A04  (기존 발송 + 아래 필드 채움)
+   uidAuthList = JSON배열[ { fileName, fileSize:"N Bytes", fileExtsn, title, fileClass:"icon_<ext>",
+                            fileId, filePath, noConvertFileSize:<int>, moduleGbn:"MAIL", id:<idx>, ... } ]
+   bigFileCnt  = 첨부 개수
+```
+
+- 실증(MCP 왕복): 임시 PNG/TXT를 `attachments`로 자기 앞 발송 → `read_mail`에 첨부 2개 도착 → `download_mail_attachment`로 되받아 **원본과 바이트 동일**.
+
+### 메일 삭제 (mail002A05)
+
+- `{"uids":"muid,muid","mailKey":"","boxName":""}` — `uids`=콤마구분 muid(다건).
+- 삭제=휴지통 이동. ⚠️ **이동 시 `muid` 재부여** → 이후 추적은 재조회 필요.
+
+## 게시판 — `/board/APIHandler/*` (읽기 전용)
+
+헤더 서명만으로 완결(`companyInfo` 불필요). 표준 응답봉투.
+
+### 목록 (ViewBoardNewAndNoticeArtList) → `list_notices`
+
+```
+POST /board/APIHandler/ViewBoardNewAndNoticeArtList
+body(JSON): { page, pageSize, sort:"write_date", sortType:"desc",
+              menuCode:"UFA", pageCode:"UFA1000", moduleCode:"UF",
+              noticeYn:"Y", apiName:"ViewBoardNewAndNoticeArtList",
+              use_list_art_content:"Y",   # 본문 프리뷰 포함
+              searchTitle/searchNick/searchDesc/... : "" }  # 검색 필터(빈값=전체)
+→ resultData.articleList[] : { art_seq_no, art_title, cat_title(게시판명), cat_seq_no(게시판id),
+                               mbr_nick(작성자), dept_name, write_date, read_cnt, file_cnt,
+                               art_read_yn, is_new_yn, uid(첨부 fileIds), art_content(프리뷰) }, totalCnt
+```
+
+**필터(실측):**
+- **검색** `search`+`field`: field="title"→searchTitle, "content"→searchDesc, "author"→searchNick, 그 외/빈값→searchTotal(통합). ✅ 동작.
+- **날짜** `searchStartDate`/`searchEndDate`: **반드시 `YYYYMMDD`(구분자 없음)**. 대시(`2026-07-31`)를 넣으면 `resultCode:500 시스템 오류` → `modules/board.rs`가 입력을 숫자만 남겨 정규화. ✅ 동작(범위 밖 글 제외 확인).
+- **게시판별** `searchBoard`: ❌ **이 엔드포인트(전 게시판 공지 집계)에선 무시됨** — cat_seq_no(492/502)를 넣어도 필터 안 됨(0건도 아니고 전체 반환). 특정 게시판 목록은 `ViewBoardArtList`가 별도로 있으나 cat_seq_no가 아닌 미상의 "게시판 코드"를 요구("게시판 코드가 없습니다") → 라이브 캡처 필요, 미구현. 현재는 출력 `boardId`로 클라이언트단 구분만.
+
+### 상세 (ViewPost) → `read_notice`
+
+```
+POST /board/APIHandler/ViewPost
+body(JSON): { art_seq_no, menuCode:"UFA", pageCode:"UFA1000", moduleCode:"UF",
+              adminPage:"N", externalYn:"N", presentPassword:"", isPrint:"N" }
+→ resultData.art       : 게시글(art_content = 본문 HTML), read_cnt는 number
+  resultData.board     : 게시판 메타(cat_title = 게시판명; art.cat_title은 null)
+  resultData.remarkList: 댓글
+```
+
+- ⚠️ **ViewPost 호출 시 조회수(read_cnt) 증가** — 순수 조회가 아니라 실제 "열람" 처리.
+- `art_content`는 인라인 스타일 포함 HTML(수십 KB) → `modules/board.rs`가 태그 제거·엔티티 디코드로 평문화해서 반환.
+- 필드 타입 혼용 주의: `read_cnt`가 목록에선 문자열, 상세에선 정수 → `json_str`로 흡수.
+
+### 첨부 목록 (ecm001A04) → `list_attachments`
+
+```
+POST /ecm/ecm001A04           # ⚠️ .do 없음, /ecmapi 아님 (번들 상수 ecmapi/*.do는 별개 컴포넌트용)
+Content-Type: application/x-www-form-urlencoded
+body: moduleGbn=BOARD
+      authKeyMap={"empSeq":<본인>,"cat_seq_no":"U","art_seq_no":<글번호>,
+                  "survey_no":"","reply_seq_no":"","fileIds":<attachmentUid>}
+      fileSn=0  condition=99
+→ resultData.list[] : { fileId, originalFileName, fileExtsn, fileSize, linkedFilePath(저장경로) }
+```
+
+### 첨부 다운로드 (ecm001A03) → `download_attachment`
+
+```
+POST /ecm/ecm001A03           # ecm001A04와 동일 패턴, 응답은 바이너리
+Content-Type: application/x-www-form-urlencoded
+body: 위와 동일 + fileSn=<파일 순번(0-base, 목록 배열 인덱스)>
+→ (성공) 파일 바이트. Content-Disposition에 원본 파일명.
+  (실패) content-type=json 봉투 → 에러 처리.
+```
+
+- **엔드포인트 주의**: 게시판 첨부는 `/ecm/ecm001AXX`(`.do` 없음, `/ecmapi` 없음) 계열. 번들 상수의 `ecmFileDownUrl=/ecm/ecmapi/ecm001A03.do` 등 `.do` 경로는 **다른 파일 컴포넌트용이라 서명 호출 시 404** — 혼동 금지. `ecm001A05`=**삭제**이므로 다운로드로 호출 금지.
+- 다중 첨부: `list_attachments`가 `fileIds`(콤마 구분 uid 전체)로 목록을 받고, `download_attachment`는 `file_sn`(순번)으로 단건 지정.
+
+## 전자결재 — `/eap/*` (읽기 전용)
+
+헤더 서명만으로 완결(목록/상세는 companyInfo 불필요, 카운트만 필요). 표준 봉투. 상세: `.claude-workspace/approval-analysis/07`.
+
+### 함별 목록 → `list_approvals`
+
+수신계열은 `eap105A04`(응답 `resultData.map.{list,totalCount}`), 상신함은 `eap107A04`(응답 `resultData.list.{list,totalCount}`).
+
+```
+POST /eap/eap105A04  (수신계열) | /eap/eap107A04 (상신)
+body(JSON): { eaBoxId, nMenuID=menuNo, menuNo, upperMenuNo=eaBoxId,
+              page, pageSize, sfrDt, stoDt,   # 기간 YYYYMMDD(빈값이면 도구가 최근 ~3개월로 채움)
+              periodPicker, sortField, sortType:"DESC", fDocSts:[], sFormId:["0"],
+              useElasticSearch:true, useElasticSearch_new:true }
+→ list[] item: { DOC_ID, DOC_NO, DOC_TITLE, FORM_NM, FORM_ID, USER_NM(기안자), DEPT_NM,
+                 DOC_STSNM(종결/반려/진행), lineUserName(현재결재자), READYN, REP_DT/ARRIVED_DT/END_DT,
+                 COMMENT_COUNT, FILE_CNT }
+```
+
+**함 → (eaBoxId, menuNo, periodPicker, API)** (실측):
+
+| box_name | 함 | eaBoxId | menuNo | period | API |
+|---|---|---|---|---|---|
+| pending | 미결문서 | 1000900 | 1001000 | ARRIVED_DT | eap105A04 |
+| approved | 기결문서 | 1000900 | 1001100 | ACTION_TIME | eap105A04 |
+| approved_ongoing | 기결(진행) | 1000900 | 1001110 | ACTION_TIME | eap105A04 |
+| approved_done | 기결(종결) | 1000900 | 1001120 | ACTION_TIME | eap105A04 |
+| reference | 수신참조 | 1000900 | 1001200 | REP_DT | eap105A04 |
+| enforcement | 시행문서 | 1000900 | 1001400 | REP_DT | eap105A04 |
+| sent | 상신문서 | 1000300 | 1000400 | REP_DT | eap107A04 |
+
+- ⚠️ **빈 기간이면 서버 기본이 좁아 문서를 놓침** → 도구가 최근 ~3개월(오늘−92일~오늘)로 자동 보정.
+
+### 문서 상세 → `read_approval`
+
+```
+POST /eap/eap111A04
+body(JSON): { doc_id, form_id, bindType:"V", setReadYn:"N",   # N=열람 부작용 없음(도구 기본)
+              p_doc_id:0, doc_auth:"0", spDocId:"", commentReqYn:"N", pageCode:"UBA1100", docToken:"" }
+→ resultData: { docTitle, docNo, docStsName, empName, deptName, repDt, attachCnt, lineName(현재결재자),
+                contentsWord(본문 평문), docContents/contents(HTML), user_info[](결재선 처리내역) }
+```
+
+- 도구는 `contentsWord`(평문) 우선, 없으면 `docContents` 태그제거. `user_info[]`는 처리시각/여부(이름 미노출→코드).
+
+### 미처리 카운트 → `approval_counts`
+
+```
+POST /eap/api/getMenuCountInfo   (companyInfo 필요 → ensure_session)
+body: { deptSeq, userSe:"USER|AT", compSeq, bizSeq(=compSeq), empSeq, groupSeq, menuType:"", pageCode:"EapSide" }
+→ resultData: { "<menuNo>": "<count>", ... }  # 도구가 menuNo를 box 라벨로 변환
+```
+
+- **쓰기(상신/승인/반려) 미구현**: 실 결재 발생. 상세의 `btnList`·`outProcessInfo`에 실마리만 확보.
+
+## 세션 정보 (내부) — `gw050A02`
+
+도구가 아니라 **내부 lazy 부트스트랩**. 세션 값이 필요할 때 `ensure_session()`이 호출하고 **10분 TTL 캐시**.
+
+```
+POST /gw/gw050A02
+Content-Type: application/x-www-form-urlencoded
+body: a10Domain=https://gw.innogrid.com        # 유일 파라미터
+→ resultData.sessionInfo.ucUserInfo = { compSeq, deptSeq, empName, emailAdd, emailDomain,
+                                        erpEmpSeq, erpDeptSeq, erpCompSeq, ... }
+```
+
+- Bearer 인증 헤더(4종)만으로 "이미 로그인된 사용자"의 sessionInfo 반환 — 별도 CSRF 토큰 불필요.
+- **한 응답으로 UC 계열(compSeq/deptSeq/email)과 근태/ERP 계열(erpEmpSeq=empCd, erpDeptSeq=deptCd, erpCompSeq=coCd)을 동시 확보** → 이전 `mail000A01`+`sc111A02` 2회 부트스트랩을 대체.
+- 브라우저는 SSO 진입 시 이 응답을 `sessionStorage.userInfo`에 캐시. MCP는 동일 API를 직접 호출.
+
+## 공통 안전 규약
+
+- **소유권 가드**: 자원/일정 mutation은 대상 소유자(`empSeq`/`createSeq`)==본인일 때만 실행, 아니면 명시적 에러.
+- **read-back 검증**: 모든 mutation 직후 재조회로 실제 반영 확인. 서버가 `successTf:true`를 주며 무시(no-op)하는 경우 방어. 자원 시간수정은 새 seqNum/resIdx로, 일정은 유지된 schSeq로 재조회.
+
+## 미조사 (다음 단계)
+
+- **전자결재(`/eap/*`) 읽기 3종 구현 완료**(`list_approvals`/`read_approval`/`approval_counts`). 쓰기(상신/승인/반려)는 미조사(실 결재 부작용).
+- **메신저(대화방)**: gw API 미노출 — 별도 제품(웹 통합알림 `event02A01`도 MAIL/BOARD/HPD만, 메신저 이벤트 없음). 자동화하려면 메신저 서비스 별도 리버싱 필요.
+- 메일 상세 본문·첨부는 구현 완료(read_mail/download_mail_attachment). 메일 검색 미구현.
+- 게시판: 읽기(목록/상세/검색/날짜필터/첨부 목록·다운로드) 구현 완료. **미구현** — 쓰기(글/댓글 등록), 특정 게시판별 목록(`ViewBoardArtList`의 "게시판 코드" 라이브 캡처 필요).
+- **근태 출퇴근 punch API는 실측 캡처 완료**(`/human/common/judgeTimeManagement/getJudgeTimeManagement`, `attendFg:"4"`=퇴근; 상세는 `.claude-workspace/approval-analysis/06`) — 세션에 empCd/deptCd/coCd도 확보됨. 단 **아직 MCP 도구로 미구현**(실제 출/퇴근 타이밍 부작용 때문).
+- 일정 확장 item(schCalendar/schAlarm/schMyMemo/schDisclosure/schPlace/schReservation 등)은 key만 확보, 값 구조 미실측.

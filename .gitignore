@@ -1,0 +1,5 @@
+/target
+/.claude-workspace
+/.playwright-mcp
+**/*.rs.bk
+.DS_Store
