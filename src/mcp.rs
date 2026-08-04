@@ -128,6 +128,25 @@ pub struct PendingApprovalsArgs {
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
+pub struct SearchArgs {
+    /// 검색어
+    pub query: String,
+    /// 범위: ""/"전체" | "메일" | "결재" | "게시판" | "일정" | "자원" | "파일"
+    #[serde(default)]
+    pub scope: String,
+    /// 모듈당 결과 수(기본 10, 최대 50)
+    #[serde(default)]
+    pub limit: Option<i64>,
+    /// 시작일 YYYY-MM-DD(선택)
+    #[serde(default)]
+    pub from: String,
+    /// 종료일 YYYY-MM-DD(선택)
+    #[serde(default)]
+    pub to: String,
+}
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
 pub struct AttendanceMonthArgs {
     /// 조회 월 YYYYMM (예: "202608"). start/end를 주면 그쪽이 우선.
     #[serde(default)]
@@ -609,6 +628,27 @@ impl Amaranth {
         let data = modules::approval::pending_digest(&self.client, a.page_size.unwrap_or(20))
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
+
+    #[tool(
+        description = "[아마란스] 메일·전자결재·게시판·일정·자원·파일을 한 번에 검색한다. 결과에 후속 조회용 ID 포함(메일 muid→read_mail, 결재 docId+formId→read_approval, 게시판 artSeqNo→read_notice). scope 미지정 시 전체 모듈."
+    )]
+    async fn search(
+        &self,
+        Parameters(a): Parameters<SearchArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let data = modules::search::search(
+            &self.client,
+            &a.query,
+            &a.scope,
+            a.limit.unwrap_or(10),
+            &a.from,
+            &a.to,
+        )
+        .await
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 

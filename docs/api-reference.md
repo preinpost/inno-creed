@@ -344,6 +344,39 @@ body: { deptSeq, userSe:"USER|AT", compSeq, bizSeq(=compSeq), empSeq, groupSeq, 
 
 - **쓰기(상신/승인/반려) 미구현**: 실 결재 발생. 상세의 `btnList`·`outProcessInfo`에 실마리만 확보.
 
+## 통합검색 — `/gw/APIHandler/gw018A02`
+
+| API | 용도 | 메서드 래퍼 |
+|---|---|---|
+| `gw018A02` | 메일·결재·게시판·일정·자원·파일 통합검색 | `search` |
+
+```json
+{"header":{},
+ "body":{"tsearchKeyword":"연차","tsearchSubKeyword":"","boardType":"6",
+         "fromDate":"2026-08-01","toDate":"2026-08-31","dateDiv":"",
+         "detailSearchYn":"N","selectDiv":"S","orderDiv":"B","syncTime":"N",
+         "pageIndex":1,"hrSearchYn":"N","hrEmpSeq":"","pageSize":10,"webMobileDiv":"W"}}
+```
+
+응답: `{totalcount, resultgrid:[...]}`.
+
+### boardType = 모듈 구분자 (실측 확정)
+
+| boardType | 모듈 | 후속 조회용 ID |
+|---|---|---|
+| `0` | 메일 | `muid` → `read_mail` |
+| `3` | 일정 | `schSeq` |
+| `6` | 전자결재 | `docId`+`formId` → `read_approval` |
+| `9` | 게시판 | `artSeqNo` → `read_notice` |
+| `10` | 파일(첨부) | `fileId` |
+| `13` | 자원(예약) | `resSeq` |
+
+- **모듈별 전용 검색 API는 없다.** `mail003A01`·`eap105A04`에 검색 파라미터를 넣어도 서버가 버린다. 이 API가 유일한 검색 경로.
+- ⚠️ 검색어 필드는 **`tsearchKeyword`**. `searchText`/`keyword` 등은 조용히 무시된다.
+- ⚠️ **`dateDiv`는 반드시 빈 문자열**. `"A"`/`"R"`/`"W"` 등 값을 넣으면 날짜 필터가 **통째로 무효화**된다(에러 없음). 날짜 형식은 `2026-08-01`·`20260801` 둘 다 가능.
+- ⚠️ 결재의 `deptNm`/`userNm`/`formNm`은 **다국어 객체**(`{kr,en,jp,cn}`)로 온다. 문자열로 단정하면 빈 값.
+- 검증(결재/"연차"): 무필터 6 → 2020년 0 → 2026-08 2 → 2026년 6.
+
 ## 근태 — `/human/*`
 
 | API | 용도 | 메서드 래퍼 |
@@ -406,10 +439,7 @@ body: a10Domain=https://gw.innogrid.com        # 유일 파라미터
 - **전자결재(`/eap/*`) 읽기 3종 구현 완료**(`list_approvals`/`read_approval`/`approval_counts`). 쓰기(상신/승인/반려)는 미조사(실 결재 부작용).
 - **메신저(대화방)**: gw API 미노출 — 별도 제품(웹 통합알림 `event02A01`도 MAIL/BOARD/HPD만, 메신저 이벤트 없음). 자동화하려면 메신저 서비스 별도 리버싱 필요.
 - 메일 상세 본문·첨부는 구현 완료(read_mail/download_mail_attachment).
-- **메일·결재 검색 — 차단됨**(2026-08-04). 검색 API의 파라미터명을 못 구했다. 근거와 재시도 방법은 `.claude-workspace/analyze/10-endpoint-discovery-js-bundle.md` §③:
-  - 메인 포털 JS 번들(익명 접근 가능)에 `mail003A01`·`eap105A04`가 **없다** — 메일/결재 본체는 `/mail2/`·`/ea/` 별도 SPA이고 그 번들은 Bearer·쿠키 둘 다 **401**.
-  - 파라미터명 추정(`searchText`/`searchWord`/`sDocTitle`/`keyword` 등 8종) 전부 실패. **서버가 모르는 키를 조용히 버려서** 200 OK가 오지만 결과는 불변 → 추측으로는 못 맞춘다.
-  - 남은 경로: 브라우저에서 검색창 1회 조작 후 요청 body 캡처.
+- **메일·결재 검색 구현 완료** — 통합검색 `gw018A02`(위 섹션). 모듈별 전용 검색 API는 존재하지 않는다.
 - 게시판: 읽기(목록/상세/검색/날짜필터/첨부 목록·다운로드) 구현 완료. **미구현** — 쓰기(글/댓글 등록), 특정 게시판별 목록(`ViewBoardArtList`의 "게시판 코드" 라이브 캡처 필요).
 - 근태: punch(`clock_in`/`clock_out`)·오늘 조회·**기간 조회(`attendance_month`)** 구현 완료. 미조사 — 연차 잔여(`/human/hrd0620/0hr00001` 등 경로만 확보), 근태 신청/승인.
 - **회의실 정원(capacity) — 없는 것으로 판단**. `rs121A01` 응답에 없고, 자원 관련 필드 전수(`resSeq/resName/resStatus/resStartDate/…`)에도 정원 계열이 없으며, 번들 전체에 `"…인원…"` 문자열 0건. `rs121A02`(자원 상세 추정)로 확정 가능하나 A02~A04는 **등록·수정(쓰기)일 수 있어** 공용 자원 부작용 위험 → 맹목 호출 금지.

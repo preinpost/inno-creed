@@ -8,4 +8,5 @@ pub mod calendar;
 pub mod mail;
 pub mod org;
 pub mod resource;
+pub mod search;
 pub mod submission_guide;
