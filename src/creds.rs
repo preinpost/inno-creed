@@ -172,12 +172,12 @@ fn decrypt_chrome(enc: &[u8], key: &[u8]) -> Result<String> {
     if enc.len() < 3 + 12 + 16 {
         bail!("gcm cookie too short");
     }
-    let nonce = &enc[3..15];
+    let nonce = Nonce::try_from(&enc[3..15]).map_err(|_| anyhow::anyhow!("GCM nonce 길이 오류"))?;
     let ct = &enc[15..];
     let cipher =
         Aes256Gcm::new_from_slice(key).map_err(|_| anyhow::anyhow!("GCM 키 길이 오류(32B 필요)"))?;
     let pt = cipher
-        .decrypt(Nonce::from_slice(nonce), ct)
+        .decrypt(&nonce, ct)
         .map_err(|_| anyhow::anyhow!("AES-GCM 복호화 실패(app-bound 암호화면 미지원)"))?;
     Ok(strip_domain_hash(pt))
 }
@@ -249,7 +249,7 @@ fn dpapi_unprotect(data: &[u8]) -> Result<Vec<u8>> {
         pb_data: *mut u8,
     }
     #[link(name = "crypt32")]
-    extern "system" {
+    unsafe extern "system" {
         fn CryptUnprotectData(
             p_data_in: *const DataBlob,
             ppsz_desc: *mut *mut u16,
@@ -261,7 +261,7 @@ fn dpapi_unprotect(data: &[u8]) -> Result<Vec<u8>> {
         ) -> i32;
     }
     #[link(name = "kernel32")]
-    extern "system" {
+    unsafe extern "system" {
         fn LocalFree(h_mem: *mut c_void) -> *mut c_void;
     }
 
