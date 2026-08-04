@@ -75,38 +75,64 @@
 
 ## 요구 사항
 
-- **macOS** — 크레덴셜을 macOS 키체인 + 브라우저 쿠키 DB에서 가져옵니다. (다른 OS는 미지원)
-- **Rust 1.85+** (edition 2024)
-- **Chrome 또는 Firefox로 `https://gw.innogrid.com` 에 로그인된 상태** — 로그인 세션이 없으면 도구 호출 시 로그인 안내를 반환합니다.
+- **macOS · Linux · Windows** — Chrome/Firefox 쿠키에서 크레덴셜(`authToken`/`signKey`)을 가져옵니다. 쿠키 복호화 방식이 OS마다 달라 각각에 맞게 처리합니다.
+- **Chrome 또는 Firefox로 `https://gw.innogrid.com` 에 로그인된 상태** — 세션이 없으면 도구 호출 시 로그인 안내를 반환합니다.
 
-## 빌드 · 설치
+### 플랫폼별 크레덴셜 지원
+
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| **Chrome** | 키체인 `Chrome Safe Storage` → AES-128-CBC | `"peanuts"`(키링 미사용) → AES-128-CBC | Local State DPAPI 키 → AES-256-GCM |
+| **Firefox** | ✅ (쿠키 평문) | ✅ | ✅ |
+
+- **Firefox가 가장 확실한 크로스플랫폼 경로**입니다(쿠키가 평문이라 OS 무관). Chrome이 안 잡히면 Firefox로 `gw.innogrid.com`에 로그인하면 됩니다.
+- Chrome 예외: **Linux에서 gnome-keyring/kwallet을 쓰는 경우**(`v11` 쿠키)와 **Windows 최신 Chrome의 app-bound 암호화**(`v20`)는 아직 미지원 → 이 경우 Firefox로 폴백됩니다.
+
+## 설치
+
+### 프리빌트 바이너리 (권장)
+
+[**릴리즈**](https://github.com/zilhak/inno-creed/releases/latest)에서 OS에 맞는 바이너리를 내려받으세요.
+
+| OS / arch | 파일 |
+|---|---|
+| macOS (Apple Silicon) | `inno-creed-macos-arm64` |
+| Linux x86_64 | `inno-creed-linux-x86_64` |
+| Linux aarch64 | `inno-creed-linux-aarch64` |
+| Windows x86_64 | `inno-creed-windows-x86_64.exe` |
+
+macOS·Linux는 내려받은 뒤 실행 권한을 부여하세요: `chmod +x inno-creed-*`. (macOS에서 Gatekeeper가 막으면 `xattr -d com.apple.quarantine <파일>`.)
+
+### 소스 빌드
 
 ```sh
-git clone <이 저장소> && cd inno-creed
-cargo build --release
+git clone https://github.com/zilhak/inno-creed && cd inno-creed
+cargo build --release   # → target/release/inno-creed (Windows는 inno-creed.exe)
 ```
 
-Claude Code에 MCP 서버로 등록:
+**Rust 1.96+** (edition 2024, 번들 `libsqlite3-sys`가 최신 toolchain 요구)와 **C 컴파일러**(rusqlite 번들 SQLite 컴파일용)가 필요합니다.
+
+### MCP 등록
+
+Claude Code:
 
 ```sh
-claude mcp add inno-creed -- $(pwd)/target/release/inno-creed
+claude mcp add inno-creed -- /절대경로/inno-creed        # Windows는 ...\inno-creed.exe
 ```
 
-등록 후 Claude Code를 재시작하면 도구가 노출됩니다. 다른 MCP 클라이언트라면 stdio 전송으로 바이너리를 직접 실행하도록 설정하면 됩니다.
+다른 MCP 클라이언트는 stdio 전송으로 바이너리를 직접 실행하도록 설정하면 됩니다.
 
 ```json
 {
   "mcpServers": {
     "inno-creed": {
-      "command": "/절대경로/inno-creed/target/release/inno-creed"
+      "command": "/절대경로/inno-creed"
     }
   }
 }
 ```
 
-첫 실행 시 macOS 키체인(`Chrome Safe Storage`) 접근 허용 프롬프트가 한 번 뜹니다. 허용해야 쿠키를 복호화할 수 있습니다.
-
-> 프리빌트 릴리즈 바이너리는 아직 제공하지 않습니다. 기능이 더 안정되면 OS별로 빌드해 릴리즈에 올릴 예정입니다.
+등록 후 클라이언트를 재시작하면 도구가 노출됩니다. macOS에서 Chrome 크레덴셜을 쓸 경우 첫 실행 시 키체인(`Chrome Safe Storage`) 접근 허용 프롬프트가 한 번 뜹니다.
 
 ## 동작 방식
 

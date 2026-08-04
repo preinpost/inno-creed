@@ -25,24 +25,31 @@ inno-creed (Rust MCP 서버, 헤드리스)
 - 서버 시작 순서: `creds::from_chrome()`(크레덴셜) → stdio MCP 서브. [세션 정보](#4-authtoken-구조--세션-정보-lazy-취득--ttl-캐시)는 첫 도구 호출 시 `ensure_session()`이 lazy 취득(선취득 없음).
 - 소스: `src/{creds,sign,client,mcp}.rs`, `src/modules/{resource,calendar,mail}.rs`.
 
-## 3. 크레덴셜 취득 (Chrome, macOS)
+## 3. 크레덴셜 취득 (Chrome / Firefox · macOS·Linux·Windows)
 
-Chrome이 `gw.innogrid.com`에 저장한 쿠키에서 두 값을 뽑는다:
+Chrome 또는 Firefox가 `gw.innogrid.com`에 저장한 쿠키에서 두 값을 뽑는다(`src/creds.rs`):
 
 | 쿠키 | 용도 | 후처리 |
 |---|---|---|
 | `BIZCUBE_AT` | `authToken` | URL 디코드(`%7C`→`|`) |
 | `BIZCUBE_HK` | `signKey` | 그대로 |
 
-복호화 절차 (Python으로 실증 → Rust 포팅, `src/creds.rs`):
+**Chrome** — 쿠키 DB(SQLite, `WHERE host_key='gw.innogrid.com'`)의 `encrypted_value`를 OS별로 복호화:
 
-1. macOS 키체인에서 저장소 키: `security find-generic-password -w -s "Chrome Safe Storage" -a "Chrome"`
-2. 키 유도: `PBKDF2-HMAC-SHA1(password, salt="saltysalt", iterations=1003, dkLen=16)`
-3. `~/Library/.../Chrome/Default/Cookies`(SQLite) 를 temp로 복사 → `WHERE host_key='gw.innogrid.com'` 조회
-4. `encrypted_value`에서 **앞 3바이트(`v10` 등 버전 프리픽스) 제거** → `AES-128-CBC(key, iv=0x20×16)` 복호(Pkcs7 언패딩)
+| OS | 복호화 키 | 알고리즘 |
+|---|---|---|
+| macOS | 키체인 `security find-generic-password -s "Chrome Safe Storage"` → PBKDF2-HMAC-SHA1(1003, 16B) | AES-128-CBC(iv=0x20×16, Pkcs7) |
+| Linux | 고정 비번 `"peanuts"`(키링 미사용) → PBKDF2-HMAC-SHA1(1, 16B) | AES-128-CBC(iv=0x20×16, Pkcs7) |
+| Windows | `Local State`의 `os_crypt.encrypted_key`(base64, `DPAPI` 접두) → `CryptUnprotectData`로 32B 키 | AES-256-GCM(nonce 12B + tag 16B) |
 
+- 공통: `encrypted_value` 앞 **3바이트 버전 프리픽스(`v10`) 제거**. 최신 Chrome은 평문 앞에 **32B 도메인 SHA256**을 붙이므로 UTF-8 파싱 실패 시 앞 32B 제거.
+- 쿠키 DB 경로: 신버전 `Default/Network/Cookies` → 구버전 `Default/Cookies` 폴백. User Data 루트는 OS별(mac `~/Library/…`, linux `~/.config/google-chrome`, win `%LOCALAPPDATA%\Google\Chrome\User Data`).
+
+**Firefox** — `cookies.sqlite`(`moz_cookies`)가 **평문**이라 복호화 없이 읽는다. 프로필 루트만 OS별(mac `~/Library/…/Firefox/Profiles`, linux `~/.mozilla/firefox`, win `%APPDATA%\Mozilla\Firefox\Profiles`)로 분기, `*.default*` 프로필 우선. Chrome 실패 시 폴백.
+
+- **미지원 예외**: Linux 키링 사용(`v11`) / Windows app-bound(`v20`) 쿠키 → Firefox로 폴백.
 - **만료**: 401 감지 시 쿠키 재복호화로 재취득(만료 주기 미관측 — 열린 질문).
-- 임시 파일(복사한 Cookies DB 등)은 사용 후 삭제.
+- 임시 파일(복사한 쿠키 DB)은 사용 후 삭제.
 
 ## 4. authToken 구조 & 세션 정보 (lazy 취득 + TTL 캐시)
 
