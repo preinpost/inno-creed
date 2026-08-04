@@ -919,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "inno-creed"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "aes",
  "aes-gcm",

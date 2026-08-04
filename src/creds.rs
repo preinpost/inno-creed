@@ -63,8 +63,8 @@ pub fn from_chrome() -> Result<Creds> {
     // 쿠키는 있는데 복호화만 실패 → 키 스킴 불일치(키링/app-bound). "없음"과 구분해 안내.
     if auth_token.is_none() && decrypt_failed {
         bail!(
-            "BIZCUBE 쿠키는 있으나 복호화 실패 — Linux gnome-keyring/kwallet(v11) 또는 Windows app-bound(v20) 쿠키일 수 있습니다. \
-             Firefox로 로그인하거나, 다른 브라우저 프로필을 INNO_CREED_CHROME_COOKIES/INNO_CREED_FIREFOX_COOKIES로 지정하세요."
+            "BIZCUBE 쿠키는 있으나 복호화 실패. Linux 키링(gnome-keyring/kwallet, v11) 사용 시 `secret-tool`(libsecret-tools)이 설치돼 있어야 합니다 — `sudo apt install libsecret-tools` 후 재시도. \
+             Windows 최신 app-bound(v20) 쿠키는 미지원. 가장 확실한 방법은 Firefox로 gw.innogrid.com에 로그인하는 것입니다."
         );
     }
     Ok(Creds {
@@ -159,9 +159,33 @@ fn chrome_key() -> Result<Vec<u8>> {
 }
 #[cfg(target_os = "linux")]
 fn chrome_key() -> Result<Vec<u8>> {
-    // 키링(gnome-keyring/kwallet) 미사용 Chrome은 고정 비번 "peanuts", 반복 1회.
-    // 키링 사용(v11 쿠키)이면 이 키로 복호화 실패 → Firefox로 폴백된다.
+    // 1) 키링(gnome-keyring/kwallet)에 저장된 "Chrome Safe Storage" 비밀 시도(v11 쿠키).
+    // 2) 키링 미사용 Chrome은 고정 비번 "peanuts"(v10). 둘 다 PBKDF2 반복 1회.
+    if let Some(secret) = linux_keyring_secret() {
+        return Ok(pbkdf2_key(secret.as_bytes(), 1, 16));
+    }
     Ok(pbkdf2_key(b"peanuts", 1, 16))
+}
+
+/// Secret Service(gnome-keyring/kwallet)에서 Chrome/Chromium 저장소 키 조회. `secret-tool`(libsecret-tools) 필요.
+/// 없거나 조회 실패면 None → 호출부가 "peanuts"로 폴백.
+#[cfg(target_os = "linux")]
+fn linux_keyring_secret() -> Option<String> {
+    for app in ["chrome", "chromium"] {
+        let out = std::process::Command::new("secret-tool")
+            .args(["lookup", "application", app])
+            .output()
+            .ok()?; // secret-tool 자체가 없으면 None(→ peanuts 폴백)
+        if out.status.success() && !out.stdout.is_empty() {
+            let s = String::from_utf8_lossy(&out.stdout)
+                .trim_end_matches(['\n', '\r'])
+                .to_string();
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    None
 }
 #[cfg(target_os = "windows")]
 fn chrome_key() -> Result<Vec<u8>> {

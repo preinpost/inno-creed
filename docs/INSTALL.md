@@ -104,7 +104,10 @@ claude mcp add inno-creed -- /절대경로/inno-creed          # Windows: ...\in
   # flatpak Firefox
   export INNO_CREED_FIREFOX_DIR=~/.var/app/org.mozilla.firefox/.mozilla/firefox
   ```
-- **Chrome은 있는데 "복호화 실패"라고 나옴** → Linux gnome-keyring/kwallet(`v11`) 또는 Windows 최신 Chrome app-bound(`v20`) 암호화입니다. → **Firefox로 로그인**하는 게 가장 확실합니다.
+- **Chrome은 있는데 "복호화 실패"라고 나옴** →
+  - **Linux 키링(gnome-keyring/kwallet, `v11`)**: v1.0.2+는 키링에서 키를 자동 조회하지만 **`secret-tool`이 필요**합니다. 없으면 설치 후 재시도: `sudo apt install libsecret-tools` (데스크톱 세션에서 키링이 잠금 해제돼 있어야 함).
+  - **Windows 최신 Chrome app-bound(`v20`)**: 아직 미지원.
+  - 그래도 안 되면 **Firefox로 로그인**이 가장 확실합니다.
 
 ### 경로 오버라이드 환경변수
 
