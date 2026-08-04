@@ -26,9 +26,12 @@ pub fn from_browser() -> Result<Creds> {
     };
     bail!(
         "크레덴셜 취득 실패 — gw.innogrid.com에 로그인된 브라우저가 필요합니다.\n\
-         · Chrome: {chrome_err}\n\
-         · Firefox: {firefox_err}\n\
-         해결: Chrome 또는 Firefox로 https://gw.innogrid.com 에 로그인한 뒤 다시 실행하세요."
+         [Chrome] {chrome_err:#}\n\
+         [Firefox] {firefox_err:#}\n\
+         해결: Chrome 또는 Firefox로 https://gw.innogrid.com 에 로그인한 뒤 다시 실행하세요.\n\
+         비표준 경로(snap/flatpak/커스텀 프로필)는 환경변수로 지정할 수 있습니다:\n\
+         · INNO_CREED_FIREFOX_COOKIES = <cookies.sqlite 경로>   (또는 INNO_CREED_FIREFOX_DIR = <프로필 디렉토리>)\n\
+         · INNO_CREED_CHROME_COOKIES  = <Cookies DB 경로>       (또는 INNO_CREED_CHROME_USER_DATA = <User Data 루트>)"
     )
 }
 
@@ -36,30 +39,50 @@ pub fn from_browser() -> Result<Creds> {
 
 /// Chrome 쿠키에서 크레덴셜 취득(OS별 복호화).
 pub fn from_chrome() -> Result<Creds> {
-    let cookies = read_chrome_cookies().context("Chrome 쿠키 DB 읽기 실패")?;
-    let key = chrome_key().context("Chrome 복호화 키 취득 실패")?;
+    let db = chrome_cookie_db()?;
+    let cookies = read_chrome_cookies(&db)
+        .with_context(|| format!("Chrome 쿠키 DB 읽기 실패: {}", db.display()))?;
+    let key = chrome_key().context("Chrome 복호화 키 취득 실패(mac 키체인/win DPAPI)")?;
 
     let mut auth_token = None;
     let mut sign_key = None;
+    let mut decrypt_failed = false; // 대상 쿠키는 있으나 복호화만 실패한 경우 구분
     for (name, enc) in cookies {
-        let val = match decrypt_chrome(&enc, &key) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        match name.as_str() {
-            "BIZCUBE_AT" => auth_token = Some(url_decode(&val)),
-            "BIZCUBE_HK" => sign_key = Some(val),
-            _ => {}
+        if name != "BIZCUBE_AT" && name != "BIZCUBE_HK" {
+            continue;
+        }
+        match decrypt_chrome(&enc, &key) {
+            Ok(val) => match name.as_str() {
+                "BIZCUBE_AT" => auth_token = Some(url_decode(&val)),
+                "BIZCUBE_HK" => sign_key = Some(val),
+                _ => {}
+            },
+            Err(_) => decrypt_failed = true,
         }
     }
+    // 쿠키는 있는데 복호화만 실패 → 키 스킴 불일치(키링/app-bound). "없음"과 구분해 안내.
+    if auth_token.is_none() && decrypt_failed {
+        bail!(
+            "BIZCUBE 쿠키는 있으나 복호화 실패 — Linux gnome-keyring/kwallet(v11) 또는 Windows app-bound(v20) 쿠키일 수 있습니다. \
+             Firefox로 로그인하거나, 다른 브라우저 프로필을 INNO_CREED_CHROME_COOKIES/INNO_CREED_FIREFOX_COOKIES로 지정하세요."
+        );
+    }
     Ok(Creds {
-        auth_token: auth_token.context("BIZCUBE_AT 쿠키 없음(로그인 필요)")?,
+        auth_token: auth_token.with_context(|| {
+            format!(
+                "쿠키 DB({})는 읽었으나 BIZCUBE_AT 없음 — 이 프로필로 gw.innogrid.com 로그인이 안 돼 있습니다(다른 프로필이면 INNO_CREED_CHROME_COOKIES로 지정).",
+                db.display()
+            )
+        })?,
         sign_key: sign_key.context("BIZCUBE_HK 쿠키 없음(로그인 필요)")?,
     })
 }
 
-/// Chrome User Data 루트 디렉토리(OS별).
+/// Chrome User Data 루트 디렉토리(OS별). `INNO_CREED_CHROME_USER_DATA`로 오버라이드 가능.
 fn chrome_user_data_dir() -> Result<PathBuf> {
+    if let Some(p) = env_nonempty("INNO_CREED_CHROME_USER_DATA") {
+        return Ok(PathBuf::from(p));
+    }
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var("HOME")?;
@@ -87,8 +110,12 @@ fn chrome_user_data_dir() -> Result<PathBuf> {
     }
 }
 
-/// 쿠키 DB 경로 — 신버전(Default/Network/Cookies) 우선, 없으면 구버전(Default/Cookies).
+/// 쿠키 DB 경로. `INNO_CREED_CHROME_COOKIES`로 직접 지정 가능. 미지정 시 User Data 루트 아래
+/// 신버전(Default/Network/Cookies) 우선, 없으면 구버전(Default/Cookies).
 fn chrome_cookie_db() -> Result<PathBuf> {
+    if let Some(p) = env_nonempty("INNO_CREED_CHROME_COOKIES") {
+        return Ok(PathBuf::from(p));
+    }
     let root = chrome_user_data_dir()?;
     let net = root.join("Default").join("Network").join("Cookies");
     if net.exists() {
@@ -98,14 +125,18 @@ fn chrome_cookie_db() -> Result<PathBuf> {
     if old.exists() {
         return Ok(old);
     }
-    bail!("Chrome 쿠키 DB를 찾을 수 없음(루트: {})", root.display())
+    bail!(
+        "Chrome 쿠키 DB를 찾지 못함. 확인한 경로:\n      - {}\n      - {}\n    (User Data 루트: {})\n    비표준 위치(snap/flatpak/커스텀 프로필)면 INNO_CREED_CHROME_COOKIES(파일) 또는 INNO_CREED_CHROME_USER_DATA(루트)로 지정하세요.",
+        net.display(),
+        old.display(),
+        root.display()
+    )
 }
 
-fn read_chrome_cookies() -> Result<Vec<(String, Vec<u8>)>> {
-    let db = chrome_cookie_db()?;
+fn read_chrome_cookies(db: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>> {
     // 잠금 회피: 복사본을 읽음.
     let tmp = std::env::temp_dir().join("inno_creed_ck.db");
-    std::fs::copy(&db, &tmp)?;
+    std::fs::copy(db, &tmp)?;
     let conn = rusqlite::Connection::open(&tmp)?;
     let mut stmt =
         conn.prepare("SELECT name, encrypted_value FROM cookies WHERE host_key='gw.innogrid.com'")?;
@@ -297,8 +328,12 @@ fn dpapi_unprotect(data: &[u8]) -> Result<Vec<u8>> {
 
 // ─────────────────────────────── Firefox ───────────────────────────────
 
-/// Firefox 프로필 루트 디렉토리(OS별). 하위에 `*.default*` 프로필들이 있다.
+/// Firefox 프로필 루트 디렉토리(OS별). `INNO_CREED_FIREFOX_DIR`로 오버라이드 가능
+/// (snap `~/snap/firefox/common/.mozilla/firefox`, flatpak 등 비표준 경로 대응).
 fn firefox_profiles_dir() -> Result<PathBuf> {
+    if let Some(p) = env_nonempty("INNO_CREED_FIREFOX_DIR") {
+        return Ok(PathBuf::from(p));
+    }
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var("HOME")?;
@@ -327,27 +362,44 @@ fn firefox_profiles_dir() -> Result<PathBuf> {
 /// Firefox 쿠키에서 크레덴셜 취득. `cookies.sqlite`는 **평문**이라 복호화 불필요.
 /// 프로필 자동 탐색(`*.default*` 우선). Chrome이 없거나 미로그인일 때의 폴백.
 pub fn from_firefox() -> Result<Creds> {
-    let profiles = firefox_profiles_dir()?;
-
-    let mut db_path = None;
-    for entry in std::fs::read_dir(&profiles)
-        .with_context(|| format!("Firefox 프로필 디렉토리 없음: {}", profiles.display()))?
-    {
-        let dir = entry?.path();
-        let ck = dir.join("cookies.sqlite");
-        if ck.exists() {
-            let is_default = dir
-                .file_name()
-                .map(|n| n.to_string_lossy().contains("default"))
-                .unwrap_or(false);
-            if is_default {
-                db_path = Some(ck);
-                break;
-            }
-            db_path.get_or_insert(ck);
+    // 1) cookies.sqlite 직접 지정(최우선) 2) 프로필 디렉토리 스캔.
+    let src = if let Some(p) = env_nonempty("INNO_CREED_FIREFOX_COOKIES") {
+        let pb = PathBuf::from(&p);
+        if !pb.exists() {
+            bail!("INNO_CREED_FIREFOX_COOKIES가 가리키는 파일 없음: {p}");
         }
-    }
-    let src = db_path.context("Firefox cookies.sqlite 없음")?;
+        pb
+    } else {
+        let profiles = firefox_profiles_dir()?;
+        let entries = std::fs::read_dir(&profiles).with_context(|| {
+            format!(
+                "Firefox 프로필 디렉토리 없음: {} — snap이면 ~/snap/firefox/common/.mozilla/firefox, flatpak이면 ~/.var/app/org.mozilla.firefox/.mozilla/firefox. INNO_CREED_FIREFOX_DIR(디렉토리) 또는 INNO_CREED_FIREFOX_COOKIES(파일)로 지정 가능.",
+                profiles.display()
+            )
+        })?;
+        let mut db_path = None;
+        for entry in entries {
+            let dir = entry?.path();
+            let ck = dir.join("cookies.sqlite");
+            if ck.exists() {
+                let is_default = dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().contains("default"))
+                    .unwrap_or(false);
+                if is_default {
+                    db_path = Some(ck);
+                    break;
+                }
+                db_path.get_or_insert(ck);
+            }
+        }
+        db_path.with_context(|| {
+            format!(
+                "Firefox 프로필 디렉토리({})에 cookies.sqlite가 있는 프로필이 없음",
+                profiles.display()
+            )
+        })?
+    };
 
     // 잠금 회피: 복사본을 읽음.
     let tmp = std::env::temp_dir().join("inno_creed_ff.db");
@@ -371,9 +423,19 @@ pub fn from_firefox() -> Result<Creds> {
     let _ = std::fs::remove_file(&tmp);
 
     Ok(Creds {
-        auth_token: auth_token.context("BIZCUBE_AT 쿠키 없음(Firefox 미로그인)")?,
+        auth_token: auth_token.with_context(|| {
+            format!(
+                "Firefox 쿠키({})에 BIZCUBE_AT 없음 — 이 프로필로 gw.innogrid.com 로그인이 안 돼 있습니다.",
+                src.display()
+            )
+        })?,
         sign_key: sign_key.context("BIZCUBE_HK 쿠키 없음(Firefox 미로그인)")?,
     })
+}
+
+/// 환경변수가 설정되어 있고 비어있지 않으면 그 값을 반환.
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
 
 /// authToken은 `%7C`(=`|`)로 URL 인코딩되어 저장됨.

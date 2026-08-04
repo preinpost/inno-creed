@@ -88,6 +88,19 @@
 - **Firefox가 가장 확실한 크로스플랫폼 경로**입니다(쿠키가 평문이라 OS 무관). Chrome이 안 잡히면 Firefox로 `gw.innogrid.com`에 로그인하면 됩니다.
 - Chrome 예외: **Linux에서 gnome-keyring/kwallet을 쓰는 경우**(`v11` 쿠키)와 **Windows 최신 Chrome의 app-bound 암호화**(`v20`)는 아직 미지원 → 이 경우 Firefox로 폴백됩니다.
 
+### 브라우저 경로 오버라이드 (snap/flatpak/커스텀 프로필)
+
+브라우저가 표준 위치에 없으면(예: Ubuntu의 **snap Firefox** → `~/snap/firefox/common/.mozilla/firefox`) 환경변수로 직접 지정합니다:
+
+| 환경변수 | 용도 |
+|---|---|
+| `INNO_CREED_FIREFOX_COOKIES` | Firefox `cookies.sqlite` 파일 경로(직접) |
+| `INNO_CREED_FIREFOX_DIR` | Firefox 프로필 **디렉토리**(스캔) |
+| `INNO_CREED_CHROME_COOKIES` | Chrome `Cookies` DB 파일 경로(직접) |
+| `INNO_CREED_CHROME_USER_DATA` | Chrome `User Data` 루트 |
+
+크레덴셜 취득에 실패하면 에러 메시지에 **Chrome/Firefox 각각 어떤 경로를 확인했는지**가 표시되니, 그 경로를 보고 위 환경변수로 실제 위치를 지정하면 됩니다. (쿠키는 있는데 복호화만 실패하면 키링/app-bound 안내가 함께 나옵니다.)
+
 ## 설치
 
 ### 프리빌트 바이너리 (권장)
