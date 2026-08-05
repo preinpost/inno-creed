@@ -45,6 +45,26 @@ pub async fn cancel_approval(c: &GwClient, doc_id: &str) -> Result<Value> {
     }))
 }
 
+/// 페이로드의 신원 필드를 로그인 사용자 값으로 덮어쓴다(존재하는 키만 교체 — 새 키 추가 안 함).
+/// draftHelp 예시 템플릿에 박힌 타인 신원(empCd/deptCd/coCd/이름)이 그대로 상신되는 것을 방지.
+/// 부서명(deptNm)·직위·직책 등 세션이 모르는 표시문자열은 건드리지 않는다(cosmetic).
+fn overwrite_if_present(v: &mut Value, key: &str, val: &str) {
+    if let Some(obj) = v.as_object_mut() {
+        if obj.contains_key(key) {
+            obj.insert(key.to_string(), Value::String(val.to_string()));
+        }
+    }
+}
+
+fn inject_identity(item: &mut Value, co: &str, dept: &str, emp: &str, name: &str) {
+    for (k, val) in [
+        ("coCd", co), ("deptCd", dept), ("empCd", emp),
+        ("empNm", name), ("empName", name), ("korNm", name),
+    ] {
+        overwrite_if_present(item, k, val);
+    }
+}
+
 /// 문서 상신 — eap110A06. 근태 계열 양식(외근/연차 등) 대상.
 /// - `form_id`: 양식 ID(41 외근/36 연차 …).
 /// - `doc_title`: 문서 제목.
@@ -70,9 +90,19 @@ pub async fn submit_approval(
     let user_id = c.emp_seq();
     let user_nm = c.emp_name();
 
+    // 신원 자동 주입값(ERP 코드 체계 — seq와 별개). hp/bind 페이로드의 신원 필드를 이 값으로 덮어씀.
+    let id_co = c.co_cd().to_string();
+    let id_dept = c.dept_cd().to_string();
+    let id_emp = c.emp_cd().to_string();
+    let id_name = c.emp_name().to_string();
+
     // bindData 검증(유효 JSON이어야 함)
-    let bind_obj: Value = serde_json::from_str(bind_data_json)
+    let mut bind_obj: Value = serde_json::from_str(bind_data_json)
         .map_err(|e| anyhow!("bind_data_json이 유효한 JSON이 아님: {e}"))?;
+    // 신원 자동 주입: bindData ITEMS의 신원 표시필드(empNm 등)를 로그인 사용자 값으로.
+    if let Some(items) = bind_obj.get_mut("ITEMS") {
+        inject_identity(items, &id_co, &id_dept, &id_emp, &id_name);
+    }
     // 이중 인코딩: 최종 wire 값 = JSON.stringify(JSON.stringify(bindObj)).
     let s1 = serde_json::to_string(&bind_obj)?; // {"ITEMS":...}
     let bind_data_field = Value::String(serde_json::to_string(&s1)?); // "{\"ITEMS\":...}"
@@ -88,8 +118,16 @@ pub async fn submit_approval(
     // 근태 양식(HPD0110)은 상신(eap110A06) 전에 신청완료가 이 콜로 HP draft를 먼저 만든다.
     // 이 단계를 건너뛰면 eap110A06 연동이 resultCode 2099(HP_HPD0110)로 실패한다.
     if !hp_application_json.trim().is_empty() {
-        let hp_body: Value = serde_json::from_str(hp_application_json)
+        let mut hp_body: Value = serde_json::from_str(hp_application_json)
             .map_err(|e| anyhow!("hp_application_json이 유효한 JSON이 아님: {e}"))?;
+        // 신원 자동 주입: applicationList/employeeList 각 항목의 coCd/deptCd/empCd/이름을 로그인 사용자 값으로.
+        for key in ["applicationList", "employeeList"] {
+            if let Some(list) = hp_body.get_mut(key).and_then(|v| v.as_array_mut()) {
+                for it in list.iter_mut() {
+                    inject_identity(it, &id_co, &id_dept, &id_emp, &id_name);
+                }
+            }
+        }
         c.call("/human/attendapplication/0hr00011", &hp_body)
             .await
             .map_err(|e| anyhow!("HP 근태신청 저장(0hr00011) 실패: {e}"))?;

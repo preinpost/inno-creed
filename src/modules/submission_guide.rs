@@ -29,7 +29,7 @@ pub fn get_guide(doc_type: &str) -> Result<Value> {
         "source": b.get("source").cloned().unwrap_or(Value::Null),
         "mcpStatus": b.get("mcpStatus").cloned().unwrap_or(Value::Null),
         "guide": guide,
-        "note": "draftHelp = submit_approval 기안 데이터 채우는 법(--help). fixed(고정코드 그대로)·fill(의미별 채울 필드)·hpApplicationExample/bindDataExample(복사 후 fill·identity만 교체). 결재라인은 get_approval_line_schema + save_approval_line로 준비. requiredBody/steps는 아마란스 웹 직접작성용 참고."
+        "note": "draftHelp = submit_approval 기안 데이터 채우는 법(--help). fixed(고정코드 그대로)·fill(의미별 채울 필드)·hpApplicationExample/bindDataExample(복사 후 fill 필드만 교체 — 신원은 submit_approval이 자동 주입). 결재라인은 get_approval_line_schema + save_approval_line로 준비. requiredBody/steps는 아마란스 웹 직접작성용 참고."
     }))
 }
 

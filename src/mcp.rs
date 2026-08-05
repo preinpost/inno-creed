@@ -429,7 +429,7 @@ pub struct SubmitApprovalArgs {
     pub doc_title: String,
     /// 사용할 개인결재라인 ID. 이 라인의 결재자가 결재(3000) 노드로 실림. save_approval_line으로 준비.
     pub line_id: i64,
-    /// HP 근태신청 저장(0hr00011) 요청 body JSON. 근태 양식은 상신 전 이 콜로 HP draft를 먼저 만들어야 함(안 하면 eap110A06가 2099로 실패). ⭐ **채우는 법·양식별 고정코드·복사용 예시는 `get_submission_guide(form_id).draftHelp.hpApplicationExample`**(예: 출장 linkAtCd"2010"/atCd"2101", 외근 종일 atCd"3101"/linkAtCd"3010"). 형식: `{"applicationList":[{coCd,deptCd,empCd,linkAtCd,atCd,atDt,startDt,endDt,startTm,endTm,appDyFg,appDy,appTm,...}],"employeeList":[{empCd,korNm,deptCd,deptNm,divNm}]}`. 빈 문자열이면 이 단계 생략(비근태 양식).
+    /// HP 근태신청 저장(0hr00011) 요청 body JSON. 근태 양식은 상신 전 이 콜로 HP draft를 먼저 만들어야 함(안 하면 eap110A06가 2099로 실패). ⭐ **채우는 법·양식별 고정코드·복사용 예시는 `get_submission_guide(form_id).draftHelp.hpApplicationExample`**(예: 출장 linkAtCd"2010"/atCd"2101", 외근 종일 atCd"3101"/linkAtCd"3010"). 신원 필드(coCd/deptCd/empCd/empNm/korNm)는 **submit_approval이 로그인 사용자 값으로 자동 덮어씀** — 예시값 그대로 둬도 됨. 형식: `{"applicationList":[{...,linkAtCd,atCd,atDt,startDt,endDt,startTm,endTm,appDyFg,appDy,appTm,...}],"employeeList":[{...}]}`. 빈 문자열이면 이 단계 생략(비근태 양식).
     pub hp_application_json: String,
     /// KISS 폼 본문 데이터 JSON 텍스트. `{"ITEMS":{...},"TABLE":{"dbTable1":{...},"dbTable2":{...}}}`. ⭐ **양식별 예시는 `get_submission_guide(form_id).draftHelp.bindDataExample`**. 서버엔 이중인코딩되어 전송됨.
     pub bind_data_json: String,
@@ -1375,7 +1375,7 @@ impl Amaranth {
 
     // 결재라인 스키마(직책 기반, 번들+override 논리 병합). 로컬 데이터라 세션/인증 불필요.
     #[tool(
-        description = "문서 종류별 결재라인 스키마(직책 기반)를 조회한다. 반환된 line[]은 act(결재/합의)+pos(직책)만 담는다 — 각 pos를 org_chart로 담당자(후보)로 해석한 뒤 상신 전 사람 확인 필수. ⛔ 서버 자동 결재선 신뢰 금지. 현재 근태 계열(외근/연차/출장/휴일근무)만 수록. 버전은 출처 위임전결 PDF 날짜, 사용자 override(~/.config/inno-creed/approval_line.json)가 더 최신이면 그쪽 사용."
+        description = "문서 종류별 결재라인 스키마(직책 기반)를 조회한다. 반환된 branches[].line[]은 act(결재/합의)+pos(직책)만 담는다 — 기안자 직급(grade: 팀원/팀장/사업부장·실장·센터장이상)과 출장의 trip(국내/해외)에 맞는 branch를 골라 각 pos를 org_chart로 담당자(후보)로 해석한 뒤, save_approval_line으로 라인 등록 → 그 line_id를 submit_approval에 사용. ⛔ 서버 자동 결재선 신뢰 금지, 상신 전 사람 확인 필수. 현재 근태 계열(외근/연차/출장/휴일근무)만 수록. 버전·출처는 반환 필드(version/source; 현재 위임전결 기준_260801.xlsx), 사용자 override(~/.config/inno-creed/approval_line.json)가 더 최신이면 그쪽 사용."
     )]
     async fn get_approval_line_schema(
         &self,
@@ -1478,7 +1478,7 @@ impl Amaranth {
 
     // ── 전자결재 쓰기(상신/상신취소). ⚠️ 실제 결재 발생 — 테스트는 테스트 결재라인으로. ──
     #[tool(
-        description = "문서를 상신(제출)한다(근태 2-phase: 0hr00011 HP저장 → eap110A06 상신). ⚠️ 실제 결재요청·수신참조 통지가 나감 — 테스트는 반드시 테스트 결재라인으로 하고 끝나면 cancel_approval로 취소. ⭐ **hp_application_json / bind_data_json 을 어떻게 채우는지는 `get_submission_guide(양식명 또는 form_id)` 의 `draftHelp` 를 먼저 조회할 것** — 양식별 고정코드(atCd/linkAtCd 등)·의미별 채울 필드·복사용 실동작 예시(hpApplicationExample/bindDataExample)를 준다(CLI --help 격). 흐름: hp_application_json으로 HP 근태 draft 저장 → approkey 발급 → eap110A03(양식필수 합의자/수신참조 자동해석) → line_id 결재자 병합 → 상신. 성공 시 새 docId 반환."
+        description = "문서를 상신(제출)한다(근태 2-phase: 0hr00011 HP저장 → eap110A06 상신). ⚠️ 실제 결재요청·수신참조 통지가 나감 — 테스트는 반드시 테스트 결재라인으로 하고 끝나면 cancel_approval로 취소. ⭐ **hp_application_json / bind_data_json 을 어떻게 채우는지는 `get_submission_guide(양식명 또는 form_id)` 의 `draftHelp` 를 먼저 조회할 것** — 양식별 고정코드(atCd/linkAtCd 등)·의미별 채울 필드·복사용 실동작 예시(hpApplicationExample/bindDataExample)를 준다(CLI --help 격). 신원 필드(coCd/deptCd/empCd/empNm 등)는 이 도구가 로그인 사용자 값으로 **자동 주입**하므로 예시값을 그대로 둬도 됨. 흐름: hp_application_json으로 HP 근태 draft 저장 → approkey 발급 → eap110A03(양식필수 합의자/수신참조 자동해석) → line_id 결재자 병합 → 상신. 성공 시 새 docId 반환."
     )]
     async fn submit_approval(
         &self,
