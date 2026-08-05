@@ -3,6 +3,9 @@
 //! ⚠️ **실제 결재가 발생**한다(결재요청·수신참조 통지가 나감). 테스트는 반드시 테스트 결재라인으로.
 //!
 //! 상신 흐름(팝업이 하던 일을 재현):
+//!  0) 근태 양식: 0hr00011(검증/스테이징) → **create(진짜 커밋, approLineId에 묶인 대기 HP신청 등록)**.
+//!     ⚠️ create 없이 0hr00011만 하면 eap110A06가 2099로 죽는다(실측). HP↔eap 링크는 명시 키가 아니라
+//!     서버가 user+form의 approState 대기 HP신청을 매칭(appSq/calLinkKey는 eap110A06에 안 실림).
 //!  1) approkey = "ERP_<uuid>" 생성.
 //!  2) eap110A03(appLineId="")로 **양식필수 합의자(kyuljaeResult)+수신참조(m_Refer)** 획득.
 //!  3) read_line(line_id)로 **개인결재라인 결재자** 획득.
@@ -128,9 +131,22 @@ pub async fn submit_approval(
                 }
             }
         }
+        // 1단계: 0hr00011 (검증/스테이징). 응답은 빈 SUCCESS.
         c.call("/human/attendapplication/0hr00011", &hp_body)
             .await
             .map_err(|e| anyhow!("HP 근태신청 저장(0hr00011) 실패: {e}"))?;
+        // 2단계: create (진짜 커밋 — approLineId에 묶인 대기 HP신청 등록, appSq 반환).
+        // ⚠️ 이 단계를 건너뛰면 eap110A06가 2099(HP연동 실패)로 죽는다(실측: 브라우저 신청완료는 0hr00011 후 create를 호출).
+        let create_body = json!({
+            "coCd": "", "appDt": "", "appEmpCd": id_emp, "deptCd": "",
+            "titleDc": doc_title, "approLineId": line_id.to_string(),
+            "calLinkKey": "", "linkKey": "", "approState": "", "fileGroup": 0, "version": "v2",
+            "employeeList": hp_body.get("employeeList").cloned().unwrap_or(json!([])),
+            "applicationList": hp_body.get("applicationList").cloned().unwrap_or(json!([])),
+        });
+        c.call("/human/attendapplication/create", &create_body)
+            .await
+            .map_err(|e| anyhow!("HP 근태신청 커밋(create) 실패: {e}"))?;
     }
 
     // ── 1) eap110A03: 양식필수 합의자 + 수신참조 해석 ─────────────────────────
