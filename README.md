@@ -74,6 +74,7 @@
 | `approval_counts` | 함별 미처리 건수(숫자만 — 내용까지 보려면 `pending_approvals`) |
 | `submit_approval` | 문서 상신 — ⚠️ 실제 결재요청 통지 발송 |
 | `cancel_approval` | 상신취소(임시보관 복귀) |
+| `delete_temp_approval` | 임시보관 문서 삭제 — 근태 양식은 잔여 draft가 있으면 신규 상신이 막힘 |
 | `list_approval_lines` / `read_approval_line` | 개인결재라인 목록 / 결재자 구성 조회 |
 | `save_approval_line` / `delete_approval_line` | 개인결재라인 생성·수정 / 삭제 (상신 아님, 재사용 config) |
 | `get_approval_line_schema` / `list_approval_line_schemas` | 문서 종류별 결재라인 스키마(직책 기반) |
