@@ -188,9 +188,11 @@ claude mcp add inno-creed -- /절대경로/inno-creed        # Windows는 ...\in
 inno-creed (Rust MCP 서버, 헤드리스)
  ├─ creds    Chrome 쿠키 복호화(→ Firefox 폴백) → authToken / signKey
  ├─ sign     wehago-sign(HMAC-SHA256) · transaction-id 생성
+ ├─ util     도메인 무관 순수 함수(날짜 변환 · JSON 필드 추출)
  ├─ client   세션 lazy 취득(10분 TTL 캐시) · 헤더 주입 · POST · 응답 파싱
- ├─ modules  자원 · 일정 · 메일 · 게시판 · 전자결재 · 근태 · 조직 API 래퍼
- └─ mcp      rmcp stdio 서버: 도구 정의 · 소유권 가드 · read-back 검증
+ ├─ modules  자원 · 일정 · 메일 · 게시판 · 전자결재 · 근태 · 조직
+ │           API 래퍼 + 파생 조회 + 소유권 가드 · read-back 검증
+ └─ mcp      rmcp stdio 서버 — tools/(도구 46개, 도메인별) · args/(인자 스키마) · 에러 변환
 ```
 
 크레덴셜만 브라우저에서 빌려오고, 실행은 전부 순수 HTTP입니다. 서명·세션 규격은 [architecture.md](docs/architecture.md)에 정리돼 있습니다.
@@ -198,7 +200,7 @@ inno-creed (Rust MCP 서버, 헤드리스)
 ## 안전 규약
 
 - **응답 성공 ≠ 실제 반영** — 서버는 권한 밖 대상에 대해 `successTf:true`를 주면서 실제로는 무시(silent no-op)합니다. 그래서 모든 mutation은 직후 **재조회(read-back)로 실제 상태를 확인**하고, 반영되지 않았으면 실패로 처리합니다.
-- **소유권 가드** — 쓰기 도구는 대상의 `empSeq`가 본인일 때만 실행하고, 아니면 명시적 에러를 냅니다. 서버도 남의 데이터 수정을 무시하지만, MCP에서 먼저 걸러 원인을 분명히 알려줍니다.
+- **소유권 가드** — 쓰기 도구는 대상의 소유자(예약은 `empSeq`, 일정은 `createSeq`)가 본인일 때만 실행하고, 아니면 명시적 에러를 냅니다. 서버도 남의 데이터 수정을 무시하지만, MCP에서 먼저 걸러 원인을 분명히 알려줍니다. 이 두 규약은 도구 층이 아니라 **각 도메인 모듈의 mutation 함수(`*_and_verify`) 안**에 있어 어떤 호출자도 우회할 수 없습니다.
 - **부작용 있는 도구는 명시** — 근태 punch(`clock_in`/`clock_out`), 상신(`submit_approval`), 게시글 열람(`read_notice`, 조회수 증가)은 실제 기록이 남습니다. 사용자가 명시적으로 지시할 때만 호출하세요.
 - **서버 자동 결재선 불신** — 서버가 채워주는 기본 결재선은 위임전결 규정과 일치하지 않습니다. `get_approval_line_schema`로 직책 기반 스키마를 받고, `org_chart`로 담당자를 해석한 뒤 사람이 확인하고 상신하세요.
 

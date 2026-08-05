@@ -18,14 +18,20 @@ inno-creed (Rust MCP 서버, 헤드리스)
  ├─ sign     wehago-sign(HMAC-SHA256) · transaction-id 생성
  ├─ util     도메인 무관 순수 함수(날짜 days_to_ymd/fmt_ymd · digits_only · JSON 필드 추출 json_str/s)
  ├─ client   GwClient: ensure_session(gw050A02 lazy 취득+10분 TTL 캐시) · 캘린더 목록 캐시(10분 TTL) · 사원 명부 캐시(30분 TTL) · 본인 표시정보 캐시(30분 TTL) · signed()로 헤더 4종 주입 · 전송 · 응답봉투 파싱 · companyInfo 조립
+ ├─ error    도메인 공통 에러 타입 — NotOwner(소유권 위반) · InvalidInput(호출자 인자 오류)
  ├─ modules  resource(자원) · calendar(일정) · mail(메일) · board(게시판) · approval*(전자결재)
- │           org(조직) · attendance(근태) · search(통합검색) · submission_guide — API 래퍼 + 파생 조회
- └─ mcp      rmcp 서버(stdio): tool 정의 · 소유권 가드 · read-back 검증
+ │           org(조직) · attendance(근태) · search(통합검색) · submission_guide
+ │           API 래퍼 + 파생 조회 + **소유권 가드 · read-back 검증**(`*_and_verify`)
+ └─ mcp/     rmcp 서버(stdio)
+    ├─ mod.rs   서버 골격: Amaranth · 라우터 합성(all_tools) · ensure_session · 에러 변환 · instructions
+    ├─ tools/   도구 46개 — 도메인 11개(resource·calendar·mail·board·approval{,_line,_submit,_meta}·org·attendance·search)
+    └─ args/    도구 인자 스키마 — 도메인 8개. ⚠️ doc comment가 그대로 LLM 프롬프트가 된다
 ```
 
 - 구조 근거: MCP는 **실행층**, 크레덴셜만 외부(브라우저)에서 취득. 그래서 헤드리스로 돌아간다.
-- 서버 시작 순서: `creds::from_chrome()`(크레덴셜) → stdio MCP 서브. [세션 정보](#4-authtoken-구조--세션-정보-lazy-취득--ttl-캐시)는 첫 도구 호출 시 `ensure_session()`이 lazy 취득(선취득 없음).
-- 소스: `src/{creds,sign,client,mcp}.rs`, `src/modules/*.rs`.
+- 서버 시작 순서: `creds::from_browser()`(크레덴셜 — Chrome → Firefox 폴백) → stdio MCP 서브. [세션 정보](#4-authtoken-구조--세션-정보-lazy-취득--ttl-캐시)는 첫 도구 호출 시 `ensure_session()`이 lazy 취득(선취득 없음).
+- 소스: `src/{creds,sign,util,client,error}.rs`, `src/modules/*.rs`, `src/mcp/{mod.rs,tools/,args/}`. 빌드 타깃은 `src/main.rs`(MCP 서버)와 `src/bin/probe.rs`(디버그 REPL — 임의 엔드포인트를 서명 호출) 둘.
+- **도구 라우터 합성**: 도메인마다 `#[tool_router(router = <도메인>_router, vis = "pub(crate)")]`로 라우터를 만들고 `Amaranth::all_tools()`가 `ToolRouter`의 `Add`로 합친다. `#[tool_handler(router = Self::all_tools())]`로 경로를 명시한다 — 핸들러는 라우터를 **필드로 갖지 않는다**(매크로가 호출 때마다 표현식을 평가하므로 필드에 담아도 읽히지 않는다).
 - **모듈 함수 시그니처 규약**: 첫 인자는 `c: &GwClient`. 예외는 `org::roster`/`org::find_person` 둘뿐이며 `&Arc<GwClient>`를 받는다 — 부서를 `JoinSet`으로 병렬 순회하는데 `spawn`이 `'static`을 요구하고 `GwClient`는 `RwLock` 보유로 `Clone`이 아니기 때문이다. 대안(신규 의존성/역할 분담 붕괴/직렬화)이 전부 대가가 커서 **의도적으로 예외를 유지**한다. 새 함수는 `&GwClient`를 쓸 것(상세: `.claude-workspace/todo/refactor-structure/06-org-arc-signature.md`).
 - **파생 조회**: 일부 도구는 단일 API 래퍼가 아니라 여러 호출을 조합해 서버측에서 계산을 끝낸다 — `find_free_rooms`(자원 목록+예약을 인터벌 연산), `find_person`(부서 전수 순회 후 캐시), `my_reservations`·`pending_approvals`(필터+요약). LLM이 매 호출마다 같은 다단 조합을 반복하지 않게 하려는 것.
 
@@ -114,7 +120,10 @@ wehago-sign = Base64( HMAC_SHA256( authToken ‖ transactionId ‖ timestamp ‖
 
 > 모든 mutation(등록/수정/삭제)은 직후 **재조회(read-back)로 실제 상태를 확인**하고, 반영이 안 됐으면 실패로 처리한다.
 
+**구현 위치**: 도구 층이 아니라 **각 도메인 모듈의 `*_and_verify` 함수 안**이다(`resource::reserve/update/cancel_and_verify`, `calendar::create/update/delete_event_and_verify`, `attendance::punch_and_verify`). 검증 없는 raw 래퍼도 남아 있으나 새 호출부는 `*_and_verify`를 쓴다 — 규칙이 모듈에 있어야 MCP를 거치지 않는 호출자도 우회할 수 없다.
+
 ### 7.2 소유권 가드
 
 - 자원 예약의 쓰기는 서버가 **소유자(생성자) 본인일 때만** 실제 반영한다(IDOR 아님 — 정보 조회는 열려 있으나 쓰기는 막힘).
-- MCP는 서버에 맡기지 않고, 쓰기 전에 대상 예약의 `empSeq == 본인 empSeq`(authToken에서 추출) 를 확인하고 아니면 **명시적 에러**를 반환한다. (조회는 제한 없음.)
+- 서버에 맡기지 않고, 쓰기 전에 대상의 소유자 == 본인 empSeq(authToken에서 추출)를 확인하고 아니면 **명시적 에러**를 반환한다. (조회는 제한 없음.)
+- **소유자 필드는 도메인마다 다르다** — 자원 예약은 `empSeq`("소유자"), 일정은 `createSeq`("작성자"). 그래서 가드 함수는 도메인별로 각자 둔다(`resource::check_owner` / `calendar::check_author`). 다만 **에러는 `error::NotOwner` 타입 하나를 공유**하고, `mcp::map_domain_err`가 `downcast_ref`로 판별해 `invalid_params`로 매핑한다 — 문자열 매칭이 아니라 타입으로 분류하는 것이 핵심이다.

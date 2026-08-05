@@ -64,7 +64,7 @@
   ```json
   {"successTf":true,"resIdx":3,"resSeq":"57","seqNum":71044}
   ```
-- **`resIdx`는 JSON NUMBER 로 온다**(문자열 `"3"` 아님). 파싱 시 String/Number 양쪽을 처리해야 한다 — `.as_str()`만 쓰면 None → 옛 값 fallback → 다음 read-back이 `(새 seqNum, 옛 resIdx)` 불일치로 **에러 9208**. (`src/mcp.rs`의 `json_idx` 헬퍼가 이를 흡수.)
+- **`resIdx`는 JSON NUMBER 로 온다**(문자열 `"3"` 아님). 파싱 시 String/Number 양쪽을 처리해야 한다 — `.as_str()`만 쓰면 None → 옛 값 fallback → 다음 read-back이 `(새 seqNum, 옛 resIdx)` 불일치로 **에러 9208**. (`src/modules/resource.rs`의 `json_idx` 헬퍼가 이를 흡수.)
 - 재발급마다 `resIdx`가 1→2→3…으로 증가.
 
 > 따라서 수정 후에는 **응답에서 받은 새 seqNum/resIdx로** read-back 해야 한다.
