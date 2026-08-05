@@ -100,9 +100,9 @@ fn chrome_user_data_dir() -> Result<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var("HOME")?;
-        return Ok(PathBuf::from(format!(
+        Ok(PathBuf::from(format!(
             "{home}/Library/Application Support/Google/Chrome"
-        )));
+        )))
     }
     #[cfg(target_os = "linux")]
     {
@@ -565,9 +565,9 @@ fn firefox_profiles_dir() -> Result<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var("HOME")?;
-        return Ok(PathBuf::from(format!(
+        Ok(PathBuf::from(format!(
             "{home}/Library/Application Support/Firefox/Profiles"
-        )));
+        )))
     }
     #[cfg(target_os = "linux")]
     {

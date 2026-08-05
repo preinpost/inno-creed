@@ -116,15 +116,15 @@ fn find_form<'a>(
         return Some((q.to_string(), v));
     }
     for (name, v) in forms {
-        if let Some(aliases) = v.get("aliases").and_then(|a| a.as_array()) {
-            if aliases.iter().any(|a| a.as_str() == Some(q)) {
-                return Some((name.clone(), v));
-            }
+        if let Some(aliases) = v.get("aliases").and_then(|a| a.as_array())
+            && aliases.iter().any(|a| a.as_str() == Some(q))
+        {
+            return Some((name.clone(), v));
         }
-        if let Some(fid) = v.get("form_id").and_then(|f| f.as_i64()) {
-            if q == fid.to_string() {
-                return Some((name.clone(), v));
-            }
+        if let Some(fid) = v.get("form_id").and_then(|f| f.as_i64())
+            && q == fid.to_string()
+        {
+            return Some((name.clone(), v));
         }
     }
     None

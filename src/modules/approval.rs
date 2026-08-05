@@ -182,11 +182,10 @@ pub async fn pending_digest(c: &GwClient, page_size: i64) -> Result<Value> {
         .unwrap_or_default();
 
     let today = {
-        let day = std::time::SystemTime::now()
+        std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| ((d.as_secs() as i64) + 9 * 3600) / 86400)
-            .unwrap_or(0);
-        day
+            .unwrap_or(0)
     };
     // YYYYMMDD → epoch days (days_to_ymd의 역함수, Howard Hinnant days_from_civil).
     let to_days = |ymd: &str| -> Option<i64> {

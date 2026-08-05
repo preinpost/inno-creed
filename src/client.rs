@@ -70,12 +70,12 @@ fn pct_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(h) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(h);
-                i += 3;
-                continue;
-            }
+        if b[i] == b'%' && i + 2 < b.len()
+            && let Ok(h) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        {
+            out.push(h);
+            i += 3;
+            continue;
         }
         out.push(b[i]);
         i += 1;
@@ -209,10 +209,10 @@ impl GwClient {
     /// 실패 시 로그인 안내 에러를 그대로 전파(도구 응답으로 사용자에게 노출). 실패는 캐시하지
     /// 않으므로, 사용자가 로그인한 뒤엔 재시작 없이 다음 호출에서 자동 복구된다.
     fn creds(&self) -> Result<Creds> {
-        if let Ok(guard) = self.creds.read() {
-            if let Some(c) = guard.as_ref() {
-                return Ok(c.clone());
-            }
+        if let Ok(guard) = self.creds.read()
+            && let Some(c) = guard.as_ref()
+        {
+            return Ok(c.clone());
         }
         let fresh = creds::from_browser()?;
         if let Ok(mut guard) = self.creds.write() {
@@ -224,10 +224,10 @@ impl GwClient {
     /// 세션 정보를 lazy 보장. 캐시가 유효(10분 TTL)하면 그대로 반환, 없거나 만료면 gw050A02로
     /// 재조회 후 캐시. 모든 tool 핸들러가 진입 시 1회 호출한다(값이 필요할 때 알아서 채움).
     pub async fn ensure_session(&self) -> Result<()> {
-        if let Ok(cache) = self.session.read() {
-            if cache.fetched_at.is_some_and(|t| t.elapsed() < SESSION_TTL) {
-                return Ok(());
-            }
+        if let Ok(cache) = self.session.read()
+            && cache.fetched_at.is_some_and(|t| t.elapsed() < SESSION_TTL)
+        {
+            return Ok(());
         }
         // fetch는 잠금을 잡지 않은 채로(await 동안 락 보유 금지). 동시 진입 시 중복 조회는
         // 허용(gw050A02는 부작용 없는 조회) — 마지막 쓰기가 캐시를 갱신.
@@ -265,23 +265,42 @@ impl GwClient {
         })
     }
 
-    /// JSON body POST 후 성공 판정(resultCode ∈ {0,200}) → resultData 반환.
-    pub async fn call(&self, path: &str, body: &Value) -> Result<Value> {
+    /// **모든 요청의 단일 관문** — 크레덴셜 취득 → transaction-id/timestamp 생성 →
+    /// `wehago-sign` 계산 → 인증 헤더 4종 주입까지 마친 요청 빌더를 돌려준다.
+    ///
+    /// 서명 규격(`docs/architecture.md` §5)이 두 곳에 있으면 한쪽만 고쳤을 때 **그 경로만 401**이
+    /// 되고, 잘 안 쓰이는 경로(예: probe 전용 `call_raw`)일수록 한참 뒤에야 드러난다.
+    /// 그래서 아래 전송 함수 6개는 전부 이 함수를 거친다. **새 전송 함수도 반드시 여기를 통과할 것.**
+    ///
+    /// - `sign_path`: 서명 대상 pathname(**쿼리 제외** — 프론트 관례).
+    /// - `url_path`: 실제 요청 경로. SSE처럼 쿼리스트링이 붙는 경우만 `sign_path`와 달라진다.
+    /// - Content-Type·바디는 붙이지 않는다 — JSON/multipart/form-urlencoded로 제각각이라 호출부 몫.
+    fn signed(
+        &self,
+        method: reqwest::Method,
+        sign_path: &str,
+        url_path: &str,
+    ) -> Result<reqwest::RequestBuilder> {
         let cr = self.creds()?;
         let tid = sign::transaction_id();
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs()
             .to_string();
-        let sig = sign::wehago_sign(&cr.auth_token, &tid, &ts, path, &cr.sign_key);
-
-        let resp = self
+        let sig = sign::wehago_sign(&cr.auth_token, &tid, &ts, sign_path, &cr.sign_key);
+        Ok(self
             .http
-            .post(format!("{}{}", self.base, path))
+            .request(method, format!("{}{}", self.base, url_path))
             .header("Authorization", format!("Bearer {}", cr.auth_token))
-            .header("timestamp", &ts)
-            .header("transaction-id", &tid)
-            .header("wehago-sign", sig)
+            .header("timestamp", ts)
+            .header("transaction-id", tid)
+            .header("wehago-sign", sig))
+    }
+
+    /// JSON body POST 후 성공 판정(resultCode ∈ {0,200}) → resultData 반환.
+    pub async fn call(&self, path: &str, body: &Value) -> Result<Value> {
+        let resp = self
+            .signed(reqwest::Method::POST, path, path)?
             .header("Content-Type", "application/json")
             .json(body)
             .send()
@@ -303,26 +322,14 @@ impl GwClient {
     /// call()과 동일 서명·전송이지만 **성공판정 없이 전체 응답 봉투(resultCode/resultMsg/resultData 포함)를
     /// 그대로 반환**. 2099 같은 실패 응답의 resultData까지 보려는 디버그/probe 용도.
     pub async fn call_raw(&self, path: &str, body: &Value) -> Result<Value> {
-        let cr = self.creds()?;
-        let tid = sign::transaction_id();
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs()
-            .to_string();
-        let sig = sign::wehago_sign(&cr.auth_token, &tid, &ts, path, &cr.sign_key);
         let mut req = self
-            .http
-            .post(format!("{}{}", self.base, path))
-            .header("Authorization", format!("Bearer {}", cr.auth_token))
-            .header("timestamp", &ts)
-            .header("transaction-id", &tid)
-            .header("wehago-sign", sig)
+            .signed(reqwest::Method::POST, path, path)?
             .header("Content-Type", "application/json");
         // 진단용: 브라우저 헤더 재현 실험(Cookie/Referer/User-Agent).
-        if let Ok(cookie) = std::env::var("PROBE_COOKIE") {
-            if !cookie.is_empty() {
-                req = req.header("Cookie", cookie);
-            }
+        if let Ok(cookie) = std::env::var("PROBE_COOKIE")
+            && !cookie.is_empty()
+        {
+            req = req.header("Cookie", cookie);
         }
         if std::env::var("PROBE_BROWSER_HDR").is_ok() {
             req = req
@@ -342,21 +349,8 @@ impl GwClient {
     /// 함께 자동 설정. 응답은 표준 봉투가 아닐 수 있어(예: mail014A04) raw Value로 반환 →
     /// 성공 판정은 호출부 몫.
     pub async fn call_multipart(&self, path: &str, form: reqwest::multipart::Form) -> Result<Value> {
-        let cr = self.creds()?;
-        let tid = sign::transaction_id();
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs()
-            .to_string();
-        let sig = sign::wehago_sign(&cr.auth_token, &tid, &ts, path, &cr.sign_key);
-
         let resp = self
-            .http
-            .post(format!("{}{}", self.base, path))
-            .header("Authorization", format!("Bearer {}", cr.auth_token))
-            .header("timestamp", &ts)
-            .header("transaction-id", &tid)
-            .header("wehago-sign", sig)
+            .signed(reqwest::Method::POST, path, path)?
             .multipart(form)
             .send()
             .await?;
@@ -378,21 +372,8 @@ impl GwClient {
         params: &[(&str, &str)],
         out_path: &str,
     ) -> Result<(u64, Option<String>)> {
-        let cr = self.creds()?;
-        let tid = sign::transaction_id();
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs()
-            .to_string();
-        let sig = sign::wehago_sign(&cr.auth_token, &tid, &ts, path, &cr.sign_key);
-
         let resp = self
-            .http
-            .post(format!("{}{}", self.base, path))
-            .header("Authorization", format!("Bearer {}", cr.auth_token))
-            .header("timestamp", &ts)
-            .header("transaction-id", &tid)
-            .header("wehago-sign", sig)
+            .signed(reqwest::Method::POST, path, path)?
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(form_urlencode(params))
             .send()
@@ -422,21 +403,8 @@ impl GwClient {
 
     /// x-www-form-urlencoded POST(gw050A02 등). 서명 헤더는 call()과 동일(body 무관).
     pub async fn call_form(&self, path: &str, params: &[(&str, &str)]) -> Result<Value> {
-        let cr = self.creds()?;
-        let tid = sign::transaction_id();
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs()
-            .to_string();
-        let sig = sign::wehago_sign(&cr.auth_token, &tid, &ts, path, &cr.sign_key);
-
         let resp = self
-            .http
-            .post(format!("{}{}", self.base, path))
-            .header("Authorization", format!("Bearer {}", cr.auth_token))
-            .header("timestamp", &ts)
-            .header("transaction-id", &tid)
-            .header("wehago-sign", sig)
+            .signed(reqwest::Method::POST, path, path)?
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(form_urlencode(params))
             .send()
@@ -459,21 +427,9 @@ impl GwClient {
     /// 있고 응답이 `data:{...}` 스트림인 엔드포인트용. 서명은 pathname만(쿼리 제외 — 프론트 관례).
     /// 스트림의 모든 `data:` JSON 이벤트를 파싱해 Vec로 반환(성공 판정은 호출부 몫).
     pub async fn call_get_sse(&self, sign_path: &str, path_with_query: &str) -> Result<Vec<Value>> {
-        let cr = self.creds()?;
-        let tid = sign::transaction_id();
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs()
-            .to_string();
-        let sig = sign::wehago_sign(&cr.auth_token, &tid, &ts, sign_path, &cr.sign_key);
-
+        // 서명은 pathname(sign_path)으로, 요청은 쿼리 포함 경로로 — 유일하게 둘이 다른 경로다.
         let resp = self
-            .http
-            .get(format!("{}{}", self.base, path_with_query))
-            .header("Authorization", format!("Bearer {}", cr.auth_token))
-            .header("timestamp", &ts)
-            .header("transaction-id", &tid)
-            .header("wehago-sign", sig)
+            .signed(reqwest::Method::GET, sign_path, path_with_query)?
             .header("Accept", "text/event-stream")
             .send()
             .await?;

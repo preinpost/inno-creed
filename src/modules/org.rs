@@ -140,13 +140,13 @@ pub async fn roster(c: &Arc<GwClient>) -> Result<Vec<Value>> {
     let mut people: Vec<Value> = Vec::new();
     while let Some(joined) = set.join_next().await {
         // 개별 부서 실패는 건너뛴다(권한 없는 부서 등) — 명부 전체를 실패시키지 않는다.
-        if let Ok(Ok(v)) = joined {
-            if let Some(members) = v.get("members").and_then(|m| m.as_array()) {
-                for m in members {
-                    let key = m.get("empSeq").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    if !key.is_empty() && seen.insert(key) {
-                        people.push(m.clone());
-                    }
+        if let Ok(Ok(v)) = joined
+            && let Some(members) = v.get("members").and_then(|m| m.as_array())
+        {
+            for m in members {
+                let key = m.get("empSeq").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if !key.is_empty() && seen.insert(key) {
+                    people.push(m.clone());
                 }
             }
         }

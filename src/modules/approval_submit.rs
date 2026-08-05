@@ -106,10 +106,10 @@ fn overwrite_if_present(v: &mut Value, key: &str, val: &str) {
     if val.is_empty() {
         return;
     }
-    if let Some(obj) = v.as_object_mut() {
-        if obj.contains_key(key) {
-            obj.insert(key.to_string(), Value::String(val.to_string()));
-        }
+    if let Some(obj) = v.as_object_mut()
+        && obj.contains_key(key)
+    {
+        obj.insert(key.to_string(), Value::String(val.to_string()));
     }
 }
 
@@ -457,10 +457,10 @@ pub async fn delete_temp_approval(c: &GwClient, doc_ids: &str) -> Result<Value> 
         }
         if let Some(rd) = e.get("resultData") {
             fail += rd.get("failCnt").and_then(|v| v.as_i64()).unwrap_or(0);
-            if let Some(id) = rd.get("docId").and_then(|v| v.as_str()) {
-                if !id.is_empty() {
-                    deleted.push(id.to_string());
-                }
+            if let Some(id) = rd.get("docId").and_then(|v| v.as_str())
+                && !id.is_empty()
+            {
+                deleted.push(id.to_string());
             }
         }
     }
