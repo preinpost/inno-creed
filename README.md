@@ -20,14 +20,26 @@
 
 ## 할 수 있는 것
 
+**통합검색**
+| 도구 | 기능 |
+|---|---|
+| `search` | 메일·전자결재·게시판·일정·자원·파일을 한 번에 검색(기간 필터, 모듈별 범위 지정) |
+
+> 결과에 후속 조회용 ID가 함께 옵니다 — 메일 `muid` → `read_mail`, 결재 `docId`+`formId` → `read_approval`, 게시판 `artSeqNo` → `read_notice`. "지난달 그 메일 찾아서 본문 보여줘" 같은 요청이 한 흐름으로 이어집니다.
+
 **회의실(자원)**
 | 도구 | 기능 |
 |---|---|
+| `find_free_rooms` | **빈 시간 탐색** — 날짜·필요시간·구간·건물을 주면 예약을 뺀 가용 구간만 반환 |
 | `list_resources` | 회의실(자원) 목록 |
-| `list_reservations` | 기간·자원별 예약 현황(자원 미지정 시 전체) |
+| `list_reservations` | 기간·자원별 예약 현황(자원 미지정 시 전체). 기본 슬림 응답, 원본은 `verbose:true` |
+| `my_reservations` | 본인 예약만 — 수정·취소에 필요한 `seqNum`/`resIdx`를 얻는 경로 |
 | `reserve_resource` | 회의실 예약 |
 | `update_reservation` | 예약 수정(본인 소유만) |
 | `cancel_reservation` | 예약 취소(본인 소유만) |
+
+> `find_free_rooms`는 종일·다일 예약(예: 반년짜리 공용좌석)도 해당일 전체 점유로 처리합니다. `group="본사"|"구로"`로 건물을 나눠 볼 수 있습니다.
+> ⚠️ 회의실 **정원(수용인원) 정보는 아마란스에 존재하지 않습니다** — "10명 회의실" 류 조건은 지원할 수 없습니다.
 
 **일정(캘린더)**
 | 도구 | 기능 |
@@ -56,9 +68,10 @@
 **전자결재**
 | 도구 | 기능 |
 |---|---|
+| `pending_approvals` | **미결 요약** — 제목·기안자·대기일수(오래 기다린 순) |
 | `list_approvals` | 함별 문서 목록(미결/기결/수신참조/시행/상신) |
 | `read_approval` | 문서 1건 본문(평문)·헤더·결재선 (열람 부작용 없음) |
-| `approval_counts` | 함별 미처리 건수 |
+| `approval_counts` | 함별 미처리 건수(숫자만 — 내용까지 보려면 `pending_approvals`) |
 | `submit_approval` | 문서 상신 — ⚠️ 실제 결재요청 통지 발송 |
 | `cancel_approval` | 상신취소(임시보관 복귀) |
 | `list_approval_lines` / `read_approval_line` | 개인결재라인 목록 / 결재자 구성 조회 |
@@ -66,12 +79,18 @@
 | `get_approval_line_schema` / `list_approval_line_schemas` | 문서 종류별 결재라인 스키마(직책 기반) |
 | `get_submission_guide` / `list_submission_guides` | 양식별 신청 가이드(필수항목·절차·주의) |
 
-**근태 · 조직**
+**근태 · 조직 · 나**
 | 도구 | 기능 |
 |---|---|
-| `get_attendance_today` | 출퇴근 현황 조회(부작용 없음) |
+| `get_attendance_today` | 오늘 출퇴근 현황(부작용 없음) |
+| `attendance_month` | **기간(월) 근태** — 일자별 출퇴근·근무시간·지각/연차 + 기간 합계 |
 | `clock_in` / `clock_out` | 출근·퇴근 기록 — ⚠️ 실제 근태 punch, 기존 기록은 덮어쓰지 않음 |
-| `org_chart` | 부서 트리 / 부서별 사원·직책 (결재선 담당자 해석용) |
+| `find_person` | **사람 찾기** — 이름·ID·이메일 → `empSeq`/부서/직책/연락처 |
+| `org_chart` | 부서 트리 / 부서별 사원·직책 |
+| `whoami` | 로그인한 본인 정보(`empSeq`·부서·이메일 + 근태용 `empCd`) |
+
+> 결재선 구성·회의 참석자·메일 수신자는 전부 `empSeq`를 요구합니다. `find_person`이 그 진입점이고, 본인 값은 `whoami`로 얻습니다.
+> `find_person`의 첫 호출은 전사 명부를 조립하느라 1초 남짓 걸리고, 이후 30분간 캐시됩니다.
 
 ## 요구 사항
 
@@ -82,11 +101,12 @@
 
 | | macOS | Linux | Windows |
 |---|---|---|---|
-| **Chrome** | 키체인 `Chrome Safe Storage` → AES-128-CBC | `"peanuts"`(키링 미사용) → AES-128-CBC | Local State DPAPI 키 → AES-256-GCM |
+| **Chrome** | 키체인 `Chrome Safe Storage` → AES-128-CBC | 키링(`v11`, `secret-tool`) / `"peanuts"`(`v10`) → AES-128-CBC | `v10` DPAPI 키 / `v20` app-bound(Chrome Elevator COM) → AES-256-GCM |
 | **Firefox** | ✅ (쿠키 평문) | ✅ | ✅ |
 
 - **Firefox가 가장 확실한 크로스플랫폼 경로**입니다(쿠키가 평문이라 OS 무관). Chrome이 안 잡히면 Firefox로 `gw.innogrid.com`에 로그인하면 됩니다.
-- Chrome 예외: **Linux에서 gnome-keyring/kwallet을 쓰는 경우**(`v11` 쿠키)와 **Windows 최신 Chrome의 app-bound 암호화**(`v20`)는 아직 미지원 → 이 경우 Firefox로 폴백됩니다.
+- **Windows Chrome 주의**: 최신 Chrome은 실행 중 쿠키 파일을 **배타적으로 잠급니다**. Chrome을 **완전히 종료**한 뒤 실행해야 쿠키를 읽을 수 있습니다. `v20` app-bound 쿠키는 Chrome Elevator COM으로 복호화를 시도하지만(best-effort) Chrome 버전/보안설정에 따라 거부될 수 있습니다.
+- **어떤 브라우저에서도 못 가져오면** 값을 직접 지정할 수 있습니다(아래 [크레덴셜 직접 지정](#크레덴셜-직접-지정-수동)).
 
 ### 브라우저 경로 오버라이드 (snap/flatpak/커스텀 프로필)
 
@@ -100,6 +120,17 @@
 | `INNO_CREED_CHROME_USER_DATA` | Chrome `User Data` 루트 |
 
 크레덴셜 취득에 실패하면 에러 메시지에 **Chrome/Firefox 각각 어떤 경로를 확인했는지**가 표시되니, 그 경로를 보고 위 환경변수로 실제 위치를 지정하면 됩니다. (쿠키는 있는데 복호화만 실패하면 키링/app-bound 안내가 함께 나옵니다.)
+
+### 크레덴셜 직접 지정 (수동)
+
+브라우저 복호화가 불가한 환경(예: **Windows 최신 Chrome app-bound**, Chrome을 못 닫는 상황)에서는 쿠키 값을 **직접 지정**하면 브라우저 읽기를 완전히 건너뜁니다. 다른 모든 경로보다 우선합니다.
+
+| 환경변수 | 값 (브라우저 DevTools → Application → Cookies → `gw.innogrid.com`) |
+|---|---|
+| `INNO_CREED_AUTH_TOKEN` | `BIZCUBE_AT` 쿠키 값 (URL 인코딩된 `%7C`도 그대로 붙여넣기 가능) |
+| `INNO_CREED_SIGN_KEY` | `BIZCUBE_HK` 쿠키 값 |
+
+두 값이 **모두** 설정돼 있어야 사용됩니다. MCP 클라이언트로 실행할 땐 등록 설정의 `env` 블록에 넣으세요(셸 `export`는 전달되지 않음).
 
 ## 설치
 

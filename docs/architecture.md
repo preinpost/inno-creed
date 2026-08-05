@@ -16,14 +16,16 @@
 inno-creed (Rust MCP 서버, 헤드리스)
  ├─ creds    크레덴셜 취득: Chrome 쿠키 복호화 → authToken / signKey
  ├─ sign     wehago-sign(HMAC-SHA256) · transaction-id 생성
- ├─ client   GwClient: ensure_session(gw050A02 lazy 취득+10분 TTL 캐시) · 캘린더 목록 캐시(10분 TTL) · 헤더 4종 주입 · POST · 응답봉투 파싱 · companyInfo 조립
- ├─ modules  resource(자원) · calendar(일정) · mail(메일) · board(게시판) — API 래퍼
+ ├─ client   GwClient: ensure_session(gw050A02 lazy 취득+10분 TTL 캐시) · 캘린더 목록 캐시(10분 TTL) · 사원 명부 캐시(30분 TTL) · 헤더 4종 주입 · POST · 응답봉투 파싱 · companyInfo 조립
+ ├─ modules  resource(자원) · calendar(일정) · mail(메일) · board(게시판) · approval*(전자결재)
+ │           org(조직) · attendance(근태) · search(통합검색) · submission_guide — API 래퍼 + 파생 조회
  └─ mcp      rmcp 서버(stdio): tool 정의 · 소유권 가드 · read-back 검증
 ```
 
 - 구조 근거: MCP는 **실행층**, 크레덴셜만 외부(브라우저)에서 취득. 그래서 헤드리스로 돌아간다.
 - 서버 시작 순서: `creds::from_chrome()`(크레덴셜) → stdio MCP 서브. [세션 정보](#4-authtoken-구조--세션-정보-lazy-취득--ttl-캐시)는 첫 도구 호출 시 `ensure_session()`이 lazy 취득(선취득 없음).
-- 소스: `src/{creds,sign,client,mcp}.rs`, `src/modules/{resource,calendar,mail}.rs`.
+- 소스: `src/{creds,sign,client,mcp}.rs`, `src/modules/*.rs`.
+- **파생 조회**: 일부 도구는 단일 API 래퍼가 아니라 여러 호출을 조합해 서버측에서 계산을 끝낸다 — `find_free_rooms`(자원 목록+예약을 인터벌 연산), `find_person`(부서 전수 순회 후 캐시), `my_reservations`·`pending_approvals`(필터+요약). LLM이 매 호출마다 같은 다단 조합을 반복하지 않게 하려는 것.
 
 ## 3. 크레덴셜 취득 (Chrome / Firefox · macOS·Linux·Windows)
 
@@ -39,15 +41,16 @@ Chrome 또는 Firefox가 `gw.innogrid.com`에 저장한 쿠키에서 두 값을 
 | OS | 복호화 키 | 알고리즘 |
 |---|---|---|
 | macOS | 키체인 `security find-generic-password -s "Chrome Safe Storage"` → PBKDF2-HMAC-SHA1(1003, 16B) | AES-128-CBC(iv=0x20×16, Pkcs7) |
-| Linux | 고정 비번 `"peanuts"`(키링 미사용) → PBKDF2-HMAC-SHA1(1, 16B) | AES-128-CBC(iv=0x20×16, Pkcs7) |
-| Windows | `Local State`의 `os_crypt.encrypted_key`(base64, `DPAPI` 접두) → `CryptUnprotectData`로 32B 키 | AES-256-GCM(nonce 12B + tag 16B) |
+| Linux | 키링(`v11`): `secret-tool`로 `Chrome Safe Storage` 비밀 조회 → PBKDF2-HMAC-SHA1(1, 16B). 키링 미사용(`v10`): 고정 비번 `"peanuts"` | AES-128-CBC(iv=0x20×16, Pkcs7) |
+| Windows | `v10`: `os_crypt.encrypted_key`(base64, `DPAPI` 접두) → `CryptUnprotectData`로 32B 키. `v20`(app-bound): `os_crypt.app_bound_encrypted_key`(`APPB` 접두) → Chrome Elevator COM `IElevator::DecryptData` → 끝 32B 키 | AES-256-GCM(nonce 12B + tag 16B) |
 
-- 공통: `encrypted_value` 앞 **3바이트 버전 프리픽스(`v10`) 제거**. 최신 Chrome은 평문 앞에 **32B 도메인 SHA256**을 붙이므로 UTF-8 파싱 실패 시 앞 32B 제거.
+- 공통: `encrypted_value` 앞 **3바이트 버전 프리픽스(`v10`/`v20`) 제거**(Windows는 접두로 `v10`↔`v20` 키 선택). 최신 Chrome은 평문 앞에 **32B 도메인 SHA256**을 붙이므로 UTF-8 파싱 실패 시 앞 32B 제거.
 - 쿠키 DB 경로: 신버전 `Default/Network/Cookies` → 구버전 `Default/Cookies` 폴백. User Data 루트는 OS별(mac `~/Library/…`, linux `~/.config/google-chrome`, win `%LOCALAPPDATA%\Google\Chrome\User Data`).
 
 **Firefox** — `cookies.sqlite`(`moz_cookies`)가 **평문**이라 복호화 없이 읽는다. 프로필 루트만 OS별(mac `~/Library/…/Firefox/Profiles`, linux `~/.mozilla/firefox`, win `%APPDATA%\Mozilla\Firefox\Profiles`)로 분기, `*.default*` 프로필 우선. Chrome 실패 시 폴백.
 
-- **미지원 예외**: Linux 키링 사용(`v11`) / Windows app-bound(`v20`) 쿠키 → Firefox로 폴백.
+- **취약 경로**: Windows 최신 Chrome은 실행 중 쿠키 파일을 **배타적으로 잠가** 복사 불가(Chrome 종료 필요). `v20` app-bound는 Elevator COM으로 시도하나 Chrome이 호출자를 거부할 수 있음(best-effort). 실패 시 Firefox 폴백.
+- **수동 우회**: `INNO_CREED_AUTH_TOKEN`(=`BIZCUBE_AT`) + `INNO_CREED_SIGN_KEY`(=`BIZCUBE_HK`) 환경변수를 모두 지정하면 브라우저 읽기를 건너뛰고 그 값을 사용(모든 경로보다 우선). 모든 OS·브라우저 우회.
 - **만료**: 401 감지 시 쿠키 재복호화로 재취득(만료 주기 미관측 — 열린 질문).
 - 임시 파일(복사한 쿠키 DB)은 사용 후 삭제.
 

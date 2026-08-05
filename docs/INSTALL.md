@@ -104,10 +104,22 @@ claude mcp add inno-creed -- /절대경로/inno-creed          # Windows: ...\in
   # flatpak Firefox
   export INNO_CREED_FIREFOX_DIR=~/.var/app/org.mozilla.firefox/.mozilla/firefox
   ```
+- **Windows에서 Chrome 쿠키를 못 읽음(`os error 32` / 파일 사용 중)** → 최신 Chrome은 실행 중 쿠키 파일을 **배타적으로 잠급니다**. **Chrome을 완전히 종료**(트레이·백그라운드 포함)한 뒤 다시 실행하세요. 그래도 불편하면 아래 **크레덴셜 직접 지정** 또는 Firefox를 쓰세요.
 - **Chrome은 있는데 "복호화 실패"라고 나옴** →
   - **Linux 키링(gnome-keyring/kwallet, `v11`)**: v1.0.2+는 키링에서 키를 자동 조회하지만 **`secret-tool`이 필요**합니다. 없으면 설치 후 재시도: `sudo apt install libsecret-tools` (데스크톱 세션에서 키링이 잠금 해제돼 있어야 함).
-  - **Windows 최신 Chrome app-bound(`v20`)**: 아직 미지원.
-  - 그래도 안 되면 **Firefox로 로그인**이 가장 확실합니다.
+  - **Windows Chrome app-bound(`v20`)**: v1.1.0+는 Chrome Elevator COM으로 복호화를 시도하지만(best-effort), Chrome 버전/보안설정에 따라 거부될 수 있습니다.
+  - 그래도 안 되면 **Firefox로 로그인**하거나 아래 **크레덴셜 직접 지정**이 가장 확실합니다.
+
+### 크레덴셜 직접 지정 (브라우저 읽기 우회)
+
+브라우저에서 못 가져오는 환경이면 쿠키 값을 직접 넣습니다(모든 브라우저 읽기보다 우선). 브라우저 DevTools(F12) → **Application → Cookies → `https://gw.innogrid.com`** 에서 두 쿠키 값을 복사:
+
+| 환경변수 | 값 |
+|---|---|
+| `INNO_CREED_AUTH_TOKEN` | `BIZCUBE_AT` 쿠키 값 (`%7C` 인코딩 그대로 가능) |
+| `INNO_CREED_SIGN_KEY` | `BIZCUBE_HK` 쿠키 값 |
+
+두 값 모두 있어야 사용됩니다. MCP로 실행 시 아래 `env` 블록에 넣으세요.
 
 ### 경로 오버라이드 환경변수
 
@@ -117,6 +129,8 @@ claude mcp add inno-creed -- /절대경로/inno-creed          # Windows: ...\in
 | `INNO_CREED_FIREFOX_DIR` | Firefox 프로필 **디렉토리**(스캔) |
 | `INNO_CREED_CHROME_COOKIES` | Chrome `Cookies` DB 파일 경로(직접) |
 | `INNO_CREED_CHROME_USER_DATA` | Chrome `User Data` 루트 |
+| `INNO_CREED_AUTH_TOKEN` | `BIZCUBE_AT` 값 직접 지정(브라우저 우회) |
+| `INNO_CREED_SIGN_KEY` | `BIZCUBE_HK` 값 직접 지정(브라우저 우회) |
 
 ### ⚠️ MCP 클라이언트로 실행할 땐 `env`에 넣어야 합니다
 

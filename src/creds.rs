@@ -2,7 +2,7 @@
 //! Chrome 쿠키 복호화는 OS마다 방식이 다르다:
 //!  · macOS  : 키체인 `Chrome Safe Storage` → PBKDF2(SHA1,1003) → AES-128-CBC(iv=0x20×16)
 //!  · Linux  : 고정 비번 "peanuts"(키링 미사용시) → PBKDF2(SHA1,1) → AES-128-CBC(iv=0x20×16)
-//!  · Windows: Local State의 DPAPI 래핑 키 복호화 → AES-256-GCM
+//!  · Windows: v10=Local State DPAPI 키, v20(app-bound)=Chrome Elevator COM(IElevator::DecryptData) → AES-256-GCM
 //! Firefox `cookies.sqlite`는 전 OS 평문이라 프로필 경로만 OS별로 분기한다.
 
 use anyhow::{bail, Context, Result};
@@ -14,8 +14,19 @@ pub struct Creds {
     pub sign_key: String,
 }
 
-/// 크레덴셜 취득 진입점: Chrome → Firefox 순으로 시도, 둘 다 실패면 로그인 안내 에러.
+/// 크레덴셜 취득 진입점: 수동 입력(env) → Chrome → Firefox 순, 모두 실패면 로그인 안내 에러.
 pub fn from_browser() -> Result<Creds> {
+    // 0) 수동 입력 — 브라우저 복호화가 불가한 환경(Windows app-bound v20 등)의 확실한 우회.
+    //    두 값 모두 지정돼 있으면 그대로 사용(authToken은 URL 인코딩 허용).
+    if let (Some(at), Some(hk)) = (
+        env_nonempty("INNO_CREED_AUTH_TOKEN"),
+        env_nonempty("INNO_CREED_SIGN_KEY"),
+    ) {
+        return Ok(Creds {
+            auth_token: url_decode(&at),
+            sign_key: hk,
+        });
+    }
     let chrome_err = match from_chrome() {
         Ok(c) => return Ok(c),
         Err(e) => e,
@@ -31,7 +42,9 @@ pub fn from_browser() -> Result<Creds> {
          해결: Chrome 또는 Firefox로 https://gw.innogrid.com 에 로그인한 뒤 다시 실행하세요.\n\
          비표준 경로(snap/flatpak/커스텀 프로필)는 환경변수로 지정할 수 있습니다:\n\
          · INNO_CREED_FIREFOX_COOKIES = <cookies.sqlite 경로>   (또는 INNO_CREED_FIREFOX_DIR = <프로필 디렉토리>)\n\
-         · INNO_CREED_CHROME_COOKIES  = <Cookies DB 경로>       (또는 INNO_CREED_CHROME_USER_DATA = <User Data 루트>)"
+         · INNO_CREED_CHROME_COOKIES  = <Cookies DB 경로>       (또는 INNO_CREED_CHROME_USER_DATA = <User Data 루트>)\n\
+         브라우저에서 못 가져오면 값을 직접 지정할 수도 있습니다(DevTools→Application→Cookies→gw.innogrid.com):\n\
+         · INNO_CREED_AUTH_TOKEN = <BIZCUBE_AT 값>  ·  INNO_CREED_SIGN_KEY = <BIZCUBE_HK 값>"
     )
 }
 
@@ -64,7 +77,8 @@ pub fn from_chrome() -> Result<Creds> {
     if auth_token.is_none() && decrypt_failed {
         bail!(
             "BIZCUBE 쿠키는 있으나 복호화 실패. Linux 키링(gnome-keyring/kwallet, v11) 사용 시 `secret-tool`(libsecret-tools)이 설치돼 있어야 합니다 — `sudo apt install libsecret-tools` 후 재시도. \
-             Windows 최신 app-bound(v20) 쿠키는 미지원. 가장 확실한 방법은 Firefox로 gw.innogrid.com에 로그인하는 것입니다."
+             Windows app-bound(v20)은 Chrome Elevator COM으로 복호화를 시도하나 Chrome 버전/보안설정에 따라 거부될 수 있습니다. \
+             확실한 대안: (1) Firefox로 gw.innogrid.com 로그인, 또는 (2) INNO_CREED_AUTH_TOKEN·INNO_CREED_SIGN_KEY 환경변수로 쿠키 값을 직접 지정."
         );
     }
     Ok(Creds {
@@ -134,7 +148,7 @@ fn chrome_cookie_db() -> Result<PathBuf> {
 }
 
 fn read_chrome_cookies(db: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>> {
-    // 잠금 회피: 복사본을 읽음.
+    // 잠금 회피: 복사본을 읽음. (Windows에서 Chrome 실행 중이면 배타 잠금이라 copy 실패 → Chrome 종료 필요.)
     let tmp = std::env::temp_dir().join("inno_creed_ck.db");
     std::fs::copy(db, &tmp)?;
     let conn = rusqlite::Connection::open(&tmp)?;
@@ -187,9 +201,51 @@ fn linux_keyring_secret() -> Option<String> {
     }
     None
 }
+/// Windows Chrome 키 두 종류. 쿠키 접두(v10/v20)에 따라 골라 쓴다.
 #[cfg(target_os = "windows")]
-fn chrome_key() -> Result<Vec<u8>> {
-    windows_chrome_key()
+struct ChromeKey {
+    v10: Option<Vec<u8>>, // os_crypt.encrypted_key(DPAPI) → 구형 v10 쿠키
+    v20: Option<Vec<u8>>, // os_crypt.app_bound_encrypted_key(IElevator COM) → app-bound v20 쿠키
+}
+
+#[cfg(target_os = "windows")]
+fn chrome_key() -> Result<ChromeKey> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let root = chrome_user_data_dir()?;
+    let ls = root.join("Local State");
+    let txt = std::fs::read_to_string(&ls)
+        .with_context(|| format!("Local State 읽기 실패: {}", ls.display()))?;
+    let v: serde_json::Value = serde_json::from_str(&txt)?;
+    let os_crypt = v.get("os_crypt");
+
+    // v10: DPAPI 래핑 키("DPAPI" 접두 제거 → CryptUnprotectData).
+    let v10 = os_crypt
+        .and_then(|o| o.get("encrypted_key"))
+        .and_then(|k| k.as_str())
+        .and_then(|b64| STANDARD.decode(b64).ok())
+        .and_then(|mut raw| {
+            if raw.len() >= 5 && &raw[..5] == b"DPAPI" {
+                raw.drain(0..5);
+            }
+            dpapi_unprotect(&raw).ok()
+        });
+
+    // v20: app-bound 키("APPB" 접두 제거 → Chrome Elevator COM). 필드 없거나 거부되면 None(→ v10/Firefox/수동 폴백).
+    let v20 = os_crypt
+        .and_then(|o| o.get("app_bound_encrypted_key"))
+        .and_then(|k| k.as_str())
+        .and_then(|b64| STANDARD.decode(b64).ok())
+        .and_then(|mut raw| {
+            if raw.len() >= 4 && &raw[..4] == b"APPB" {
+                raw.drain(0..4);
+            }
+            app_bound_key(&raw).ok()
+        });
+
+    if v10.is_none() && v20.is_none() {
+        bail!("Chrome 복호화 키 취득 실패 — Local State에 os_crypt 키가 없거나 복호화 불가");
+    }
+    Ok(ChromeKey { v10, v20 })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -218,22 +274,32 @@ fn decrypt_chrome(enc: &[u8], key: &[u8]) -> Result<String> {
     Ok(strip_domain_hash(pt.to_vec()))
 }
 
-/// windows: v10 접두(3B) + nonce(12B) + ciphertext + tag(16B) → AES-256-GCM.
+/// windows: 접두(3B) + nonce(12B) + ciphertext + tag(16B) → AES-256-GCM.
+/// 접두가 "v20"이면 app-bound 키, 그 외("v10")면 DPAPI 키를 사용한다.
 #[cfg(target_os = "windows")]
-fn decrypt_chrome(enc: &[u8], key: &[u8]) -> Result<String> {
+fn decrypt_chrome(enc: &[u8], key: &ChromeKey) -> Result<String> {
     use aes_gcm::aead::{Aead, KeyInit};
     use aes_gcm::{Aes256Gcm, Nonce};
 
     if enc.len() < 3 + 12 + 16 {
         bail!("gcm cookie too short");
     }
+    let k = if &enc[..3] == b"v20" {
+        key.v20
+            .as_deref()
+            .context("v20(app-bound) 쿠키인데 app-bound 키 취득 실패")?
+    } else {
+        key.v10
+            .as_deref()
+            .context("v10 쿠키인데 os_crypt DPAPI 키 취득 실패")?
+    };
     let nonce = Nonce::try_from(&enc[3..15]).map_err(|_| anyhow::anyhow!("GCM nonce 길이 오류"))?;
     let ct = &enc[15..];
     let cipher =
-        Aes256Gcm::new_from_slice(key).map_err(|_| anyhow::anyhow!("GCM 키 길이 오류(32B 필요)"))?;
+        Aes256Gcm::new_from_slice(k).map_err(|_| anyhow::anyhow!("GCM 키 길이 오류(32B 필요)"))?;
     let pt = cipher
         .decrypt(&nonce, ct)
-        .map_err(|_| anyhow::anyhow!("AES-GCM 복호화 실패(app-bound 암호화면 미지원)"))?;
+        .map_err(|_| anyhow::anyhow!("AES-GCM 복호화 실패"))?;
     Ok(strip_domain_hash(pt))
 }
 
@@ -271,27 +337,165 @@ fn keychain_password() -> Result<Vec<u8>> {
     Ok(p)
 }
 
-/// Windows: Local State의 `os_crypt.encrypted_key`(base64, "DPAPI" 접두) → DPAPI 복호화 → 32B AES 키.
+/// Windows app-bound(v20) 키: `os_crypt.app_bound_encrypted_key`("APPB" 제거분)를
+/// Chrome Elevation Service(IElevator::DecryptData) COM 호출로 복호화 → 마지막 32B가 AES-256 키.
+/// Chrome 버전/보안 정책상 호출자를 거부할 수 있어(best-effort) 실패 시 Err → 상위에서 폴백.
 #[cfg(target_os = "windows")]
-fn windows_chrome_key() -> Result<Vec<u8>> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    let root = chrome_user_data_dir()?;
-    let ls = root.join("Local State");
-    let txt = std::fs::read_to_string(&ls)
-        .with_context(|| format!("Local State 읽기 실패: {}", ls.display()))?;
-    let v: serde_json::Value = serde_json::from_str(&txt)?;
-    let b64 = v
-        .get("os_crypt")
-        .and_then(|o| o.get("encrypted_key"))
-        .and_then(|k| k.as_str())
-        .context("Local State에 os_crypt.encrypted_key 없음")?;
-    let mut raw = STANDARD
-        .decode(b64)
-        .context("encrypted_key base64 디코드 실패")?;
-    if raw.len() >= 5 && &raw[..5] == b"DPAPI" {
-        raw.drain(0..5);
+fn app_bound_key(blob: &[u8]) -> Result<Vec<u8>> {
+    use core::ffi::c_void;
+
+    #[repr(C)]
+    struct Guid {
+        d1: u32,
+        d2: u16,
+        d3: u16,
+        d4: [u8; 8],
     }
-    dpapi_unprotect(&raw).context("DPAPI 키 복호화 실패")
+    // Google Chrome(stable) Elevator. (Chromium/Edge/Brave는 CLSID/IID가 다름.)
+    const CLSID_ELEVATOR: Guid = Guid {
+        d1: 0x708860E0,
+        d2: 0xF641,
+        d3: 0x4611,
+        d4: [0x88, 0x95, 0x7D, 0x86, 0x7D, 0xD3, 0x67, 0x5B],
+    };
+    const IID_IELEVATOR: Guid = Guid {
+        d1: 0x463ABECF,
+        d2: 0x410D,
+        d3: 0x407F,
+        d4: [0x8A, 0xF5, 0x0D, 0xF3, 0x5A, 0x00, 0x5C, 0xC8],
+    };
+
+    // IElevator vtable(IUnknown 상속). DecryptData는 IUnknown(3) + RunRecovery + EncryptData 다음(6번째) 슬롯.
+    #[repr(C)]
+    struct IElevatorVtbl {
+        query_interface:
+            unsafe extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> i32,
+        add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
+        release: unsafe extern "system" fn(*mut c_void) -> u32,
+        run_recovery: *const c_void, // 미사용(슬롯 자리맞춤)
+        encrypt_data: *const c_void, // 미사용(슬롯 자리맞춤)
+        decrypt_data: unsafe extern "system" fn(
+            *mut c_void,
+            *mut u16,       // [in] BSTR ciphertext
+            *mut *mut u16,  // [out] BSTR* plaintext
+            *mut u32,       // [out] DWORD* last_error
+        ) -> i32,
+    }
+    #[repr(C)]
+    struct IElevator {
+        vtbl: *const IElevatorVtbl,
+    }
+
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn CoInitializeEx(reserved: *mut c_void, co_init: u32) -> i32;
+        fn CoUninitialize();
+        fn CoCreateInstance(
+            rclsid: *const Guid,
+            outer: *mut c_void,
+            ctx: u32,
+            riid: *const Guid,
+            ppv: *mut *mut c_void,
+        ) -> i32;
+        fn CoSetProxyBlanket(
+            proxy: *mut c_void,
+            authn_svc: u32,
+            authz_svc: u32,
+            princ: *mut u16,
+            authn_level: u32,
+            imp_level: u32,
+            auth_info: *mut c_void,
+            capabilities: u32,
+        ) -> i32;
+    }
+    #[link(name = "oleaut32")]
+    unsafe extern "system" {
+        fn SysAllocStringByteLen(psz: *const u8, len: u32) -> *mut u16;
+        fn SysFreeString(bstr: *mut u16);
+        fn SysStringByteLen(bstr: *mut u16) -> u32;
+    }
+
+    const COINIT_APARTMENTTHREADED: u32 = 0x2;
+    const CLSCTX_LOCAL_SERVER: u32 = 0x4;
+    const RPC_C_AUTHN_DEFAULT: u32 = 0xFFFF_FFFF;
+    const RPC_C_AUTHZ_DEFAULT: u32 = 0xFFFF_FFFF;
+    const RPC_C_AUTHN_LEVEL_PKT_PRIVACY: u32 = 6;
+    const RPC_C_IMP_LEVEL_IMPERSONATE: u32 = 3;
+    const EOAC_DYNAMIC_CLOAKING: u32 = 0x40;
+
+    unsafe {
+        let hr = CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED);
+        // S_OK(0)/S_FALSE(1)만 우리가 초기화한 것 → 나중에 CoUninitialize 대상.
+        let did_init = hr == 0 || hr == 1;
+
+        let mut elevator: *mut c_void = std::ptr::null_mut();
+        let hr = CoCreateInstance(
+            &CLSID_ELEVATOR,
+            std::ptr::null_mut(),
+            CLSCTX_LOCAL_SERVER,
+            &IID_IELEVATOR,
+            &mut elevator,
+        );
+        if hr < 0 || elevator.is_null() {
+            if did_init {
+                CoUninitialize();
+            }
+            bail!("Chrome Elevator COM 생성 실패(hr=0x{:08X})", hr as u32);
+        }
+        let vt = (*(elevator as *mut IElevator)).vtbl;
+
+        let hr = CoSetProxyBlanket(
+            elevator,
+            RPC_C_AUTHN_DEFAULT,
+            RPC_C_AUTHZ_DEFAULT,
+            std::ptr::null_mut(),
+            RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+            RPC_C_IMP_LEVEL_IMPERSONATE,
+            std::ptr::null_mut(),
+            EOAC_DYNAMIC_CLOAKING,
+        );
+        if hr < 0 {
+            ((*vt).release)(elevator);
+            if did_init {
+                CoUninitialize();
+            }
+            bail!("CoSetProxyBlanket 실패(hr=0x{:08X})", hr as u32);
+        }
+
+        let in_bstr = SysAllocStringByteLen(blob.as_ptr(), blob.len() as u32);
+        let mut out_bstr: *mut u16 = std::ptr::null_mut();
+        let mut last_error: u32 = 0;
+        let hr = ((*vt).decrypt_data)(elevator, in_bstr, &mut out_bstr, &mut last_error);
+
+        let result = if hr >= 0 && !out_bstr.is_null() {
+            let len = SysStringByteLen(out_bstr) as usize;
+            Ok(std::slice::from_raw_parts(out_bstr as *const u8, len).to_vec())
+        } else {
+            Err(anyhow::anyhow!(
+                "IElevator::DecryptData 실패(hr=0x{:08X}, last_error={}) — Chrome이 호출자를 신뢰하지 않거나 버전 불일치",
+                hr as u32,
+                last_error
+            ))
+        };
+
+        if !in_bstr.is_null() {
+            SysFreeString(in_bstr);
+        }
+        if !out_bstr.is_null() {
+            SysFreeString(out_bstr);
+        }
+        ((*vt).release)(elevator);
+        if did_init {
+            CoUninitialize();
+        }
+
+        let bytes = result?;
+        if bytes.len() < 32 {
+            bail!("app-bound 복호화 결과가 32B 미만({}B)", bytes.len());
+        }
+        // 반환 blob의 마지막 32B가 AES-256 키.
+        Ok(bytes[bytes.len() - 32..].to_vec())
+    }
 }
 
 /// Windows DPAPI `CryptUnprotectData` FFI(crypt32). 현재 사용자 컨텍스트로 복호화.
