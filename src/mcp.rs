@@ -429,9 +429,9 @@ pub struct SubmitApprovalArgs {
     pub doc_title: String,
     /// 사용할 개인결재라인 ID. 이 라인의 결재자가 결재(3000) 노드로 실림. save_approval_line으로 준비.
     pub line_id: i64,
-    /// HP 근태신청 저장(0hr00011) 요청 body JSON. 근태 양식(외근/연차 등)은 상신 전 이 콜로 HP draft를 먼저 만들어야 함(안 하면 eap110A06가 2099로 실패). 형식: `{"applicationList":[{coCd,deptCd,empCd,linkAtCd,atCd,atYm,atDt,startDt,endDt,startTm,endTm,appDyFg,appDy,appTm,taskDc,workTp,atNm,...}],"employeeList":[{empCd,korNm,deptCd,deptNm,divNm}]}` (07 §8.11). 외근 종일=atCd"3101"/linkAtCd"3010". 빈 문자열이면 이 단계 생략(비근태 양식).
+    /// HP 근태신청 저장(0hr00011) 요청 body JSON. 근태 양식은 상신 전 이 콜로 HP draft를 먼저 만들어야 함(안 하면 eap110A06가 2099로 실패). ⭐ **채우는 법·양식별 고정코드·복사용 예시는 `get_submission_guide(form_id).draftHelp.hpApplicationExample`**(예: 출장 linkAtCd"2010"/atCd"2101", 외근 종일 atCd"3101"/linkAtCd"3010"). 형식: `{"applicationList":[{coCd,deptCd,empCd,linkAtCd,atCd,atDt,startDt,endDt,startTm,endTm,appDyFg,appDy,appTm,...}],"employeeList":[{empCd,korNm,deptCd,deptNm,divNm}]}`. 빈 문자열이면 이 단계 생략(비근태 양식).
     pub hp_application_json: String,
-    /// KISS 폼 본문 데이터 JSON 텍스트. 외근=`{"ITEMS":{...},"TABLE":{"dbTable1":{...},"dbTable2":{"group":[]}}}` (07 문서 §8.10 참조). 서버엔 이중인코딩되어 전송됨.
+    /// KISS 폼 본문 데이터 JSON 텍스트. `{"ITEMS":{...},"TABLE":{"dbTable1":{...},"dbTable2":{...}}}`. ⭐ **양식별 예시는 `get_submission_guide(form_id).draftHelp.bindDataExample`**. 서버엔 이중인코딩되어 전송됨.
     pub bind_data_json: String,
     /// 표시용 본문 HTML(raw). 내부에서 encodeURIComponent로 인코딩해 전송.
     pub doc_contents_html: String,
@@ -1397,7 +1397,7 @@ impl Amaranth {
 
     // ── 신청 가이드(양식별 본문 필수항목 + 상신 절차). 본문/상신은 MCP 미자동화 → 사람 안내용. ──
     #[tool(
-        description = "양식별 '신청 가이드'를 반환한다 — 문서 본문에 채워야 할 필수항목(requiredBody)·상신 절차(steps)·주의(notes)·결재라인 힌트. ⚠️ 근태 양식 본문 입력과 최종 상신은 아직 MCP로 자동화 안 됨(KISS 근태폼 React·상신 API 미캡처) → 이 가이드대로 사람이 아마란스에서 직접 작성. 결재라인만 get_approval_line_schema+save_approval_line로 준비 가능."
+        description = "양식별 '신청 가이드'를 반환한다 — ⭐ **submit_approval 기안 데이터 채우는 법(draftHelp: 고정코드/채울필드/복사용 실동작 예시 hpApplicationExample·bindDataExample) = CLI --help 격**. 그 외 문서 본문 필수항목(requiredBody)·상신 절차(steps)·주의(notes)·결재라인 힌트(approvalLineHint) 포함. submit_approval 호출 전 이 도구로 draftHelp를 조회해 hp_application_json/bind_data_json을 구성할 것. 결재라인은 get_approval_line_schema+save_approval_line로 준비."
     )]
     async fn get_submission_guide(
         &self,
@@ -1478,7 +1478,7 @@ impl Amaranth {
 
     // ── 전자결재 쓰기(상신/상신취소). ⚠️ 실제 결재 발생 — 테스트는 테스트 결재라인으로. ──
     #[tool(
-        description = "문서를 상신(제출)한다(근태 2-phase: 0hr00011 HP저장 → eap110A06 상신). ⚠️ 실제 결재요청·수신참조 통지가 나감 — 테스트는 반드시 테스트 결재라인으로 하고 끝나면 cancel_approval로 취소. 흐름: hp_application_json으로 HP 근태 draft 저장 → approkey 발급 → eap110A03(양식필수 합의자/수신참조 자동해석) → line_id 결재자 병합 → 상신. hp_application_json(0hr00011 body)·bind_data_json(eap110A06 본문, 07 §8.10)·doc_contents_html(표시 HTML)은 호출부가 제공. 성공 시 새 docId 반환."
+        description = "문서를 상신(제출)한다(근태 2-phase: 0hr00011 HP저장 → eap110A06 상신). ⚠️ 실제 결재요청·수신참조 통지가 나감 — 테스트는 반드시 테스트 결재라인으로 하고 끝나면 cancel_approval로 취소. ⭐ **hp_application_json / bind_data_json 을 어떻게 채우는지는 `get_submission_guide(양식명 또는 form_id)` 의 `draftHelp` 를 먼저 조회할 것** — 양식별 고정코드(atCd/linkAtCd 등)·의미별 채울 필드·복사용 실동작 예시(hpApplicationExample/bindDataExample)를 준다(CLI --help 격). 흐름: hp_application_json으로 HP 근태 draft 저장 → approkey 발급 → eap110A03(양식필수 합의자/수신참조 자동해석) → line_id 결재자 병합 → 상신. 성공 시 새 docId 반환."
     )]
     async fn submit_approval(
         &self,
