@@ -201,12 +201,35 @@ pub async fn submit_approval(
         app_dt = create_res.get("appDt").and_then(|v| v.as_str()).unwrap_or("").to_string();
     }
 
-    // ── 0.5) 근태 interlock 등록 (eap110A06 성공의 핵심) ──────────────────────
+    // ── 1) eap110A03: 결재선 해석 + form_d_tp(양식별 interlock 식별자) 취득 ─────
+    // interlock 등록(SetEnageGroup)이 form_d_tp를 요구하므로 a03를 먼저 호출해 얻는다.
+    let a03 = c
+        .call(
+            "/eap/eap110A03",
+            &json!({
+                "docID": 0, "formID": form_id.to_string(), "approkey": approkey,
+                "appLineId": line_id.to_string(), "draftTp": "", "reDraft": "", "docType": "",
+                "doc_auth": 0, "pageCode": "UBAP001"
+            }),
+        )
+        .await?;
+    let result_map = a03.get("resultMap").cloned().unwrap_or(Value::Null);
+    // form_d_tp = 양식별 HP interlock 식별자(연차36 _00011 / 출장40 _00021 / 외근41 _00031 / 휴일43 _00051).
+    // 하드코딩 금지 — 양식마다 다르다(틀리면 eap110A06가 HP_HPD0110_000XX로 2099). a03가 formID 기준으로 반환.
+    let form_d_tp = result_map
+        .get("form_info")
+        .and_then(|f| f.get("form_d_tp"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("HP_HPD0110_00011")
+        .to_string();
+
+    // ── 2) 근태 interlock 등록 (eap110A06 성공의 핵심) ──────────────────────
     // eap110A06의 eap→HP 서버간 연동은 이 3콜 등록을 요구한다. 누락 시:
-    //   · GetLinkKey/SetEnageGroup 없으면 → HP_HPD0110_00011 "Internal Server Error"(연동 대상 없음)
+    //   · GetLinkKey/SetEnageGroup 없으면 → HP_HPD0110_000XX "Internal Server Error"(연동 대상 없음)
     //   · saveAttendApplicationLinkKey(linkKey↔appSq 바인딩) 없으면 → "근태신청서 종결 처리 오류"
     // 브라우저는 이 콜들을 치지만 /system//personal/ 경로라 초기 캡처(/human//eap/만)가 놓쳤던 조각. (§10.19)
-    // menuCode/formDTp는 근태(HPD0110) 계열 공통 상수. 콜백 API는 eap가 상신 시 서버간 호출하는 HP 엔드포인트.
+    // menuCode(HPD0110)는 근태 공통 상수지만 formDTp는 양식별(위 form_d_tp). 콜백 API는 eap가 상신 시 서버간 호출하는 HP 엔드포인트.
     if !hp_application_json.trim().is_empty() {
         let glk = c
             .call(
@@ -226,7 +249,7 @@ pub async fn submit_approval(
         c.call(
             "/system/apiUtilEap/SetEnageGroup",
             &json!({
-                "approKey": approkey, "formDTp": "HP_HPD0110_00011", "formId": form_id.to_string(),
+                "approKey": approkey, "formDTp": form_d_tp, "formId": form_id.to_string(),
                 "linkKey": link_key, "formNm": doc_title, "docTitle": doc_title, "contents": "",
                 "contentsApi": "/human/attendapplication/interlock/getInterlockFormContents",
                 "statusApi": "/human/attendapplication/interlock/setInterlockSync",
@@ -237,18 +260,7 @@ pub async fn submit_approval(
         .map_err(|e| anyhow!("SetEnageGroup 실패: {e}"))?;
     }
 
-    // ── 1) eap110A03: 양식필수 합의자 + 수신참조 해석 ─────────────────────────
-    let a03 = c
-        .call(
-            "/eap/eap110A03",
-            &json!({
-                "docID": 0, "formID": form_id.to_string(), "approkey": approkey,
-                "appLineId": line_id.to_string(), "draftTp": "", "reDraft": "", "docType": "",
-                "doc_auth": 0, "pageCode": "UBAP001"
-            }),
-        )
-        .await?;
-    let result_map = a03.get("resultMap").cloned().unwrap_or(Value::Null);
+    // ── 3) 결재선(양식필수 합의자/수신참조/시행자) 해석 — 위 a03의 result_map 재사용 ──
     let kyuljae = result_map
         .get("kyuljaeResult")
         .and_then(|v| v.as_array())
