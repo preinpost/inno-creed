@@ -1478,7 +1478,7 @@ impl Amaranth {
 
     // ── 전자결재 쓰기(상신/상신취소). ⚠️ 실제 결재 발생 — 테스트는 테스트 결재라인으로. ──
     #[tool(
-        description = "문서를 상신(제출)한다(근태 2-phase: 0hr00011 HP저장 → eap110A06 상신). ⚠️ 실제 결재요청·수신참조 통지가 나감 — 테스트는 반드시 테스트 결재라인으로 하고 끝나면 cancel_approval로 취소. ⭐ **hp_application_json / bind_data_json 을 어떻게 채우는지는 `get_submission_guide(양식명 또는 form_id)` 의 `draftHelp` 를 먼저 조회할 것** — 양식별 고정코드(atCd/linkAtCd 등)·의미별 채울 필드·복사용 실동작 예시(hpApplicationExample/bindDataExample)를 준다(CLI --help 격). 신원 필드(coCd/deptCd/empCd/empNm 등)는 이 도구가 로그인 사용자 값으로 **자동 주입**하므로 예시값을 그대로 둬도 됨. 흐름: hp_application_json으로 HP 근태 draft 저장 → approkey 발급 → eap110A03(양식필수 합의자/수신참조 자동해석) → line_id 결재자 병합 → 상신. 성공 시 새 docId 반환."
+        description = "문서를 상신(제출)한다(근태 2-phase: 0hr00011 HP저장 → eap110A06 상신). ⚠️ 실제 결재요청·수신참조 통지가 나감 — 테스트는 반드시 테스트 결재라인으로 하고 끝나면 cancel_approval로 취소. ⭐ **hp_application_json / bind_data_json 을 어떻게 채우는지는 `get_submission_guide(양식명 또는 form_id)` 의 `draftHelp` 를 먼저 조회할 것** — 양식별 고정코드(atCd/linkAtCd 등)·의미별 채울 필드·복사용 실동작 예시(hpApplicationExample/bindDataExample)를 준다(CLI --help 격). 신원 필드(coCd/deptCd/empCd/empNm 등)는 이 도구가 로그인 사용자 값으로 **자동 주입**하므로 예시값을 그대로 둬도 됨. 흐름: hp_application_json으로 HP 근태신청(0hr00011→create) 저장 → 근태면 HP interlock 등록(GetLinkKey→saveAttendApplicationLinkKey→SetEnageGroup) → eap110A03(양식필수 합의자/수신참조 자동해석) → line_id 결재자 병합 → eap110A06 상신. 성공 시 새 docId 반환. 근태/외근/연차 등 HP 연동 양식·비연동 양식 모두 순수 API 상신 정상 동작."
     )]
     async fn submit_approval(
         &self,

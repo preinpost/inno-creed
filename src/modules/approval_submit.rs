@@ -3,20 +3,24 @@
 //! ⚠️ **실제 결재가 발생**한다(결재요청·수신참조 통지가 나감). 테스트는 반드시 테스트 결재라인으로.
 //!
 //! 상신 흐름(팝업이 하던 일을 재현):
-//!  0) 근태 양식: 0hr00011(검증/스테이징) → **create(진짜 커밋, approLineId에 묶인 대기 HP신청 등록)**.
-//!     ⚠️ create 없이 0hr00011만 하면 eap110A06가 2099로 죽는다(실측). HP↔eap 링크는 명시 키가 아니라
-//!     서버가 user+form의 approState 대기 HP신청을 매칭(appSq/calLinkKey는 eap110A06에 안 실림).
+//!  0) 근태 양식: 0hr00011(검증/스테이징) → create(HP신청 커밋, approLineId에 묶인 대기 HP신청 등록).
+//!     HP↔eap 링크는 명시 키가 아니라 서버가 empCd+atDt로 HP 레코드를 매칭(appSq/calLinkKey는 eap110A06에 안 실림).
 //!  1) approkey = "ERP_<uuid>" 생성.
-//!  2) eap110A03(appLineId="")로 **양식필수 합의자(kyuljaeResult)+수신참조(m_Refer)** 획득.
-//!  3) read_line(line_id)로 **개인결재라인 결재자** 획득.
-//!  4) pTEAG_APPDOC_LINE = [합의자] + [결재자] (seq 재번호), pRefer = 수신참조.
-//!  5) eap110A06 POST → resultData.result = 신규 docId.
+//!  2) eap110A03(appLineId=line_id)로 **완전 병합된 결재선(kyuljaeResult=합의+결재)
+//!     + 수신참조(m_Refer) + 시행자(m_Oper)** 획득.
+//!  3) pTEAG_APPDOC_LINE = kyuljaeResult 무가공, pRefer = m_Refer(+org_div), pOper = m_Oper(+org_div).
+//!     — 이 셋은 성공 브라우저 상신 payload와 바이트 동일(실측 대조). 브라우저와 정확히 일치시키는 정합성 항목.
+//!  4) eap110A06 POST → resultData.result = 신규 docId.
+//!
+//! ⚠️ **2099(HP_HPD0110)의 진짜 원인은 payload가 아니라 잔여 HP신청 충돌**이다(§8.11.1 + 2026-08-05 라이브 재확정).
+//!    같은 (empCd, atDt)에 이전 임시 draft/대기신청이 남아있으면 eap110A06의 empCd+atDt 링크가 충돌 → HP연동 500.
+//!    pOper 누락/create 생략이 원인이라는 이전 가설은 반증됨(payload를 브라우저와 동일하게 맞춰도, 잔여가 있으면 계속 2099).
+//!    → 상신 전 0hr00001로 (empCd,atDt) 잔여 조회·삭제 + 실패 시 롤백이 필요(구현 예정, §8.11.2/§8.14).
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 use crate::client::GwClient;
-use crate::modules::approval_line;
 
 /// 상신취소 — eap110A98(사전조회) + eap110A18(실행). doc_id는 상신된 문서의 docId.
 /// ⚠️ 필드명: 사전조회는 `docId`(소문자), 실행은 `docID`(대문자) — 실측 확정.
@@ -71,7 +75,7 @@ fn inject_identity(item: &mut Value, co: &str, dept: &str, emp: &str, name: &str
 /// 문서 상신 — eap110A06. 근태 계열 양식(외근/연차 등) 대상.
 /// - `form_id`: 양식 ID(41 외근/36 연차 …).
 /// - `doc_title`: 문서 제목.
-/// - `line_id`: 사용할 개인결재라인 ID(그 결재자들이 **결재(3000) 노드**로 실림). save_approval_line으로 준비.
+/// - `line_id`: 사용할 개인결재라인 ID. a03에 appLineId로 넘겨 완전 병합된 결재선을 받는다. save_approval_line으로 준비.
 /// - `bind_data_json`: KISS 폼 본문 데이터 JSON 텍스트(외근=`{"ITEMS":{...},"TABLE":{...}}`). 서버엔 이중인코딩되어 전송.
 /// - `doc_contents_html`: 표시용 본문 HTML(raw). 내부에서 encodeURIComponent로 인코딩해 전송.
 /// - `numbering_id`: 채번 규칙(기본 "1001").
@@ -117,6 +121,10 @@ pub async fn submit_approval(
     };
     let approkey = gen_approkey();
 
+    // create가 반환하는 HP 신청 식별자(appSq/appDt) — interlock linkKey 바인딩에 필요.
+    let mut app_sq: Option<i64> = None;
+    let mut app_dt = String::new();
+
     // ── 0) HP 근태 신청 저장 (2-phase의 1단계, eap110A06가 참조할 근태 레코드 생성) ──
     // 근태 양식(HPD0110)은 상신(eap110A06) 전에 신청완료가 이 콜로 HP draft를 먼저 만든다.
     // 이 단계를 건너뛰면 eap110A06 연동이 resultCode 2099(HP_HPD0110)로 실패한다.
@@ -131,12 +139,6 @@ pub async fn submit_approval(
                 }
             }
         }
-        // 1단계: 0hr00011 (검증/스테이징). 응답은 빈 SUCCESS.
-        c.call("/human/attendapplication/0hr00011", &hp_body)
-            .await
-            .map_err(|e| anyhow!("HP 근태신청 저장(0hr00011) 실패: {e}"))?;
-        // 2단계: create (진짜 커밋 — approLineId에 묶인 대기 HP신청 등록, appSq 반환).
-        // ⚠️ 이 단계를 건너뛰면 eap110A06가 2099(HP연동 실패)로 죽는다(실측: 브라우저 신청완료는 0hr00011 후 create를 호출).
         let create_body = json!({
             "coCd": "", "appDt": "", "appEmpCd": id_emp, "deptCd": "",
             "titleDc": doc_title, "approLineId": line_id.to_string(),
@@ -144,9 +146,52 @@ pub async fn submit_approval(
             "employeeList": hp_body.get("employeeList").cloned().unwrap_or(json!([])),
             "applicationList": hp_body.get("applicationList").cloned().unwrap_or(json!([])),
         });
-        c.call("/human/attendapplication/create", &create_body)
+        // 1단계: 0hr00011 (검증/스테이징). 응답은 빈 SUCCESS.
+        c.call("/human/attendapplication/0hr00011", &hp_body)
+            .await
+            .map_err(|e| anyhow!("HP 근태신청 저장(0hr00011) 실패: {e}"))?;
+        // 2단계: create (HP신청 커밋 — approLineId에 묶인 대기 HP신청 등록, appSq 반환).
+        let create_res = c.call("/human/attendapplication/create", &create_body)
             .await
             .map_err(|e| anyhow!("HP 근태신청 커밋(create) 실패: {e}"))?;
+        app_sq = create_res.get("appSq").and_then(|v| v.as_i64());
+        app_dt = create_res.get("appDt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    }
+
+    // ── 0.5) 근태 interlock 등록 (eap110A06 성공의 핵심) ──────────────────────
+    // eap110A06의 eap→HP 서버간 연동은 이 3콜 등록을 요구한다. 누락 시:
+    //   · GetLinkKey/SetEnageGroup 없으면 → HP_HPD0110_00011 "Internal Server Error"(연동 대상 없음)
+    //   · saveAttendApplicationLinkKey(linkKey↔appSq 바인딩) 없으면 → "근태신청서 종결 처리 오류"
+    // 브라우저는 이 콜들을 치지만 /system//personal/ 경로라 초기 캡처(/human//eap/만)가 놓쳤던 조각. (§10.19)
+    // menuCode/formDTp는 근태(HPD0110) 계열 공통 상수. 콜백 API는 eap가 상신 시 서버간 호출하는 HP 엔드포인트.
+    if !hp_application_json.trim().is_empty() {
+        let glk = c
+            .call(
+                "/system/apiUtilEap/GetLinkKey",
+                &json!({"menuCode":"HPD0110","approKey":approkey,"vPCoCd":id_co,"coCd":id_co}),
+            )
+            .await
+            .map_err(|e| anyhow!("GetLinkKey 실패: {e}"))?;
+        let link_key = glk.get("linkKey").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        // linkKey ↔ 실제 HP 신청(appSq) 바인딩. 없으면 finalize가 대상 신청을 못 찾아 '종결 처리 오류'.
+        c.call(
+            "/personal/hpd0110/saveAttendApplicationLinkKey",
+            &json!({"linkKey": link_key, "appSq": app_sq, "coCd": id_co, "appDt": app_dt}),
+        )
+        .await
+        .map_err(|e| anyhow!("saveAttendApplicationLinkKey 실패: {e}"))?;
+        c.call(
+            "/system/apiUtilEap/SetEnageGroup",
+            &json!({
+                "approKey": approkey, "formDTp": "HP_HPD0110_00011", "formId": form_id.to_string(),
+                "linkKey": link_key, "formNm": doc_title, "docTitle": doc_title, "contents": "",
+                "contentsApi": "/human/attendapplication/interlock/getInterlockFormContents",
+                "statusApi": "/human/attendapplication/interlock/setInterlockSync",
+                "dummy1": "", "link": "", "vPCoCd": id_co, "coCd": id_co
+            }),
+        )
+        .await
+        .map_err(|e| anyhow!("SetEnageGroup 실패: {e}"))?;
     }
 
     // ── 1) eap110A03: 양식필수 합의자 + 수신참조 해석 ─────────────────────────
@@ -155,7 +200,7 @@ pub async fn submit_approval(
             "/eap/eap110A03",
             &json!({
                 "docID": 0, "formID": form_id.to_string(), "approkey": approkey,
-                "appLineId": "", "draftTp": "", "reDraft": "", "docType": "",
+                "appLineId": line_id.to_string(), "draftTp": "", "reDraft": "", "docType": "",
                 "doc_auth": 0, "pageCode": "UBAP001"
             }),
         )
@@ -171,43 +216,28 @@ pub async fn submit_approval(
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-
-    // ── 2) 개인결재라인 결재자 ────────────────────────────────────────────────
-    let line = approval_line::read_line(c, &line_id.to_string()).await?;
-    let members = line
-        .get("members")
+    // 필수 시행자(m_Oper) — 이걸 pOper로 안 실으면 eap110A06가 2099로 실패(operMust). 실측 확정.
+    let m_oper = result_map
+        .get("m_Oper")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    if members.is_empty() {
-        return Err(anyhow!("결재라인 {line_id}에 결재자가 없음"));
-    }
 
-    // ── 3) pTEAG_APPDOC_LINE = [합의자(kyuljae)] + [결재자(개인라인)] ─────────
-    let mut line_nodes: Vec<Value> = Vec::new();
-    for src in kyuljae.iter() {
-        line_nodes.push(norm_line_node(src, 4000, &co_id));
+    // ── 2) pTEAG_APPDOC_LINE = kyuljaeResult 원본 그대로 ──────────────────────
+    // a03에 appLineId를 주면 kyuljaeResult가 [양식필수 합의 + 개인결재라인]까지 완전히 병합된
+    // 결재선으로 온다. 브라우저는 이걸 무가공으로 pTEAG_APPDOC_LINE에 실어 보낸다(실측 확인).
+    // 직접 재구성(act_id 강제/read_line 병합)하면 브라우저와 어긋나므로 그대로 패스스루한다.
+    if kyuljae.is_empty() {
+        return Err(anyhow!(
+            "a03가 결재선(kyuljaeResult)을 반환하지 않음 — 결재라인 {line_id} 확인 필요"
+        ));
     }
-    for src in members.iter() {
-        line_nodes.push(norm_line_node(src, 3000, &co_id));
-    }
-    // seq / doc_line_*_seq 를 1-base 로 재번호(합의 먼저, 결재 다음)
-    for (i, n) in line_nodes.iter_mut().enumerate() {
-        let seq = i as i64 + 1;
-        if let Some(o) = n.as_object_mut() {
-            o.insert("seq".into(), json!(seq));
-            o.insert("doc_line_mseq".into(), json!(seq));
-            o.insert("doc_line_m_seq".into(), json!(seq));
-            o.insert("doc_line_sseq".into(), json!(1));
-            o.insert("doc_line_s_seq".into(), json!(1));
-        }
-    }
+    let line_nodes: Vec<Value> = kyuljae.clone();
 
-    // ── 4) pRefer = 수신참조(부서) ────────────────────────────────────────────
-    let mut refer_nodes: Vec<Value> = Vec::new();
-    for (i, src) in m_refer.iter().enumerate() {
-        refer_nodes.push(norm_refer(src, i as i64 + 1, &co_id));
-    }
+    // ── 3) pRefer = 수신참조, pOper = 시행자 — a03 원본 패스스루(+org_div) ──────
+    let refer_nodes: Vec<Value> = m_refer.iter().map(norm_participant).collect();
+    // 시행자(m_Oper)는 operMust=1 필수. 안 실으면 서버가 문서 처리를 못 해 2099. 실측 확정.
+    let oper_nodes: Vec<Value> = m_oper.iter().map(norm_participant).collect();
 
     // ── 5) modifyDocInfo compact 뷰 ──────────────────────────────────────────
     let line_compact: Vec<Value> = line_nodes
@@ -224,16 +254,21 @@ pub async fn submit_approval(
             })
         })
         .collect();
-    let receive_list: Vec<Value> = refer_nodes
-        .iter()
-        .map(|n| {
-            json!({
-                "receive_div": "10",
-                "org_div": "d",
-                "org_id": n.get("org_id").cloned().unwrap_or(Value::Null)
-            })
+    // appdocReceiveList: 시행자(40) + 수신참조(10). org_div/org_id는 각 노드 원본에서. (실측)
+    let recv_of = |n: &Value, div: &str| {
+        json!({
+            "receive_div": div,
+            "org_div": n.get("org_div").cloned().unwrap_or(Value::Null),
+            "org_id": n.get("org_id").cloned().unwrap_or(Value::Null)
         })
-        .collect();
+    };
+    let mut receive_list: Vec<Value> = Vec::new();
+    for n in oper_nodes.iter() {
+        receive_list.push(recv_of(n, "40"));
+    }
+    for n in refer_nodes.iter() {
+        receive_list.push(recv_of(n, "10"));
+    }
 
     let doc_contents = encode_uri_component(doc_contents_html);
     let rep_dt = now_kst_datetime();
@@ -251,7 +286,7 @@ pub async fn submit_approval(
         "approkey": approkey, "contents_tp": "10", "doc_contents": doc_contents,
         "pTEAG_APPDOC_LINE": line_nodes,
         "pVKD_TKDDITEM": [], "pVCM_ATTACHFILEINFO": [],
-        "pRefer": refer_nodes, "pReceive": [], "pOper": [], "pTEAG_APPDOC_REF": [],
+        "pRefer": refer_nodes, "pReceive": [], "pOper": oper_nodes, "pTEAG_APPDOC_REF": [],
         "pTEAG_TOC_FOLDER": "", "pDraftTp": "", "seal_use_yn": "", "receipient": "",
         "receipt": "", "iframeHtml": "", "re_draft": "",
         "modifyAppLineYn": "Y", "modifyReceive10": "Y", "modifyReceive20": "Y",
@@ -289,7 +324,7 @@ pub async fn submit_approval(
         "title": doc_title,
         "lineCount": line_nodes.len(),
         "referCount": refer_nodes.len(),
-        "note": "상신 응답을 성공으로 단정 말 것. ⚠️ 일부 양식(특히 근태/외근/연차 등 HP 연동 양식)은 draft(임시보관)에 같은 form_id 문서가 남아있으면 상신이 조용히 막히거나 2099로 실패한다. list_approvals(box_name:\"sent\")로 이 문서가 실제로 떴는지 확인하고, sent 목록에 없으면 list_approvals(box_name:\"draft\")로 임시보관을 조회해 delete_temp_approval로 정리한 뒤 재시도하라. 취소는 cancel_approval(docId)."
+        "note": "상신 응답을 성공으로 단정 말 것 — list_approvals(box_name:\"sent\")로 실제 접수 확인, 취소는 cancel_approval(docId). 근태 양식은 create→GetLinkKey→saveAttendApplicationLinkKey→SetEnageGroup(HP interlock 등록) 후 eap110A06으로 상신한다(§10.19). 등록 누락 시 2099(HP_HPD0110). result=null이면 상신 실패이므로 note가 아니라 docId 유무로 판정."
     }))
 }
 
@@ -330,72 +365,17 @@ pub async fn delete_temp_approval(c: &GwClient, doc_ids: &str) -> Result<Value> 
     }))
 }
 
-/// eap110A06 결재선 노드 정규화 — 원본(kyuljaeResult 또는 eap102A05 member)에서
-/// 필드를 뽑아 서버가 기대하는 형태로 채운다. seq류는 호출부에서 재번호.
-fn norm_line_node(src: &Value, default_act: i64, co_id: &str) -> Value {
-    let ss = |k: &str, d: &str| -> String {
-        match src.get(k) {
-            Some(Value::String(s)) => s.clone(),
-            Some(Value::Number(n)) => n.to_string(),
-            _ => d.to_string(),
-        }
-    };
-    let num = |k: &str| src.get(k).cloned().unwrap_or(json!(0));
-    let act_id = src.get("act_id").and_then(|v| v.as_i64()).unwrap_or(default_act);
-    let act_nm = if act_id == 4000 { "합의" } else { "결재" };
-    let uid = {
-        let u = ss("user_id", "");
-        if u.is_empty() { ss("org_id", "") } else { u }
-    };
-    let div = {
-        let d = ss("div", "");
-        if d.is_empty() { ss("org_div", "m") } else { d }
-    };
-    json!({
-        "div": div, "org_div": div, "org_id": uid, "user_id": uid,
-        "doc_line_gb": "1", "act_id": act_id, "act_nm": act_nm, "act_type": "10",
-        "work_order": 1, "act_order": act_id,
-        "co_id": co_id, "co_nm": ss("co_nm", "(주)이노그리드"),
-        "biz_id": ss("biz_id", co_id), "biz_nm": ss("biz_nm", "(주)이노그리드"),
-        "dept_id": ss("dept_id", ""), "dept_nm": ss("dept_nm", ""), "dept_nm_disp": ss("dept_nm", ""),
-        "user_nm": ss("user_nm", ""),
-        "grade_cd": ss("grade_cd", ""), "grade_nm": ss("grade_nm", ""), "grade_order": num("grade_order"),
-        "duty_cd": ss("duty_cd", ""), "duty_nm": ss("duty_nm", ""), "duty_order": num("duty_order"),
-        "arbitary_yn": "0", "app_yn": "0", "must_yn": "0", "deptline_yn": "0",
-        "login_id": ss("login_id", ""), "path_name": ss("path_name", ""),
-        "work_status": "999", "dp_nm_disp": Value::Null, "dept_line": false, "draftTp": ""
-    })
-}
-
-/// eap110A06 수신참조(pRefer) 노드 정규화 — m_Refer(부서) 원본에서.
-fn norm_refer(src: &Value, seq: i64, co_id: &str) -> Value {
-    let ss = |k: &str, d: &str| -> String {
-        match src.get(k) {
-            Some(Value::String(s)) => s.clone(),
-            Some(Value::Number(n)) => n.to_string(),
-            _ => d.to_string(),
-        }
-    };
-    let dept_id = {
-        let d = ss("dept_id", "");
-        if d.is_empty() { ss("org_id", "") } else { d }
-    };
-    let dept_nm = ss("dept_nm", "");
-    json!({
-        "doc_line_gb": "1", "org_div": "d", "div": "d",
-        "act_id": 5000, "act_nm": "수신참조", "act_type": "40", "act_order": 5000,
-        "deptline_yn": "1", "dept_line": true,
-        "user_nm": if dept_nm.is_empty() { ss("user_nm", "") } else { dept_nm.clone() }, "user_id": "0",
-        "org_id": dept_id, "dept_id": dept_id, "dept_nm": dept_nm, "dept_nm_disp": ss("dept_nm", ""),
-        "co_id": co_id, "co_nm": ss("co_nm", "(주)이노그리드"),
-        "biz_id": co_id, "biz_nm": ss("biz_nm", "(주)이노그리드"),
-        "seq": seq, "work_order": 1,
-        "doc_line_m_seq": seq, "doc_line_mseq": seq, "doc_line_s_seq": 1, "doc_line_sseq": 1,
-        "arbitary_yn": "0", "app_yn": "0", "must_yn": "0",
-        "grade_cd": "", "grade_nm": "", "grade_order": Value::Null,
-        "duty_cd": "", "duty_nm": "", "duty_order": Value::Null,
-        "login_id": "", "path_name": ss("path_name", ""), "work_status": "", "dp_nm_disp": Value::Null
-    })
+/// a03의 m_Oper/m_Refer 원본 노드를 pOper/pRefer 상신 노드로 패스스루.
+/// 실측(브라우저 캡처) 확인: a03 노드는 org_id/dept_line/seq/doc_line_* 가 이미 정확하고,
+/// 브라우저는 딱 하나 `org_div = div` 만 추가해 그대로 보낸다. 그 외 재구성은 하지 않는다.
+/// (개인 시행자/참조자를 부서노드로 강제 변환하던 이전 로직이 2099의 원인이었음.)
+fn norm_participant(src: &Value) -> Value {
+    let mut n = src.clone();
+    if let Some(o) = n.as_object_mut() {
+        let div = o.get("div").and_then(|v| v.as_str()).unwrap_or("m").to_string();
+        o.insert("org_div".into(), json!(div));
+    }
+    n
 }
 
 /// approkey = "ERP_<uuid4-ish>" — 16 랜덤바이트를 uuid 포맷으로.
