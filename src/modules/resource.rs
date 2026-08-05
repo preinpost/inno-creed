@@ -450,6 +450,7 @@ fn check_owner(detail: &Value, me: &str, action: &'static str) -> Result<()> {
     let owner = detail.get("empSeq").and_then(|v| v.as_str()).unwrap_or("");
     if owner != me {
         return Err(NotOwner {
+            relation: "소유",
             kind: "예약",
             action,
             owner: owner.to_string(),

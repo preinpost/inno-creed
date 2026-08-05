@@ -12,11 +12,13 @@ use serde::Deserialize;
 use crate::{client::GwClient, modules};
 
 
-/// 모듈 에러 → MCP 에러 매핑. **소유권 위반(`NotOwner`)만 `invalid_params`**로 분류한다 —
-/// 서버/네트워크 실패가 아니라 호출자가 잘못된 대상을 지목한 것이기 때문이다(리팩터 전 동작 보존).
+/// 모듈 에러 → MCP 에러 매핑. **호출자 잘못(`NotOwner`·`InvalidInput`)만 `invalid_params`**로
+/// 분류한다 — 서버/네트워크 실패가 아니라 잘못된 대상·인자를 준 것이기 때문이다(리팩터 전 동작 보존).
 /// 문자열 매칭이 아니라 타입(`downcast_ref`)으로 판별한다.
 fn map_domain_err(e: anyhow::Error) -> ErrorData {
-    if e.downcast_ref::<crate::error::NotOwner>().is_some() {
+    if e.downcast_ref::<crate::error::NotOwner>().is_some()
+        || e.downcast_ref::<crate::error::InvalidInput>().is_some()
+    {
         ErrorData::invalid_params(e.to_string(), None)
     } else {
         ErrorData::internal_error(e.to_string(), None)
@@ -724,91 +726,6 @@ impl Amaranth {
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
-    // ── 일정 헬퍼(비-도구) ──
-
-    /// 내가 볼 수 있는 전체 캘린더를 sc111A03 `calList` 형식으로 구성.
-    async fn all_cal_list(&self) -> Result<Vec<serde_json::Value>, ErrorData> {
-        let cals = modules::calendar::calendars(&self.client)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        Ok(cals
-            .iter()
-            .map(|c| {
-                serde_json::json!({
-                    "mcalSeq": c.mcal_seq,
-                    "calType": if c.cal_type.is_empty() { "E" } else { &c.cal_type },
-                    "adminYn": "Y",
-                    "color": c.color
-                })
-            })
-            .collect())
-    }
-
-    /// 등록 대상 캘린더 결정: 지정 없으면 본인 개인 캘린더, 지정하면 mcalSeq/이름으로 해석.
-    /// 등록 권한(insertRwGbn)이 없는 캘린더는 선택 가능한 목록과 함께 명시적 에러.
-    async fn resolve_target_cal(
-        &self,
-        key: Option<&str>,
-    ) -> Result<modules::calendar::Calendar, ErrorData> {
-        let cals = modules::calendar::calendars(&self.client)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        let writable = || {
-            cals.iter()
-                .filter(|c| c.can_insert)
-                .map(|c| format!("{}({})", c.title, c.mcal_seq))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let cal = match key {
-            Some(k) => modules::calendar::find(&cals, k).ok_or_else(|| {
-                ErrorData::invalid_params(
-                    format!("'{k}' 에 해당하는 캘린더 없음. 등록 가능: {}", writable()),
-                    None,
-                )
-            })?,
-            None => modules::calendar::personal(&cals, &self.client.emp_seq()).ok_or_else(|| {
-                ErrorData::internal_error(
-                    format!("본인 개인 캘린더를 찾지 못했습니다. 등록 가능: {}", writable()),
-                    None,
-                )
-            })?,
-        };
-        if !cal.can_insert {
-            return Err(ErrorData::invalid_params(
-                format!(
-                    "'{}' 캘린더는 일정 등록 권한이 없습니다. 등록 가능: {}",
-                    cal.title,
-                    writable()
-                ),
-                None,
-            ));
-        }
-        Ok(cal.clone())
-    }
-
-    /// 특정 날짜(YYYYMMDD)의 일정 목록에서 schSeq 매칭 원본 이벤트를 찾는다.
-    async fn find_event(&self, sch_seq: &str, date: &str) -> Result<serde_json::Value, ErrorData> {
-        let cal_list = self.all_cal_list().await?;
-        let events = modules::calendar::list_events(&self.client, date, date, cal_list)
-            .await
-            .map_err(|e| ErrorData::internal_error(format!("일정 조회 실패: {e}"), None))?;
-        events
-            .get("resultList")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| {
-                arr.iter()
-                    .find(|e| e.get("schSeq").and_then(|v| v.as_str()) == Some(sch_seq))
-                    .cloned()
-            })
-            .ok_or_else(|| {
-                ErrorData::invalid_params(
-                    format!("일정을 찾을 수 없음 (schSeq={sch_seq}, date={date})"),
-                    None,
-                )
-            })
-    }
-
     // ── 일정 도구 ──
 
     #[tool(description = "캘린더(일정 달력) 목록을 조회한다")]
@@ -826,7 +743,9 @@ impl Amaranth {
         Parameters(a): Parameters<ListEventsArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
-        let cal_list = self.all_cal_list().await?;
+        let cal_list = modules::calendar::all_cal_list(&self.client)
+            .await
+            .map_err(map_domain_err)?;
         let data = modules::calendar::list_events(&self.client, &a.start, &a.end, cal_list)
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
@@ -841,43 +760,18 @@ impl Amaranth {
         Parameters(a): Parameters<CreateEventArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
-        let allday = a.allday.as_deref().unwrap_or("N");
-        let target = self.resolve_target_cal(a.calendar.as_deref()).await?;
-        let reg = modules::calendar::upsert_event(
+        let data = modules::calendar::create_event_and_verify(
             &self.client,
-            "",
-            &target.mcal_seq,
-            &target.cal_type,
+            a.calendar.as_deref(),
             &a.title,
             &a.start,
             &a.end,
             &a.contents,
-            allday,
+            a.allday.as_deref().unwrap_or("N"),
         )
         .await
-        .map_err(|e| ErrorData::internal_error(format!("일정 등록 실패: {e}"), None))?;
-        let sch_seq = reg
-            .get("schSeq")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .ok_or_else(|| ErrorData::internal_error("등록 응답에 schSeq 없음", None))?;
-
-        // read-back: 시작일 기준 재조회로 실제 생성 확인
-        let day = &a.start[..a.start.len().min(8)];
-        let ev = self.find_event(&sch_seq, day).await.ok();
-        let reflected = ev
-            .as_ref()
-            .map(|e| e.get("schTitle").and_then(|v| v.as_str()) == Some(a.title.as_str()))
-            .unwrap_or(false);
-        let msg = serde_json::json!({
-            "ok": reflected,
-            "schSeq": sch_seq,
-            "title": a.title,
-            "calendar": format!("{}({})", target.title, target.mcal_seq),
-            "period": format!("{}~{}", a.start, a.end),
-            "verified_by_readback": reflected
-        });
-        Ok(CallToolResult::success(vec![ContentBlock::text(msg.to_string())]))
+        .map_err(map_domain_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
     #[tool(
@@ -888,90 +782,18 @@ impl Amaranth {
         Parameters(a): Parameters<UpdateEventArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
-        if a.title.is_none() && a.contents.is_none() && a.start.is_none() && a.end.is_none() {
-            return Err(ErrorData::invalid_params(
-                "변경할 항목(title/contents/start/end)을 하나 이상 지정하세요.",
-                None,
-            ));
-        }
-        let orig = self.find_event(&a.sch_seq, &a.date).await?;
-        let g = |k: &str| orig.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let owner = g("createSeq");
-        if owner != self.client.emp_seq() {
-            return Err(ErrorData::invalid_params(
-                format!(
-                    "본인 작성 일정이 아니라 수정할 수 없습니다 (작성자 empSeq={owner}, 본인={})",
-                    self.client.emp_seq()
-                ),
-                None,
-            ));
-        }
-        let mcal = g("mcalSeq");
-
-        // 변경분만 itemList로 (실측 item 형식)
-        let mut items = Vec::new();
-        if let Some(t) = &a.title {
-            items.push(serde_json::json!({ "item": "schTitle", "schTitle": t }));
-        }
-        if let Some(c) = &a.contents {
-            // ⚠️ 내용 item은 item명(schContents)과 값 필드명(contents)이 다름(실측).
-            items.push(serde_json::json!({ "item": "schContents", "contents": c }));
-        }
-        // 시간 변경: {item:"schDate", schDate:{startDate,endDate,allDay,lunar,lunarDate}} (실측)
-        let new_start = a.start.clone().unwrap_or_else(|| g("startDate"));
-        let new_end = a.end.clone().unwrap_or_else(|| g("endDate"));
-        if a.start.is_some() || a.end.is_some() {
-            let allday = {
-                let ad = g("alldayYn");
-                if ad.is_empty() { "N".to_string() } else { ad }
-            };
-            items.push(serde_json::json!({
-                "item": "schDate",
-                "schDate": {
-                    "startDate": new_start,
-                    "endDate": new_end,
-                    "allDay": allday,
-                    "lunar": "N",
-                    "lunarDate": ""
-                }
-            }));
-        }
-
-        modules::calendar::update_event_items(&self.client, &a.sch_seq, &mcal, items)
-            .await
-            .map_err(|e| ErrorData::internal_error(format!("일정 수정 실패: {e}"), None))?;
-
-        // read-back: schSeq 유지(in-place). 지정한 필드가 반영됐는지 확인.
-        let after = self.find_event(&a.sch_seq, &a.date).await.ok();
-        let reflected = after
-            .as_ref()
-            .map(|e| {
-                let eq = |k: &str, v: &Option<String>| {
-                    v.as_ref()
-                        .map(|x| e.get(k).and_then(|v| v.as_str()) == Some(x.as_str()))
-                        .unwrap_or(true)
-                };
-                eq("schTitle", &a.title)
-                    && eq("contents", &a.contents)
-                    && eq("startDate", &a.start)
-                    && eq("endDate", &a.end)
-            })
-            .unwrap_or(false);
-        let ag = |k: &str| {
-            after
-                .as_ref()
-                .and_then(|e| e.get(k).and_then(|v| v.as_str()))
-                .unwrap_or("")
-                .to_string()
-        };
-        let msg = serde_json::json!({
-            "ok": reflected,
-            "schSeq": a.sch_seq,
-            "title": ag("schTitle"),
-            "period": format!("{}~{}", ag("startDate"), ag("endDate")),
-            "verified_by_readback": reflected
-        });
-        Ok(CallToolResult::success(vec![ContentBlock::text(msg.to_string())]))
+        let data = modules::calendar::update_event_and_verify(
+            &self.client,
+            &a.sch_seq,
+            &a.date,
+            a.title.as_deref(),
+            a.contents.as_deref(),
+            a.start.as_deref(),
+            a.end.as_deref(),
+        )
+        .await
+        .map_err(map_domain_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
     #[tool(
@@ -982,32 +804,10 @@ impl Amaranth {
         Parameters(a): Parameters<DeleteEventArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
-        let orig = self.find_event(&a.sch_seq, &a.date).await?;
-        let g = |k: &str| orig.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let owner = g("createSeq");
-        if owner != self.client.emp_seq() {
-            return Err(ErrorData::invalid_params(
-                format!(
-                    "본인 작성 일정이 아니라 삭제할 수 없습니다 (작성자 empSeq={owner}, 본인={})",
-                    self.client.emp_seq()
-                ),
-                None,
-            ));
-        }
-        let mcal = g("mcalSeq");
-        modules::calendar::delete_event(&self.client, &mcal, &a.sch_seq, "")
+        let data = modules::calendar::delete_event_and_verify(&self.client, &a.sch_seq, &a.date)
             .await
-            .map_err(|e| ErrorData::internal_error(format!("일정 삭제 실패: {e}"), None))?;
-
-        // read-back: 목록에서 사라졌으면 성공
-        let gone = self.find_event(&a.sch_seq, &a.date).await.is_err();
-        let msg = serde_json::json!({
-            "ok": gone,
-            "schSeq": a.sch_seq,
-            "deleted": true,
-            "verified_by_readback": gone
-        });
-        Ok(CallToolResult::success(vec![ContentBlock::text(msg.to_string())]))
+            .map_err(map_domain_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
     // ── 메일 도구 ──
