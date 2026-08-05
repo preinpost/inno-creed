@@ -425,17 +425,17 @@ pub struct DeleteApprovalLineArgs {
 pub struct SubmitApprovalArgs {
     /// 양식 ID(formId). 41(외근)/36(연차) 등.
     pub form_id: i64,
-    /// 문서 제목.
+    /// 문서 제목. ⭐ 양식별 권장 형식은 `get_submission_guide(form_id).draftHelp.defaultDocTitle`/`titleHelp`(예 연차 `[휴가신청] 00/00 오후반차_홍길동(인사&총무팀)`). 사내 관례이므로 사용자 확인 후 확정할 것.
     pub doc_title: String,
-    /// 사용할 개인결재라인 ID. 이 라인의 결재자가 결재(3000) 노드로 실림. save_approval_line으로 준비.
+    /// 사용할 개인결재라인 ID(save_approval_line으로 준비). 이 라인의 결재자는 eap110A03가 **양식필수 합의자·수신참조·시행자와 병합**해 돌려주고, 그 병합 결과가 그대로 결재선으로 실린다. 즉 라인에는 **결재(3000)만** 담으면 되고 양식필수 합의자를 또 넣으면 중복될 수 있음.
     pub line_id: i64,
-    /// HP 근태신청 저장(0hr00011) 요청 body JSON. 근태 양식은 상신 전 이 콜로 HP draft를 먼저 만들어야 함(안 하면 eap110A06가 2099로 실패). ⭐ **채우는 법·양식별 고정코드·복사용 예시는 `get_submission_guide(form_id).draftHelp.hpApplicationExample`**(예: 출장 linkAtCd"2010"/atCd"2101", 외근 종일 atCd"3101"/linkAtCd"3010"). 신원 필드(coCd/deptCd/empCd/empNm/korNm)는 **submit_approval이 로그인 사용자 값으로 자동 덮어씀** — 예시값 그대로 둬도 됨. 형식: `{"applicationList":[{...,linkAtCd,atCd,atDt,startDt,endDt,startTm,endTm,appDyFg,appDy,appTm,...}],"employeeList":[{...}]}`. 빈 문자열이면 이 단계 생략(비근태 양식).
+    /// HP 근태신청 저장 요청 body JSON(0hr00011 + create 두 콜에 쓰임). **근태 양식 전용** — 이걸 넘기면 상신 전에 HP 신청 레코드 생성 + interlock 등록(GetLinkKey→saveAttendApplicationLinkKey→SetEnageGroup)까지 수행한다. ⭐ **채우는 법·양식별 고정코드·복사용 예시는 `get_submission_guide(form_id).draftHelp.hpApplicationExample`**(예: 출장 linkAtCd"2010"/atCd"2101", 외근 종일 atCd"3101"/linkAtCd"3010"). 신원 필드(coCd/deptCd/empCd/empNm/korNm)는 **submit_approval이 로그인 사용자 값으로 자동 덮어씀** — 예시값 그대로 둬도 됨. 형식: `{"applicationList":[{...,linkAtCd,atCd,atDt,startDt,endDt,startTm,endTm,appDyFg,appDy,appTm,...}],"employeeList":[{...}]}`. 빈 문자열이면 이 단계 전체 생략(= 비근태 양식 경로, 아직 미검증).
     pub hp_application_json: String,
-    /// KISS 폼 본문 데이터 JSON 텍스트. `{"ITEMS":{...},"TABLE":{"dbTable1":{...},"dbTable2":{...}}}`. ⭐ **양식별 예시는 `get_submission_guide(form_id).draftHelp.bindDataExample`**. 서버엔 이중인코딩되어 전송됨.
+    /// 폼 본문 데이터 JSON 텍스트. `{"ITEMS":{...},"TABLE":{"dbTable1":{...},"dbTable2":{...}}}`. ⭐ **양식별 예시는 `get_submission_guide(form_id).draftHelp.bindDataExample`**. 실제 결재문서에 렌더되는 값이 이것(doc_contents_html이 아님). 서버엔 이중인코딩되어 전송됨.
     pub bind_data_json: String,
-    /// 표시용 본문 HTML(raw). 내부에서 encodeURIComponent로 인코딩해 전송.
+    /// 표시용 본문 HTML(raw). 내부에서 encodeURIComponent로 인코딩해 전송. 근태 양식은 본문이 bindData/HP연동으로 채워지므로 **한 줄 요약 HTML(예 `<div>2026-12-16 종일외근</div>`)로도 상신이 통과**한다(4양식 실증). 브라우저는 양식 표 전체를 조립해 보내므로, 문서 뷰 표시 품질까지 맞추려면 표 HTML이 필요(미검증). 빈 문자열 가능 여부는 미확인.
     pub doc_contents_html: String,
-    /// 채번 규칙 ID(기본 "1001").
+    /// 채번 규칙 ID. 빈 문자열이면 "1001"(기본 채번)이 자동 적용된다 — 보통 그대로 두면 됨.
     #[serde(default)]
     pub numbering_id: String,
 }
@@ -590,7 +590,7 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "[아마란스] 로그인한 본인 정보(empSeq/부서/이메일 및 근태용 empCd 등)를 반환한다. '내 예약', '내가 결재할 것' 류 필터의 기준값."
+        description = "[아마란스] 로그인한 본인 정보(empSeq/deptSeq/이메일 및 근태용 empCd/deptCd/coCd)를 반환한다. '내 예약', '내가 결재할 것' 류 필터의 기준값. ⚠️ 직책·직급(duty/position)은 포함되지 않는다 — 결재라인 스키마의 grade 판정에는 find_person(본인 이름) 또는 org_chart(dept_id=deptSeq)를 쓸 것."
     )]
     async fn whoami(&self) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
@@ -1285,7 +1285,7 @@ impl Amaranth {
     // 전자결재 읽기 도구(/eap/*). 목록/상세는 헤더 인증만으로 완결 → ensure_session 생략.
     // 카운트는 companyInfo 필요 → ensure_session 선행.
     #[tool(
-        description = "전자결재 함별 문서 목록을 조회한다. box_name=pending(미결)/approved(기결)/approved_ongoing/approved_done/reference(수신참조)/enforcement(시행)/sent(상신)/draft(임시보관). draft는 상신 안 된 임시저장·상신취소 복귀 문서 — 같은 form_id의 draft가 남아있으면 신규 상신이 막힐 수 있어, 상신 실패/미반영 시 여기서 확인 후 delete_temp_approval로 정리."
+        description = "전자결재 함별 문서 목록을 조회한다. box_name=pending(미결)/approved(기결)/approved_ongoing/approved_done/reference(수신참조)/enforcement(시행)/sent(상신)/draft(임시보관). 상신 결과 확인은 sent, 취소 확인도 sent 감소로. draft는 상신 안 된 임시저장·상신취소(purge=false) 복귀 문서이며, 쌓여도 신규 상신을 막지 않는다(과거 '잔여 draft가 2099를 유발한다'는 설은 반증됨) — 정리는 delete_temp_approval."
     )]
     async fn list_approvals(
         &self,
@@ -1322,7 +1322,7 @@ impl Amaranth {
 
     // 조직도 조회(/gw/APIHandler/gw102A0x). 헤더 인증만으로 완결 → ensure_session 생략.
     #[tool(
-        description = "조직도를 조회한다. dept_id 지정 시 그 부서의 사원+직책(duty=dutyName) 목록. dept_id 미지정 시 부서 트리(전체 펼침 — 인사총무팀/인사지원실 등 말단팀까지 나옴); parent_seq로 특정 부서 하위 서브트리만 볼 수도 있음. 결재선 직책→담당자 해석용 재료. ⚠️ 직책으로 담당자를 '확정'하지 말고 후보로만 쓸 것(dutyName 권위, dutyCode 숫자 매핑 불안정). ⚠️ 결재라인 등록용 user_id/co_id/grade_cd는 여기 없음 — 그건 read_approval_line에서 얻을 것."
+        description = "조직도를 조회한다. dept_id 지정 시 그 부서의 사원+직책(duty=dutyName) 목록. dept_id 미지정 시 부서 트리(전체 펼침 — 인사총무팀/인사지원실 등 말단팀까지 나옴); parent_seq로 특정 부서 하위 서브트리만 볼 수도 있음. 결재선 직책→담당자 해석용 재료이자 본인 직급(grade) 확인 경로(dept_id=whoami.deptSeq). ⚠️ 직책으로 담당자를 '확정'하지 말고 후보로만 쓸 것(dutyName 권위, dutyCode 숫자 매핑 불안정). ℹ️ 결재라인 등록용 값 중 user_id=여기의 empSeq, co_id=\"1000\" 고정이고 grade_cd(직급코드)만 없다 — 정확한 값이 필요하면 read_approval_line의 기존 결재자 객체를 재사용."
     )]
     async fn org_chart(
         &self,
@@ -1381,7 +1381,7 @@ impl Amaranth {
 
     // 결재라인 스키마(직책 기반, 번들+override 논리 병합). 로컬 데이터라 세션/인증 불필요.
     #[tool(
-        description = "문서 종류별 결재라인 스키마(직책 기반)를 조회한다. 반환된 branches[].line[]은 act(결재/합의)+pos(직책)만 담는다 — 기안자 직급(grade: 팀원/팀장/사업부장·실장·센터장이상)과 출장의 trip(국내/해외)에 맞는 branch를 골라 각 pos를 org_chart로 담당자(후보)로 해석한 뒤, save_approval_line으로 라인 등록 → 그 line_id를 submit_approval에 사용. ⛔ 서버 자동 결재선 신뢰 금지, 상신 전 사람 확인 필수. 현재 근태 계열(외근/연차/출장/휴일근무)만 수록. 버전·출처는 반환 필드(version/source; 현재 위임전결 기준_260801.xlsx), 사용자 override(~/.config/inno-creed/approval_line.json)가 더 최신이면 그쪽 사용."
+        description = "문서 종류별 결재라인 스키마(직책 기반)를 조회한다. 반환된 branches[].line[]은 act(결재/합의)+pos(직책)만 담는다 — 기안자 직급(grade: 팀원/팀장/사업부장·실장·센터장이상)과 출장의 trip(국내/해외)에 맞는 branch를 골라 각 pos를 담당자(후보)로 해석한 뒤, save_approval_line으로 라인 등록 → 그 line_id를 submit_approval에 사용. ⭐ **본인 grade는 whoami에 없다** — `find_person(본인 이름)` 또는 `org_chart(dept_id=whoami.deptSeq)`의 `duty`(팀원/팀장/센터장…)로 판정할 것. pos 해석: `L_*`(relative)는 org_chart 부서트리에서 기안자 부서의 상위를 타고 올라가 그 부서의 duty 보유자, 나머지(인사총무팀장 등 fixed)는 positions[].dept의 부서원에서 duty로 찾는다. ⛔ 서버 자동 결재선 신뢰 금지, 상신 전 사람 확인 필수. ℹ️ line[]의 합의(act=합의) 중 양식필수 합의자·수신참조·시행자는 상신 시 서버(eap110A03)가 자동 병합하므로 개인결재라인에 중복 등록하지 말 것. 현재 근태 계열(외근/연차/출장/휴일근무)만 수록. 버전·출처는 반환 필드(version/source; 현재 위임전결 기준_260801.xlsx), 사용자 override(~/.config/inno-creed/approval_line.json)가 더 최신이면 그쪽 사용."
     )]
     async fn get_approval_line_schema(
         &self,
@@ -1401,9 +1401,9 @@ impl Amaranth {
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
-    // ── 신청 가이드(양식별 본문 필수항목 + 상신 절차). 본문/상신은 MCP 미자동화 → 사람 안내용. ──
+    // ── 신청 가이드(양식별 draftHelp = submit_approval 기안 데이터 --help + 웹 작성 절차). ──
     #[tool(
-        description = "양식별 '신청 가이드'를 반환한다 — ⭐ **submit_approval 기안 데이터 채우는 법(draftHelp: 고정코드/채울필드/복사용 실동작 예시 hpApplicationExample·bindDataExample) = CLI --help 격**. 그 외 문서 본문 필수항목(requiredBody)·상신 절차(steps)·주의(notes)·결재라인 힌트(approvalLineHint) 포함. submit_approval 호출 전 이 도구로 draftHelp를 조회해 hp_application_json/bind_data_json을 구성할 것. 결재라인은 get_approval_line_schema+save_approval_line로 준비."
+        description = "양식별 '신청 가이드'를 반환한다 — ⭐ **submit_approval 기안 데이터 채우는 법(draftHelp: 고정코드 fixed/채울필드 fill/복사용 실동작 예시 hpApplicationExample·bindDataExample/권장 제목 defaultDocTitle·titleHelp) = CLI --help 격**. 그 외 문서 본문 필수항목(requiredBody)·아마란스 웹 작성 절차(steps)·주의(notes)·결재라인 힌트(approvalLineHint) 포함. submit_approval 호출 전 이 도구로 draftHelp를 조회해 hp_application_json/bind_data_json/doc_title을 구성할 것. 결재라인은 get_approval_line_schema+save_approval_line로 준비. 수록 범위는 근태 4양식(연차36/출장40/외근41/휴일43) — list_submission_guides로 확인."
     )]
     async fn get_submission_guide(
         &self,
@@ -1433,7 +1433,7 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "개인결재라인 1건의 결재자 구성을 조회한다(eap102A05). 반환 members[]는 등록에 필요한 원본 결재자 객체(user_id/co_id/grade_cd/duty_cd/act_id 등) — 신규 라인 만들 때 이걸 재사용해 detail_line에 넣는다. ⭐ org_chart에 없는 user_id 매핑의 출처."
+        description = "개인결재라인 1건의 결재자 구성을 조회한다(eap102A05). 반환 members[]는 등록에 필요한 원본 결재자 객체(user_id/co_id/grade_cd/duty_cd/act_id 등) — 신규 라인 만들 때 이걸 그대로 재사용해 detail_line에 넣으면 전 필드가 채워져 가장 안전하다. (user_id 자체는 org_chart의 empSeq와 동일하므로 새 인물은 org_chart로도 구성 가능 — 이쪽에만 있는 건 grade_cd 같은 표시용 필드.)"
     )]
     async fn read_approval_line(
         &self,
@@ -1484,7 +1484,7 @@ impl Amaranth {
 
     // ── 전자결재 쓰기(상신/상신취소). ⚠️ 실제 결재 발생 — 테스트는 테스트 결재라인으로. ──
     #[tool(
-        description = "문서를 상신(제출)한다(근태 2-phase: 0hr00011 HP저장 → eap110A06 상신). ⚠️ 실제 결재요청·수신참조 통지가 나감 — 테스트는 반드시 테스트 결재라인으로 하고 끝나면 cancel_approval로 취소. ⭐ **hp_application_json / bind_data_json 을 어떻게 채우는지는 `get_submission_guide(양식명 또는 form_id)` 의 `draftHelp` 를 먼저 조회할 것** — 양식별 고정코드(atCd/linkAtCd 등)·의미별 채울 필드·복사용 실동작 예시(hpApplicationExample/bindDataExample)를 준다(CLI --help 격). 신원 필드(coCd/deptCd/empCd/empNm 등)는 이 도구가 로그인 사용자 값으로 **자동 주입**하므로 예시값을 그대로 둬도 됨. 흐름: hp_application_json으로 HP 근태신청(0hr00011→create) 저장 → 근태면 HP interlock 등록(GetLinkKey→saveAttendApplicationLinkKey→SetEnageGroup) → eap110A03(양식필수 합의자/수신참조 자동해석) → line_id 결재자 병합 → eap110A06 상신. 성공 시 새 docId 반환. 근태/외근/연차 등 HP 연동 양식·비연동 양식 모두 순수 API 상신 정상 동작."
+        description = "문서를 상신(제출)한다. ⚠️ 실제 결재요청·수신참조 통지가 나감 — 시험 상신은 본인/합의된 인원만 담은 별도 결재라인으로 하고, 끝나면 `cancel_approval(doc_id, form_id, purge=true)`로 되돌릴 것(상신 직후 문서는 doc_sts=30이라 form_id 필요). ⭐ **hp_application_json / bind_data_json 을 어떻게 채우는지는 `get_submission_guide(양식명 또는 form_id)` 의 `draftHelp` 를 먼저 조회할 것** — 양식별 고정코드(atCd/linkAtCd 등)·의미별 채울 필드·복사용 실동작 예시(hpApplicationExample/bindDataExample)·권장 제목(defaultDocTitle)을 준다(CLI --help 격). 신원 필드(coCd/deptCd/empCd/empNm 등)는 이 도구가 로그인 사용자 값으로 **자동 주입**하므로 예시값을 그대로 둬도 됨. 흐름(근태): 0hr00011 → create(appSq 획득) → eap110A03(결재선 병합 + 양식별 form_d_tp 취득) → HP interlock 등록 3콜(GetLinkKey→saveAttendApplicationLinkKey→SetEnageGroup) → eap110A06 상신. **이 interlock 등록이 빠지면 2099(HP_HPD0110_000XX)** — 근태 상신 실패의 사실상 유일한 원인이었다(잔여 draft·날짜·payload 가설은 전부 반증됨). 성공 시 새 docId 반환하나 응답을 성공으로 단정 말고 list_approvals(sent)로 재확인. 실증 범위: 근태 4양식(연차36/출장40/외근41/휴일43) 순수 API 상신·취소 e2e. HP 비연동(비근태) 양식은 hp_application_json 없이 호출하는 경로가 있으나 **미검증**."
     )]
     async fn submit_approval(
         &self,
@@ -1526,7 +1526,7 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "임시보관 전자결재 문서를 삭제한다(eap107A25). doc_ids는 콤마구분 docId. ⚠️ 실제 삭제(복구 불가). 같은 form_id의 잔여 임시보관 문서가 신규 상신을 막을 때(상신 후 sent 목록에 안 뜰 때) list_approvals(box_name:\"draft\")로 확인 후 정리하는 용도. 삭제 후 draft 재조회로 검증."
+        description = "임시보관 전자결재 문서를 삭제한다(eap107A25). doc_ids는 콤마구분 docId(list_approvals(box_name:\"draft\")에서 확인). ⚠️ 실제 삭제(복구 불가). 용도는 상신취소(purge=false)로 되돌아온 문서나 시험 잔여물 정리 — **상신 실패(2099)의 해결책이 아니다**(잔여 draft 원인설은 반증, 원인은 interlock 등록 누락). 삭제 후 draft 재조회로 검증."
     )]
     async fn delete_temp_approval(
         &self,

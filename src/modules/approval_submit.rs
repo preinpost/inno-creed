@@ -3,19 +3,23 @@
 //! ⚠️ **실제 결재가 발생**한다(결재요청·수신참조 통지가 나감). 테스트는 반드시 테스트 결재라인으로.
 //!
 //! 상신 흐름(팝업이 하던 일을 재현):
-//!  0) 근태 양식: 0hr00011(검증/스테이징) → create(HP신청 커밋, approLineId에 묶인 대기 HP신청 등록).
-//!     HP↔eap 링크는 명시 키가 아니라 서버가 empCd+atDt로 HP 레코드를 매칭(appSq/calLinkKey는 eap110A06에 안 실림).
-//!  1) approkey = "ERP_<uuid>" 생성.
-//!  2) eap110A03(appLineId=line_id)로 **완전 병합된 결재선(kyuljaeResult=합의+결재)
-//!     + 수신참조(m_Refer) + 시행자(m_Oper)** 획득.
-//!  3) pTEAG_APPDOC_LINE = kyuljaeResult 무가공, pRefer = m_Refer(+org_div), pOper = m_Oper(+org_div).
-//!     — 이 셋은 성공 브라우저 상신 payload와 바이트 동일(실측 대조). 브라우저와 정확히 일치시키는 정합성 항목.
-//!  4) eap110A06 POST → resultData.result = 신규 docId.
+//!  0) approkey = "ERP_<uuid>" 생성(클라 생성이 맞음 — 서버 발급 토큰 아님).
+//!  1) 근태 양식: 0hr00011(검증/스테이징) → create(HP신청 커밋 → appSq/appDt 반환).
+//!  2) eap110A03(appLineId=line_id)로 **완전 병합된 결재선(kyuljaeResult=양식필수 합의+개인라인 결재)
+//!     + 수신참조(m_Refer) + 시행자(m_Oper) + form_info.form_d_tp(양식별 interlock 식별자)** 획득.
+//!  3) 근태 양식: HP interlock 등록 3콜 — GetLinkKey(→linkKey) → saveAttendApplicationLinkKey(linkKey↔appSq 바인딩)
+//!     → SetEnageGroup(approKey에 linkKey·콜백API 등록). ⭐ **이게 2099의 핵심**(아래).
+//!  4) pTEAG_APPDOC_LINE = kyuljaeResult 무가공, pRefer = m_Refer(+org_div), pOper = m_Oper(+org_div).
+//!     — 이 셋은 성공 브라우저 상신 payload와 바이트 동일(실측 대조).
+//!  5) eap110A06 POST → resultData.result = 신규 docId.
 //!
-//! ⚠️ **2099(HP_HPD0110)의 진짜 원인은 payload가 아니라 잔여 HP신청 충돌**이다(§8.11.1 + 2026-08-05 라이브 재확정).
-//!    같은 (empCd, atDt)에 이전 임시 draft/대기신청이 남아있으면 eap110A06의 empCd+atDt 링크가 충돌 → HP연동 500.
-//!    pOper 누락/create 생략이 원인이라는 이전 가설은 반증됨(payload를 브라우저와 동일하게 맞춰도, 잔여가 있으면 계속 2099).
-//!    → 상신 전 0hr00001로 (empCd,atDt) 잔여 조회·삭제 + 실패 시 롤백이 필요(구현 예정, §8.11.2/§8.14).
+//! ⚠️ **2099(HP_HPD0110_000XX)의 원인은 interlock 등록 3콜 누락**이다(§10.19~§10.20, 2026-08-05 무필터 전량 캡처로 확정).
+//!    eap110A06의 eap→HP 서버간 연동은 approKey에 등록된 linkKey를 찾는데, 등록이 없으면 대상이 없어 HP가 500을 준다.
+//!    (GetLinkKey/SetEnageGroup 누락 → "Internal Server Error", saveAttendApplicationLinkKey 누락 → "종결 처리 오류".)
+//!    초기 캡처가 `/human/`·`/eap/`만 필터링해 `/system/apiUtilEap/*`·`/personal/hpd0110/*`를 통째로 놓친 게
+//!    장기 오진의 원인이었다. **반증된 가설(재도입 금지)**: payload/pOper 누락, 잔여 임시 draft·대기신청 충돌,
+//!    날짜, doc_sts(10/20), eap prep 콜, 쿠키·토큰·헤더·전송계층 지문, 포털로그인(gw050B01) 세션 — 전부 실측 반증.
+//!    HP↔eap 링크도 "서버가 empCd+atDt로 매칭"이 아니라 **linkKey↔appSq 명시 바인딩**이다(§10.20).
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
@@ -271,7 +275,8 @@ pub async fn submit_approval(
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    // 필수 시행자(m_Oper) — 이걸 pOper로 안 실으면 eap110A06가 2099로 실패(operMust). 실측 확정.
+    // 필수 시행자(m_Oper) — 브라우저 성공 payload와 동일하게 pOper로 그대로 실어 보낸다(정합성).
+    // ※ "pOper 누락이 2099의 원인"이라는 이전 가설은 반증됨(§8.14) — 원인은 interlock 등록 누락.
     let m_oper = result_map
         .get("m_Oper")
         .and_then(|v| v.as_array())
@@ -291,7 +296,6 @@ pub async fn submit_approval(
 
     // ── 3) pRefer = 수신참조, pOper = 시행자 — a03 원본 패스스루(+org_div) ──────
     let refer_nodes: Vec<Value> = m_refer.iter().map(norm_participant).collect();
-    // 시행자(m_Oper)는 operMust=1 필수. 안 실으면 서버가 문서 처리를 못 해 2099. 실측 확정.
     let oper_nodes: Vec<Value> = m_oper.iter().map(norm_participant).collect();
 
     // ── 5) modifyDocInfo compact 뷰 ──────────────────────────────────────────
@@ -384,8 +388,9 @@ pub async fn submit_approval(
 }
 
 /// 임시보관 전자결재 문서 삭제 — `GET /eap/sse/eap107A25?docIdList=<csv>`(SSE 스트림).
-/// 콤마구분 docId를 한 콜로 일괄삭제. 같은 form_id의 잔여 임시보관 문서가 신규 상신을 막을 때
-/// 정리용(07 §8.11). 응답 이벤트별 resultCode + resultData.failCnt로 성공 판정.
+/// 콤마구분 docId를 한 콜로 일괄삭제. 상신취소(purge=false)로 되돌아온 문서나 시험 잔여물 정리용
+/// (07 §8.11.2). ⚠️ 상신 실패(2099)와는 무관 — 잔여 draft 원인설은 반증됨(§10.6).
+/// 응답 이벤트별 resultCode + resultData.failCnt로 성공 판정.
 pub async fn delete_temp_approval(c: &GwClient, doc_ids: &str) -> Result<Value> {
     let ids = doc_ids.trim();
     if ids.is_empty() {
@@ -423,7 +428,7 @@ pub async fn delete_temp_approval(c: &GwClient, doc_ids: &str) -> Result<Value> 
 /// a03의 m_Oper/m_Refer 원본 노드를 pOper/pRefer 상신 노드로 패스스루.
 /// 실측(브라우저 캡처) 확인: a03 노드는 org_id/dept_line/seq/doc_line_* 가 이미 정확하고,
 /// 브라우저는 딱 하나 `org_div = div` 만 추가해 그대로 보낸다. 그 외 재구성은 하지 않는다.
-/// (개인 시행자/참조자를 부서노드로 강제 변환하던 이전 로직이 2099의 원인이었음.)
+/// (개인 시행자/참조자를 부서노드로 강제 변환하던 이전 로직은 브라우저와 어긋나 폐기 — 2099와는 무관했음.)
 fn norm_participant(src: &Value) -> Value {
     let mut n = src.clone();
     if let Some(o) = n.as_object_mut() {
