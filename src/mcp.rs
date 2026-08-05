@@ -1533,8 +1533,26 @@ impl Amaranth {
 impl ServerHandler for Amaranth {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
-        info.instructions =
-            Some("아마란스(gw.innogrid.com) 그룹웨어 도구. 자원/메일 등 조회.".to_string());
+        info.instructions = Some(
+            "이노그리드 그룹웨어 **아마란스**(gw.innogrid.com) 도구. \
+             회의실·일정·메일·게시판·전자결재·근태·조직도를 다룬다. (Dooray 등 다른 그룹웨어가 아님)\n\
+             \n\
+             먼저 잡을 도구:\n\
+             - 무언가를 '찾아야' 하면 `search` — 메일·결재·게시판·일정·자원·파일을 한 번에 훑고, \
+               결과의 ID로 `read_mail`(muid)/`read_approval`(docId+formId)/`read_notice`(artSeqNo)에 바로 이어진다. \
+               모듈별 전용 검색 API는 존재하지 않으므로 이것이 유일한 검색 경로다.\n\
+             - '언제 회의실이 비나'는 `find_free_rooms`(빈 구간 계산 완료본). 예약 목록을 직접 훑어 계산하지 말 것.\n\
+             - 사람의 empSeq가 필요하면 `find_person`, 본인 값은 `whoami`. \
+               결재선·참석자·수신자가 전부 empSeq를 요구한다.\n\
+             - 내 예약을 고치거나 취소하려면 `my_reservations`로 seqNum/resIdx를 먼저 얻는다.\n\
+             \n\
+             주의:\n\
+             - 부작용 있는 도구 — `clock_in`/`clock_out`(실제 근태 기록), `submit_approval`(결재요청 발송), \
+               `send_mail`, `read_notice`(조회수 증가). 사용자가 명시적으로 지시할 때만 호출한다.\n\
+             - 회의실 **정원(수용인원) 데이터는 아마란스에 없다**. 'N명 회의실' 조건은 답할 수 없다.\n\
+             - 날짜는 YYYYMMDD, 시각은 YYYYMMDDHHmm(입력). 조회 결과의 시각은 ISO로 정규화해 반환한다."
+                .to_string(),
+        );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info
     }
