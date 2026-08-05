@@ -77,7 +77,8 @@
 | `delete_temp_approval` | 임시보관 문서 삭제 — 상신취소로 되돌아온 문서·시험 잔여물 정리용 |
 | `list_approval_lines` / `read_approval_line` | 개인결재라인 목록 / 결재자 구성 조회 |
 | `save_approval_line` / `delete_approval_line` | 개인결재라인 생성·수정 / 삭제 (상신 아님, 재사용 config) |
-| `get_approval_line_schema` / `list_approval_line_schemas` | 문서 종류별 결재라인 스키마(직책 기반) |
+| `suggest_approval_line` | **결재선 후보 제안** — 본인 직책으로 구간 판정 + 직책→사람 해석 (⛔ 확정 아님, 사용자 확인 필수) |
+| `get_approval_line_schema` / `list_approval_line_schemas` | 문서 종류별 결재라인 스키마(직책 기반) 원본 |
 | `get_submission_guide` / `list_submission_guides` | 양식별 신청 가이드(필수항목·절차·주의) |
 
 **근태 · 조직 · 나**
@@ -88,7 +89,7 @@
 | `clock_in` / `clock_out` | 출근·퇴근 기록 — ⚠️ 실제 근태 punch, 기존 기록은 덮어쓰지 않음 |
 | `find_person` | **사람 찾기** — 이름·ID·이메일 → `empSeq`/부서/직책/연락처 |
 | `org_chart` | 부서 트리 / 부서별 사원·직책 |
-| `whoami` | 로그인한 본인 정보(`empSeq`·부서·이메일 + 근태용 `empCd`) |
+| `whoami` | 로그인한 본인 정보(`empSeq`·부서·이메일 + 근태용 `empCd` + 부서명·직책·직급) |
 
 > 결재선 구성·회의 참석자·메일 수신자는 전부 `empSeq`를 요구합니다. `find_person`이 그 진입점이고, 본인 값은 `whoami`로 얻습니다.
 > `find_person`의 첫 호출은 전사 명부를 조립하느라 1초 남짓 걸리고, 이후 30분간 캐시됩니다.

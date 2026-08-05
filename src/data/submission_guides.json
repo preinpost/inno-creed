@@ -1,5 +1,5 @@
 {
- "version": "2026-08-05b",
+ "version": "2026-08-05c",
  "source": "03-document-guide.md + 07-eapproval-api-capture.md §8(KISS 근태폼 HPD0110) + §9(위임전결 260801 개정). approvalLineHint는 위임전결 기준_260801 반영.",
  "note": "양식별 '기안 데이터 채우는 법 + 상신 절차' 가이드(결재라인과 별개). 각 폼의 draftHelp 가 submit_approval 의 hp_application_json/bind_data_json 을 어떻게 구성하는지(고정코드/채울필드/실동작 예시) 설명한다 — CLI --help 격. requiredBody/steps 는 아마란스 웹에서 직접 작성할 때의 참고. | 근태 순수API 상신·취소 정식 지원(4양식 실증). 제목은 draftHelp.defaultDocTitle 참고+사용자 확인.",
  "mcpStatus": {
@@ -30,7 +30,7 @@
    "approvalLineHint": "get_approval_line_schema('외근신청') 참조(260801 개정) — 팀원: 팀장→센터장(전결) / 팀장: 팀장→센터장→본부장→부문장(전결) / 센터장이상: 센터장→본부장→부문장→[합의:CFO]→대표이사(전결)",
    "draftHelp": {
     "submitTool": "submit_approval",
-    "howto": "submit_approval 호출용. hp_application_json = hpApplicationExample를 복사해 fill 필드만 교체(fixed 코드·구조는 그대로 유지). bind_data_json = bindDataExample(화면표시용, 서버로 이중인코딩 전송됨). ⭐ 신원 필드(coCd/deptCd/empCd/empNm/korNm 및 bindData empNm)는 submit_approval이 로그인 사용자 값으로 자동 주입하므로 예시에 박힌 이재학/11097 값은 그대로 둬도 됨 — 신경 쓸 것은 fill 필드뿐(단, 부서명/직위/직책 등 표시문자열은 세션이 몰라 예시값 유지되는 cosmetic). line_id는 save_approval_line으로 준비한 결재라인 ID.",
+    "howto": "submit_approval 호출용. hp_application_json = hpApplicationExample를 복사해 fill 필드만 교체(fixed 코드·구조는 그대로 유지). bind_data_json = bindDataExample(화면표시용, 서버로 이중인코딩 전송됨). ⭐ 신원 필드는 submit_approval이 로그인 사용자 값으로 자동 주입한다 — 코드계(coCd/deptCd/empCd)·이름(empNm/korNm)뿐 아니라 **문서에 렌더되는 표시문자열(deptNm/divNm/singleDeptNm/singlePositionNm/singleDutyNm/empNmDutyNm/employees)까지** 조직도 조회값으로 덮어쓴다. 그래서 예시에 박힌 이재학/11097/네이티브 플랫폼팀 값은 그대로 둬도 되고, 신경 쓸 것은 fill 필드뿐이다. (조직도 조회가 실패하면 표시문자열만 예시값이 남는다 — whoami의 profileResolved로 확인 가능.) line_id는 save_approval_line으로 준비한 결재라인 ID.",
     "fixed": {
      "linkAtCd": "3010",
      "atCd": "3101(종일)",
@@ -157,7 +157,7 @@
    "approvalLineHint": "get_approval_line_schema('연차휴가신청') 참조(260801 개정) — 팀원: 팀장→센터장(전결) / 팀장: 팀장→센터장→본부장→부문장(전결) / 센터장이상: 센터장→본부장→부문장→[합의:CFO]→대표이사(전결). ※프로젝트상주 휴가는 패턴B",
    "draftHelp": {
     "submitTool": "submit_approval",
-    "howto": "submit_approval 호출용. hp_application_json = hpApplicationExample를 복사해 fill 필드만 교체(fixed 코드·구조는 그대로 유지). bind_data_json = bindDataExample(화면표시용, 서버로 이중인코딩 전송됨). ⭐ 신원 필드(coCd/deptCd/empCd/empNm/korNm 및 bindData empNm)는 submit_approval이 로그인 사용자 값으로 자동 주입하므로 예시에 박힌 이재학/11097 값은 그대로 둬도 됨 — 신경 쓸 것은 fill 필드뿐(단, 부서명/직위/직책 등 표시문자열은 세션이 몰라 예시값 유지되는 cosmetic). line_id는 save_approval_line으로 준비한 결재라인 ID.",
+    "howto": "submit_approval 호출용. hp_application_json = hpApplicationExample를 복사해 fill 필드만 교체(fixed 코드·구조는 그대로 유지). bind_data_json = bindDataExample(화면표시용, 서버로 이중인코딩 전송됨). ⭐ 신원 필드는 submit_approval이 로그인 사용자 값으로 자동 주입한다 — 코드계(coCd/deptCd/empCd)·이름(empNm/korNm)뿐 아니라 **문서에 렌더되는 표시문자열(deptNm/divNm/singleDeptNm/singlePositionNm/singleDutyNm/empNmDutyNm/employees)까지** 조직도 조회값으로 덮어쓴다. 그래서 예시에 박힌 이재학/11097/네이티브 플랫폼팀 값은 그대로 둬도 되고, 신경 쓸 것은 fill 필드뿐이다. (조직도 조회가 실패하면 표시문자열만 예시값이 남는다 — whoami의 profileResolved로 확인 가능.) line_id는 save_approval_line으로 준비한 결재라인 ID.",
     "fixed": {
      "note": "휴가구분(연차/오전반차/오후반차/반반차)에 따라 atCd/linkAtCd·appDyFg·appTm 상이 — 미캡처."
     },
@@ -385,7 +385,7 @@
    "approvalLineHint": "get_approval_line_schema('출장신청') 참조(260801 개정) — 국내(패턴A) 팀원: 팀장→센터장(전결) / 팀장: 팀장→센터장→본부장→부문장(전결) / 센터장이상: 센터장→본부장→부문장→[합의:CFO]→대표이사(전결). 해외(패턴B)는 팀장·센터장이상 라인에 [합의:인사총무팀장/인사지원실장]+[합의:기술운영부문장] 추가",
    "draftHelp": {
     "submitTool": "submit_approval",
-    "howto": "submit_approval 호출용. hp_application_json = hpApplicationExample를 복사해 fill 필드만 교체(fixed 코드·구조는 그대로 유지). bind_data_json = bindDataExample(화면표시용, 서버로 이중인코딩 전송됨). ⭐ 신원 필드(coCd/deptCd/empCd/empNm/korNm 및 bindData empNm)는 submit_approval이 로그인 사용자 값으로 자동 주입하므로 예시에 박힌 이재학/11097 값은 그대로 둬도 됨 — 신경 쓸 것은 fill 필드뿐(단, 부서명/직위/직책 등 표시문자열은 세션이 몰라 예시값 유지되는 cosmetic). line_id는 save_approval_line으로 준비한 결재라인 ID.",
+    "howto": "submit_approval 호출용. hp_application_json = hpApplicationExample를 복사해 fill 필드만 교체(fixed 코드·구조는 그대로 유지). bind_data_json = bindDataExample(화면표시용, 서버로 이중인코딩 전송됨). ⭐ 신원 필드는 submit_approval이 로그인 사용자 값으로 자동 주입한다 — 코드계(coCd/deptCd/empCd)·이름(empNm/korNm)뿐 아니라 **문서에 렌더되는 표시문자열(deptNm/divNm/singleDeptNm/singlePositionNm/singleDutyNm/empNmDutyNm/employees)까지** 조직도 조회값으로 덮어쓴다. 그래서 예시에 박힌 이재학/11097/네이티브 플랫폼팀 값은 그대로 둬도 되고, 신경 쓸 것은 fill 필드뿐이다. (조직도 조회가 실패하면 표시문자열만 예시값이 남는다 — whoami의 profileResolved로 확인 가능.) line_id는 save_approval_line으로 준비한 결재라인 ID.",
     "fixed": {
      "linkAtCd": "2010",
      "atCd": "2101",
@@ -624,7 +624,7 @@
    "approvalLineHint": "get_approval_line_schema('휴일주말근무') 참조(260801 개정) — 팀원: 팀장→센터장(전결) / 팀장: 팀장→센터장→본부장→부문장(전결) / 센터장이상: 센터장→본부장→부문장→[합의:CFO]→대표이사(전결)",
    "draftHelp": {
     "submitTool": "submit_approval",
-    "howto": "submit_approval 호출용. hp_application_json = hpApplicationExample를 복사해 fill 필드만 교체(fixed 코드·구조는 그대로 유지). bind_data_json = bindDataExample(화면표시용, 서버로 이중인코딩 전송됨). ⭐ 신원 필드(coCd/deptCd/empCd/empNm/korNm 및 bindData empNm)는 submit_approval이 로그인 사용자 값으로 자동 주입하므로 예시에 박힌 이재학/11097 값은 그대로 둬도 됨 — 신경 쓸 것은 fill 필드뿐(단, 부서명/직위/직책 등 표시문자열은 세션이 몰라 예시값 유지되는 cosmetic). line_id는 save_approval_line으로 준비한 결재라인 ID.",
+    "howto": "submit_approval 호출용. hp_application_json = hpApplicationExample를 복사해 fill 필드만 교체(fixed 코드·구조는 그대로 유지). bind_data_json = bindDataExample(화면표시용, 서버로 이중인코딩 전송됨). ⭐ 신원 필드는 submit_approval이 로그인 사용자 값으로 자동 주입한다 — 코드계(coCd/deptCd/empCd)·이름(empNm/korNm)뿐 아니라 **문서에 렌더되는 표시문자열(deptNm/divNm/singleDeptNm/singlePositionNm/singleDutyNm/empNmDutyNm/employees)까지** 조직도 조회값으로 덮어쓴다. 그래서 예시에 박힌 이재학/11097/네이티브 플랫폼팀 값은 그대로 둬도 되고, 신경 쓸 것은 fill 필드뿐이다. (조직도 조회가 실패하면 표시문자열만 예시값이 남는다 — whoami의 profileResolved로 확인 가능.) line_id는 save_approval_line으로 준비한 결재라인 ID.",
     "fixed": {
      "linkAtCd": "5010",
      "atCd": "5101",

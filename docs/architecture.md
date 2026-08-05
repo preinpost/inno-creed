@@ -25,6 +25,7 @@ inno-creed (Rust MCP 서버, 헤드리스)
 - 구조 근거: MCP는 **실행층**, 크레덴셜만 외부(브라우저)에서 취득. 그래서 헤드리스로 돌아간다.
 - 서버 시작 순서: `creds::from_chrome()`(크레덴셜) → stdio MCP 서브. [세션 정보](#4-authtoken-구조--세션-정보-lazy-취득--ttl-캐시)는 첫 도구 호출 시 `ensure_session()`이 lazy 취득(선취득 없음).
 - 소스: `src/{creds,sign,client,mcp}.rs`, `src/modules/*.rs`.
+- **모듈 함수 시그니처 규약**: 첫 인자는 `c: &GwClient`. 예외는 `org::roster`/`org::find_person` 둘뿐이며 `&Arc<GwClient>`를 받는다 — 부서를 `JoinSet`으로 병렬 순회하는데 `spawn`이 `'static`을 요구하고 `GwClient`는 `RwLock` 보유로 `Clone`이 아니기 때문이다. 대안(신규 의존성/역할 분담 붕괴/직렬화)이 전부 대가가 커서 **의도적으로 예외를 유지**한다. 새 함수는 `&GwClient`를 쓸 것(상세: `.claude-workspace/todo/refactor-structure/06-org-arc-signature.md`).
 - **파생 조회**: 일부 도구는 단일 API 래퍼가 아니라 여러 호출을 조합해 서버측에서 계산을 끝낸다 — `find_free_rooms`(자원 목록+예약을 인터벌 연산), `find_person`(부서 전수 순회 후 캐시), `my_reservations`·`pending_approvals`(필터+요약). LLM이 매 호출마다 같은 다단 조합을 반복하지 않게 하려는 것.
 
 ## 3. 크레덴셜 취득 (Chrome / Firefox · macOS·Linux·Windows)

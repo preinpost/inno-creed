@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::wrapper::Parameters,
     model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router, ErrorData, ServerHandler,
 };
@@ -376,6 +376,16 @@ pub struct GetApprovalSchemaArgs {
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
+pub struct SuggestApprovalLineArgs {
+    /// 양식명 또는 form_id. 예: "외근신청", "41", "연차휴가신청", "출장신청", "휴일주말근무".
+    pub doc_type: String,
+    /// 출장신청 전용 — "국내" 또는 "해외"(결재선이 갈린다). 다른 양식은 비워둘 것. 빈값이면 해당 양식의 국내·해외 branch를 모두 반환한다.
+    #[serde(default)]
+    pub trip: String,
+}
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
 pub struct AttendanceTodayArgs {
     /// 조회할 날짜 YYYYMMDD(선택, 비우면 오늘 KST).
     #[serde(default)]
@@ -460,10 +470,15 @@ pub struct DeleteTempApprovalArgs {
     pub doc_ids: String,
 }
 
+/// MCP 서버 핸들러. 상태는 `client` 하나뿐이다.
+/// ⚠️ **라우터를 필드로 들고 있지 않다.** `#[tool_handler]`(인자 없음)의 기본 동작이
+/// `call_tool`/`list_tools` 본문에서 `Self::tool_router()`(정적 생성자)를 매번 호출하는 것이라,
+/// 인스턴스 필드에 라우터를 저장해도 **어떤 경로로도 읽히지 않는다**(rmcp-macros 2.2.0 확인).
+/// 필드를 두면 "인스턴스가 라우터를 보유한다"는 거짓 신호만 남으므로 제거했다.
+/// 훗날 도메인별 라우터를 합성하려면 `#[tool_handler(router = <표현식>)]`로 경로를 명시해야 한다.
 #[derive(Clone)]
 pub struct Amaranth {
     client: Arc<GwClient>,
-    tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
@@ -471,7 +486,6 @@ impl Amaranth {
     pub fn new(client: GwClient) -> Self {
         Self {
             client: Arc::new(client),
-            tool_router: Self::tool_router(),
         }
     }
 
@@ -590,11 +604,15 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "[아마란스] 로그인한 본인 정보(empSeq/deptSeq/이메일 및 근태용 empCd/deptCd/coCd)를 반환한다. '내 예약', '내가 결재할 것' 류 필터의 기준값. ⚠️ 직책·직급(duty/position)은 포함되지 않는다 — 결재라인 스키마의 grade 판정에는 find_person(본인 이름) 또는 org_chart(dept_id=deptSeq)를 쓸 것."
+        description = "[아마란스] 로그인한 본인 정보를 반환한다 — empSeq/deptSeq/이메일, 근태용 empCd/deptCd/coCd, 그리고 **부서명·직책(duty)·직급(position)**. '내 예약', '내가 결재할 것' 류 필터의 기준값이자 결재선 grade 판정 근거. 직책·직급은 세션에 없어 조직도(gw102A02)에서 채우며(30분 캐시), 실패 시 `profileResolved:false`와 함께 빈 값이 온다."
     )]
     async fn whoami(&self) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
         let c = &self.client;
+        // 부서명·직책·직급은 세션(gw050A02)에 없어 조직도에서 채운다(1콜, 30분 캐시).
+        // 실패해도 resolved:false + 빈 값이라 whoami 자체는 성공한다.
+        let prof = modules::org::my_profile(c).await;
+        let p = |k: &str| prof.get(k).cloned().unwrap_or(serde_json::Value::Null);
         let info = serde_json::json!({
             "empSeq": c.emp_seq(),          // UC 계열 사원 ID(결재선·참석자·예약자에 사용)
             "empName": c.emp_name(),
@@ -604,7 +622,12 @@ impl Amaranth {
             "email": format!("{}@{}", c.email_addr(), c.email_domain()),
             "empCd": c.emp_cd(),            // ERP(근태) 계열 — UC seq와 별개 체계
             "deptCd": c.dept_cd(),
-            "coCd": c.co_cd()
+            "coCd": c.co_cd(),
+            // 아래는 조직도(gw102A02) 출처 — 결재선 grade 판정·문서 표시필드에 쓰인다.
+            "deptName": p("deptName"),
+            "duty": p("duty"),              // 직책(팀원/팀장/센터장…)
+            "position": p("position"),      // 직급(책임연구원/부장…)
+            "profileResolved": p("resolved")
         });
         Ok(CallToolResult::success(vec![ContentBlock::text(info.to_string())]))
     }
@@ -1379,9 +1402,24 @@ impl Amaranth {
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
+    // 결재선 후보 제안(스키마 + 조직도). ⛔ 확정이 아니라 후보 — 응답에 검증 필요 표시를 싣는다.
+    #[tool(
+        description = "이 양식을 **내가 기안할 때의 결재선 후보**를 한 번에 제안한다(스키마 + 조직도 해석). 하는 일: 본인 직책(duty)으로 grade 구간 판정 → 해당 branch 선택(출장은 trip 국내/해외) → 각 직책을 실제 사람 후보로 해석(L_* 상대직책은 기안자 부서에서 상위로, 고정직책은 지정 부서에서). ⛔ **결과는 확정 결재선이 아니라 후보다** — 응답의 `verificationRequired:true`·`warnings`·단계별 `status`(후보1/후보다수/미해결)를 그대로 사용자에게 보여주고 **이름을 확인받은 뒤에** save_approval_line으로 등록할 것. 공석·겸직·대행·직책 라벨 차이(규칙 '사업부장' ↔ 조직 '센터장')·위임전결 개정 때문에 해석이 틀릴 수 있다. 등록 시에는 결재(3000) 노드만 담는다(양식필수 합의자·수신참조·시행자는 상신 때 서버가 자동 병합). 스키마 원본만 보려면 get_approval_line_schema."
+    )]
+    async fn suggest_approval_line(
+        &self,
+        Parameters(a): Parameters<SuggestApprovalLineArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let data = modules::approval_line_suggest::suggest_line(&self.client, &a.doc_type, &a.trip)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
+
     // 결재라인 스키마(직책 기반, 번들+override 논리 병합). 로컬 데이터라 세션/인증 불필요.
     #[tool(
-        description = "문서 종류별 결재라인 스키마(직책 기반)를 조회한다. 반환된 branches[].line[]은 act(결재/합의)+pos(직책)만 담는다 — 기안자 직급(grade: 팀원/팀장/사업부장·실장·센터장이상)과 출장의 trip(국내/해외)에 맞는 branch를 골라 각 pos를 담당자(후보)로 해석한 뒤, save_approval_line으로 라인 등록 → 그 line_id를 submit_approval에 사용. ⭐ **본인 grade는 whoami에 없다** — `find_person(본인 이름)` 또는 `org_chart(dept_id=whoami.deptSeq)`의 `duty`(팀원/팀장/센터장…)로 판정할 것. pos 해석: `L_*`(relative)는 org_chart 부서트리에서 기안자 부서의 상위를 타고 올라가 그 부서의 duty 보유자, 나머지(인사총무팀장 등 fixed)는 positions[].dept의 부서원에서 duty로 찾는다. ⛔ 서버 자동 결재선 신뢰 금지, 상신 전 사람 확인 필수. ℹ️ line[]의 합의(act=합의) 중 양식필수 합의자·수신참조·시행자는 상신 시 서버(eap110A03)가 자동 병합하므로 개인결재라인에 중복 등록하지 말 것. 현재 근태 계열(외근/연차/출장/휴일근무)만 수록. 버전·출처는 반환 필드(version/source; 현재 위임전결 기준_260801.xlsx), 사용자 override(~/.config/inno-creed/approval_line.json)가 더 최신이면 그쪽 사용."
+        description = "문서 종류별 결재라인 스키마(직책 기반) **원본**을 조회한다. branches[].line[]은 act(결재/합의)+pos(직책)만 담는다. ⭐ 사람까지 해석된 결과가 필요하면 이 도구 대신 **`suggest_approval_line`**을 쓸 것(본인 직책으로 branch 자동 선택 + 각 pos를 조직도로 후보 해석). 이 도구는 스키마 자체를 보고 싶을 때(규칙 확인·branch 수동 선택)용이다. pos 해석 규칙: `L_*`(relative)는 기안자 부서에서 상위로 올라가며 duty 보유자, 나머지(인사총무팀장 등 fixed)는 positions[].dept의 부서원에서 duty로 찾는다. ⛔ 서버 자동 결재선 신뢰 금지, 상신 전 사람 확인 필수. ℹ️ 양식필수 합의자·수신참조·시행자는 상신 시 서버(eap110A03)가 자동 병합하므로 개인결재라인에 중복 등록하지 말 것. 현재 근태 계열(외근/연차/출장/휴일근무)만 수록. 버전·출처는 반환 필드(version/source; 현재 위임전결 기준_260801.xlsx), 사용자 override(~/.config/inno-creed/approval_line.json)가 더 최신이면 그쪽 사용."
     )]
     async fn get_approval_line_schema(
         &self,
@@ -1484,7 +1522,7 @@ impl Amaranth {
 
     // ── 전자결재 쓰기(상신/상신취소). ⚠️ 실제 결재 발생 — 테스트는 테스트 결재라인으로. ──
     #[tool(
-        description = "문서를 상신(제출)한다. ⚠️ 실제 결재요청·수신참조 통지가 나감 — 시험 상신은 본인/합의된 인원만 담은 별도 결재라인으로 하고, 끝나면 `cancel_approval(doc_id, form_id, purge=true)`로 되돌릴 것(상신 직후 문서는 doc_sts=30이라 form_id 필요). ⭐ **hp_application_json / bind_data_json 을 어떻게 채우는지는 `get_submission_guide(양식명 또는 form_id)` 의 `draftHelp` 를 먼저 조회할 것** — 양식별 고정코드(atCd/linkAtCd 등)·의미별 채울 필드·복사용 실동작 예시(hpApplicationExample/bindDataExample)·권장 제목(defaultDocTitle)을 준다(CLI --help 격). 신원 필드(coCd/deptCd/empCd/empNm 등)는 이 도구가 로그인 사용자 값으로 **자동 주입**하므로 예시값을 그대로 둬도 됨. 흐름(근태): 0hr00011 → create(appSq 획득) → eap110A03(결재선 병합 + 양식별 form_d_tp 취득) → HP interlock 등록 3콜(GetLinkKey→saveAttendApplicationLinkKey→SetEnageGroup) → eap110A06 상신. **이 interlock 등록이 빠지면 2099(HP_HPD0110_000XX)** — 근태 상신 실패의 사실상 유일한 원인이었다(잔여 draft·날짜·payload 가설은 전부 반증됨). 성공 시 새 docId 반환하나 응답을 성공으로 단정 말고 list_approvals(sent)로 재확인. 실증 범위: 근태 4양식(연차36/출장40/외근41/휴일43) 순수 API 상신·취소 e2e. HP 비연동(비근태) 양식은 hp_application_json 없이 호출하는 경로가 있으나 **미검증**."
+        description = "문서를 상신(제출)한다. ⚠️ 실제 결재요청·수신참조 통지가 나감 — 시험 상신은 본인/합의된 인원만 담은 별도 결재라인으로 하고, 끝나면 `cancel_approval(doc_id, form_id, purge=true)`로 되돌릴 것(상신 직후 문서는 doc_sts=30이라 form_id 필요). ⭐ **hp_application_json / bind_data_json 을 어떻게 채우는지는 `get_submission_guide(양식명 또는 form_id)` 의 `draftHelp` 를 먼저 조회할 것** — 양식별 고정코드(atCd/linkAtCd 등)·의미별 채울 필드·복사용 실동작 예시(hpApplicationExample/bindDataExample)·권장 제목(defaultDocTitle)을 준다(CLI --help 격). 신원은 이 도구가 로그인 사용자 값으로 **자동 주입**한다 — 코드계(coCd/deptCd/empCd)·이름뿐 아니라 **문서에 렌더되는 표시문자열(부서명·직급·직책, `singleDeptNm`/`empNmDutyNm`/`employees` 등)까지** 조직도 값으로 덮어쓰므로 예시값을 그대로 둬도 됨. 결재라인은 `suggest_approval_line`으로 후보를 받아 **사용자 확인 후** save_approval_line으로 등록할 것. 흐름(근태): 0hr00011 → create(appSq 획득) → eap110A03(결재선 병합 + 양식별 form_d_tp 취득) → HP interlock 등록 3콜(GetLinkKey→saveAttendApplicationLinkKey→SetEnageGroup) → eap110A06 상신. **이 interlock 등록이 빠지면 2099(HP_HPD0110_000XX)** — 근태 상신 실패의 사실상 유일한 원인이었다(잔여 draft·날짜·payload 가설은 전부 반증됨). 성공 시 새 docId 반환하나 응답을 성공으로 단정 말고 list_approvals(sent)로 재확인. 실증 범위: 근태 4양식(연차36/출장40/외근41/휴일43) 순수 API 상신·취소 e2e. HP 비연동(비근태) 양식은 hp_application_json 없이 호출하는 경로가 있으나 **미검증**."
     )]
     async fn submit_approval(
         &self,
@@ -1566,5 +1604,53 @@ impl ServerHandler for Amaranth {
         );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info
+    }
+}
+
+/// 도구 표면(이름·개수) 스냅샷.
+///
+/// `#[tool_router]` 가 만드는 `Self::tool_router()` 는 **private** 이라(rmcp-macros 2.2.0,
+/// `vis` 기본값 없음) 이 테스트는 `tests/` 가 아니라 이 파일 안에 있어야 한다.
+/// 목적은 커버리지가 아니라 **회귀 기준선**이다 — 파일 분해(`todo/refactor-structure` #09/#10)처럼
+/// 코드를 옮기는 작업에서 도구가 사라지거나 이름이 바뀌는 것을 컴파일러가 못 잡기 때문이다.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 도구 목록 스냅샷. 의도적으로 도구를 추가/삭제했다면 이 목록을 함께 고치면 된다
+    /// (그때 README·docs 도구표도 같이 갱신할 것).
+    const EXPECTED_TOOLS: &[&str] = &[
+        "approval_counts", "attendance_month", "cancel_approval", "cancel_reservation",
+        "clock_in", "clock_out", "create_event", "delete_approval_line", "delete_event",
+        "delete_mail", "delete_temp_approval", "download_attachment", "download_mail_attachment",
+        "find_free_rooms", "find_person", "get_approval_line_schema", "get_attendance_today",
+        "get_submission_guide", "list_approval_line_schemas", "list_approval_lines",
+        "list_approvals", "list_attachments", "list_calendars", "list_events", "list_inbox",
+        "list_mailboxes", "list_notices", "list_reservations", "list_resources",
+        "list_submission_guides", "my_reservations", "org_chart", "pending_approvals",
+        "read_approval", "read_approval_line", "read_mail", "read_notice", "reserve_resource",
+        "save_approval_line", "search", "send_mail", "submit_approval", "suggest_approval_line",
+        "update_event", "update_reservation", "whoami",
+    ];
+
+    #[test]
+    fn 도구_표면이_스냅샷과_일치한다() {
+        let mut names: Vec<String> = Amaranth::tool_router()
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        names.sort();
+        let expected: Vec<String> = EXPECTED_TOOLS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(names, expected, "MCP 도구 표면이 변했다");
+    }
+
+    /// 라우터 생성이 네트워크·크레덴셜 없이 되는지(=핸들러 구성이 순수한지) 확인.
+    /// `GwClient::new(None)` 은 필드 초기화만 한다.
+    #[test]
+    fn 핸들러는_크레덴셜_없이_만들어진다() {
+        let a = Amaranth::new(GwClient::new(None));
+        drop(a);
+        assert_eq!(Amaranth::tool_router().list_all().len(), EXPECTED_TOOLS.len());
     }
 }

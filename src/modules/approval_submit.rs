@@ -101,8 +101,11 @@ pub async fn cancel_approval(
 
 /// 페이로드의 신원 필드를 로그인 사용자 값으로 덮어쓴다(존재하는 키만 교체 — 새 키 추가 안 함).
 /// draftHelp 예시 템플릿에 박힌 타인 신원(empCd/deptCd/coCd/이름)이 그대로 상신되는 것을 방지.
-/// 부서명(deptNm)·직위·직책 등 세션이 모르는 표시문자열은 건드리지 않는다(cosmetic).
+/// 빈 문자열은 덮어쓰지 않는다 — 조직도 조회 실패 시 예시값을 지워버리는 것보다 남기는 편이 낫다.
 fn overwrite_if_present(v: &mut Value, key: &str, val: &str) {
+    if val.is_empty() {
+        return;
+    }
     if let Some(obj) = v.as_object_mut() {
         if obj.contains_key(key) {
             obj.insert(key.to_string(), Value::String(val.to_string()));
@@ -110,10 +113,45 @@ fn overwrite_if_present(v: &mut Value, key: &str, val: &str) {
     }
 }
 
-fn inject_identity(item: &mut Value, co: &str, dept: &str, emp: &str, name: &str) {
+/// 로그인 사용자의 신원·표시정보. 코드계(co/dept/emp)는 세션에서, 표시문자열(부서명/직책/직급)은
+/// `org::my_profile`(조직도 1콜, 30분 캐시)에서 온다. 조직도가 안 잡히면 표시문자열만 빈 값이 되고
+/// 그 필드는 예시값이 유지된다(상신은 그대로 진행).
+struct Identity {
+    co: String,
+    dept: String,
+    emp: String,
+    name: String,
+    dept_nm: String,
+    duty: String,
+    position: String,
+    co_nm: String,
+}
+
+/// 신원 코드 + **문서에 렌더되는 표시문자열**까지 주입한다.
+/// ⚠️ 표시필드를 안 채우면 draftHelp 예시에 박힌 **타인의 이름·부서·직급이 결재문서 본문에 그대로
+/// 찍힌다**(예시 작성자 기준값). cosmetic이 아니라 실제 출력값이라 반드시 덮어쓴다.
+/// 대상 필드(존재할 때만): 코드계 `coCd/deptCd/empCd`, 이름 `empNm/empName/korNm`,
+/// 부서명 `deptNm/deptName/singleDeptNm`, 회사명 `divNm`, 직급 `singlePositionNm`,
+/// 직책 `singleDutyNm`, 조합문자열 `empNmDutyNm`("이름 직책")·`employees`("이름 직급").
+/// `employees`는 신청 대상자 목록이지만 MCP 상신은 항상 **본인 1인** 기준이라 단일값으로 채운다.
+fn inject_identity(item: &mut Value, id: &Identity) {
+    let emp_duty = if id.duty.is_empty() {
+        String::new()
+    } else {
+        format!("{} {}", id.name, id.duty)
+    };
+    let emp_position = if id.position.is_empty() {
+        String::new()
+    } else {
+        format!("{} {}", id.name, id.position)
+    };
     for (k, val) in [
-        ("coCd", co), ("deptCd", dept), ("empCd", emp),
-        ("empNm", name), ("empName", name), ("korNm", name),
+        ("coCd", id.co.as_str()), ("deptCd", id.dept.as_str()), ("empCd", id.emp.as_str()),
+        ("empNm", id.name.as_str()), ("empName", id.name.as_str()), ("korNm", id.name.as_str()),
+        ("deptNm", id.dept_nm.as_str()), ("deptName", id.dept_nm.as_str()),
+        ("singleDeptNm", id.dept_nm.as_str()), ("divNm", id.co_nm.as_str()),
+        ("singlePositionNm", id.position.as_str()), ("singleDutyNm", id.duty.as_str()),
+        ("empNmDutyNm", emp_duty.as_str()), ("employees", emp_position.as_str()),
     ] {
         overwrite_if_present(item, k, val);
     }
@@ -144,18 +182,27 @@ pub async fn submit_approval(
     let user_id = c.emp_seq();
     let user_nm = c.emp_name();
 
-    // 신원 자동 주입값(ERP 코드 체계 — seq와 별개). hp/bind 페이로드의 신원 필드를 이 값으로 덮어씀.
-    let id_co = c.co_cd().to_string();
-    let id_dept = c.dept_cd().to_string();
-    let id_emp = c.emp_cd().to_string();
-    let id_name = c.emp_name().to_string();
+    // 신원 자동 주입값. 코드계(ERP — seq와 별개)는 세션에서, 표시문자열(부서명/직책/직급)은
+    // 조직도 1콜(30분 캐시)에서. hp/bind 페이로드의 해당 필드를 이 값으로 덮어쓴다.
+    let prof = crate::modules::org::my_profile(c).await;
+    let ps = |k: &str| prof.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let id = Identity {
+        co: c.co_cd().to_string(),
+        dept: c.dept_cd().to_string(),
+        emp: c.emp_cd().to_string(),
+        name: c.emp_name().to_string(),
+        dept_nm: ps("deptName"),
+        duty: ps("duty"),
+        position: ps("position"),
+        co_nm: ps("coName"),
+    };
 
     // bindData 검증(유효 JSON이어야 함)
     let mut bind_obj: Value = serde_json::from_str(bind_data_json)
         .map_err(|e| anyhow!("bind_data_json이 유효한 JSON이 아님: {e}"))?;
     // 신원 자동 주입: bindData ITEMS의 신원 표시필드(empNm 등)를 로그인 사용자 값으로.
     if let Some(items) = bind_obj.get_mut("ITEMS") {
-        inject_identity(items, &id_co, &id_dept, &id_emp, &id_name);
+        inject_identity(items, &id);
     }
     // 이중 인코딩: 최종 wire 값 = JSON.stringify(JSON.stringify(bindObj)).
     let s1 = serde_json::to_string(&bind_obj)?; // {"ITEMS":...}
@@ -182,12 +229,12 @@ pub async fn submit_approval(
         for key in ["applicationList", "employeeList"] {
             if let Some(list) = hp_body.get_mut(key).and_then(|v| v.as_array_mut()) {
                 for it in list.iter_mut() {
-                    inject_identity(it, &id_co, &id_dept, &id_emp, &id_name);
+                    inject_identity(it, &id);
                 }
             }
         }
         let create_body = json!({
-            "coCd": "", "appDt": "", "appEmpCd": id_emp, "deptCd": "",
+            "coCd": "", "appDt": "", "appEmpCd": id.emp, "deptCd": "",
             "titleDc": doc_title, "approLineId": line_id.to_string(),
             "calLinkKey": "", "linkKey": "", "approState": "", "fileGroup": 0, "version": "v2",
             "employeeList": hp_body.get("employeeList").cloned().unwrap_or(json!([])),
@@ -238,7 +285,7 @@ pub async fn submit_approval(
         let glk = c
             .call(
                 "/system/apiUtilEap/GetLinkKey",
-                &json!({"menuCode":"HPD0110","approKey":approkey,"vPCoCd":id_co,"coCd":id_co}),
+                &json!({"menuCode":"HPD0110","approKey":approkey,"vPCoCd":id.co,"coCd":id.co}),
             )
             .await
             .map_err(|e| anyhow!("GetLinkKey 실패: {e}"))?;
@@ -246,7 +293,7 @@ pub async fn submit_approval(
         // linkKey ↔ 실제 HP 신청(appSq) 바인딩. 없으면 finalize가 대상 신청을 못 찾아 '종결 처리 오류'.
         c.call(
             "/personal/hpd0110/saveAttendApplicationLinkKey",
-            &json!({"linkKey": link_key, "appSq": app_sq, "coCd": id_co, "appDt": app_dt}),
+            &json!({"linkKey": link_key, "appSq": app_sq, "coCd": id.co, "appDt": app_dt}),
         )
         .await
         .map_err(|e| anyhow!("saveAttendApplicationLinkKey 실패: {e}"))?;
@@ -257,7 +304,7 @@ pub async fn submit_approval(
                 "linkKey": link_key, "formNm": doc_title, "docTitle": doc_title, "contents": "",
                 "contentsApi": "/human/attendapplication/interlock/getInterlockFormContents",
                 "statusApi": "/human/attendapplication/interlock/setInterlockSync",
-                "dummy1": "", "link": "", "vPCoCd": id_co, "coCd": id_co
+                "dummy1": "", "link": "", "vPCoCd": id.co, "coCd": id.co
             }),
         )
         .await
@@ -339,7 +386,8 @@ pub async fn submit_approval(
         "doc_id": 0, "form_id": form_id.to_string(), "numbering_id": numbering_id,
         "rep_dt": rep_dt, "repdt_mod_yn": "0",
         "co_id": co_id, "dept_id": dept_id, "biz_id": co_id, "user_id": user_id,
-        "co_nm": "(주)이노그리드", "dept_nm": "", "user_nm": user_nm,
+        // dept_nm: 브라우저는 기안부서명을 싣는다(§10.17 diff의 유일한 차이였음) — 조직도 값으로 채운다.
+        "co_nm": "(주)이노그리드", "dept_nm": id.dept_nm, "user_nm": user_nm,
         "doc_title": doc_title, "doc_sts": "20", "inservice_time": "0",
         "doc_level": "001", "emergency_level": "1", "doc_security": "0", "use_yn": "1",
         "approkey": approkey, "contents_tp": "10", "doc_contents": doc_contents,
@@ -475,6 +523,66 @@ fn now_kst_datetime() -> String {
     let (y, m, d) = days_to_ymd(days);
     let (hh, mm, ss) = (tod / 3600, (tod % 3600) / 60, tod % 60);
     format!("{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn me() -> Identity {
+        Identity {
+            co: "1000".into(), dept: "BB999".into(), emp: "22222".into(), name: "김철수".into(),
+            dept_nm: "인프라팀".into(), duty: "팀장".into(), position: "부장".into(),
+            co_nm: "(주)이노그리드".into(),
+        }
+    }
+
+    /// draftHelp 예시(출장 ITEMS)에 박힌 타인 표시값이 전부 로그인 사용자 값으로 바뀌어야 한다.
+    /// 이게 안 되면 남의 이름·부서·직급이 결재문서 본문에 그대로 찍힌다.
+    #[test]
+    fn 표시필드까지_전부_주입된다() {
+        let mut v = json!({
+            "empNm": "이재학", "employees": "이재학 책임연구원", "empNmDutyNm": "이재학 팀원",
+            "singleDeptNm": "네이티브 플랫폼팀", "singlePositionNm": "책임연구원", "singleDutyNm": "팀원",
+            "deptNm": "네이티브 플랫폼팀", "divNm": "(주)타사", "empCd": "11097", "taskDc": "업무내용"
+        });
+        inject_identity(&mut v, &me());
+        assert_eq!(v["empNm"], "김철수");
+        assert_eq!(v["employees"], "김철수 부장");
+        assert_eq!(v["empNmDutyNm"], "김철수 팀장");
+        assert_eq!(v["singleDeptNm"], "인프라팀");
+        assert_eq!(v["singlePositionNm"], "부장");
+        assert_eq!(v["singleDutyNm"], "팀장");
+        assert_eq!(v["deptNm"], "인프라팀");
+        assert_eq!(v["divNm"], "(주)이노그리드");
+        assert_eq!(v["empCd"], "22222");
+        // 신원과 무관한 필드는 건드리지 않는다.
+        assert_eq!(v["taskDc"], "업무내용");
+    }
+
+    /// 없는 키를 새로 만들지 않는다(양식마다 필드 구성이 달라 임의 추가는 위험).
+    #[test]
+    fn 없는_키는_추가하지_않는다() {
+        let mut v = json!({ "empNm": "이재학" });
+        inject_identity(&mut v, &me());
+        assert!(v.get("singleDeptNm").is_none());
+        assert!(v.get("employees").is_none());
+    }
+
+    /// 조직도 조회 실패(표시정보 빈 값) 시엔 예시값을 지우지 말고 그대로 둔다 —
+    /// 빈 문자열로 덮으면 문서에 부서·직급이 통째로 사라진다.
+    #[test]
+    fn 표시정보를_모르면_예시값을_유지한다() {
+        let mut v = json!({ "empNm": "이재학", "singleDeptNm": "네이티브 플랫폼팀", "employees": "이재학 책임연구원" });
+        let unknown = Identity {
+            co: "1000".into(), dept: "BB999".into(), emp: "22222".into(), name: "김철수".into(),
+            dept_nm: String::new(), duty: String::new(), position: String::new(), co_nm: String::new(),
+        };
+        inject_identity(&mut v, &unknown);
+        assert_eq!(v["empNm"], "김철수");                       // 아는 값은 바꾸고
+        assert_eq!(v["singleDeptNm"], "네이티브 플랫폼팀");      // 모르는 값은 유지
+        assert_eq!(v["employees"], "이재학 책임연구원");
+    }
 }
 
 /// epoch days → (year, month, day). Howard Hinnant civil_from_days.

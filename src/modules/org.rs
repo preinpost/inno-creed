@@ -4,6 +4,20 @@
 //!
 //! ⚠️ 조회 결과는 정확하지만, 여기서 "이 직책 담당자 = 이 문서 결재자"로 단정하지 말 것.
 //! dutyName(직책 텍스트)이 권위 필드이고 dutyCode 숫자 매핑은 불안정 — [[eapproval-server-default-line-untrusted]].
+//!
+//! ## ⚠️ 시그니처 예외 — 이 모듈의 `roster`/`find_person`만 `&Arc<GwClient>`를 받는다
+//!
+//! 다른 모듈(그리고 이 파일의 `dept_tree`/`dept_members`/`my_profile`)은 전부 `&GwClient`가 규약이다.
+//! 둘만 다른 이유는 **동시성**이다:
+//!  - `roster`는 부서를 `JoinSet`으로 8개씩 병렬 순회하는데, `JoinSet::spawn`이 `'static` future를
+//!    요구해 `&GwClient` 참조를 캡처할 수 없다 → `Arc::clone`이 필수.
+//!  - `GwClient`는 `RwLock`을 직접 보유해 `Clone`이 아니므로 `Arc` 말고는 우회로가 없다.
+//!  - `find_person`은 병렬성과 무관하지만 `roster`를 호출해서 `Arc` 요구가 전염된 것이다.
+//!
+//! 없앨 수는 있으나 셋 다 대가가 있어 **의도적으로 현 상태를 유지한다**(2026-08-05 판단):
+//! `futures::buffer_unordered` 도입(신규 의존성) / `roster`를 client.rs로 이관(역할 분담 붕괴) /
+//! 직렬화(첫 조회가 부서 수만큼 순차 호출 — 명백한 후퇴).
+//! **새 함수를 추가할 땐 `&GwClient`를 쓸 것.** 근거: `todo/refactor-structure/06-org-arc-signature.md`.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -143,6 +157,62 @@ pub async fn roster(c: &Arc<GwClient>) -> Result<Vec<Value>> {
 
     c.set_roster(people.clone());
     Ok(people)
+}
+
+/// 본인의 **표시정보**(부서명/직책/직급) — gw102A02 1콜(내 부서 사원목록에서 내 empSeq 매칭).
+/// 세션(gw050A02)은 코드/seq만 주고 부서명·직책(dutyName)·직급(positionName)이 없어서 별도 조회가 필요하다.
+/// 쓰이는 곳: `whoami` 노출 / `submit_approval`의 문서 표시필드 자동 주입 / 결재선 grade 판정.
+/// 30분 캐시. **실패해도 에러를 올리지 않고** 빈 값 + `resolved:false`를 준다 —
+/// 표시문자열이 없다고 상신 자체를 막을 이유는 없기 때문(호출부가 예시값을 그대로 두면 됨).
+pub async fn my_profile(c: &GwClient) -> Value {
+    if let Some(cached) = c.cached_profile() {
+        return cached;
+    }
+    let emp_seq = c.emp_seq();
+    let dept_seq = c.dept_seq();
+    let fallback = json!({
+        "resolved": false, "empSeq": emp_seq, "name": c.emp_name(),
+        "deptId": dept_seq, "deptName": "", "duty": "", "position": "", "coName": ""
+    });
+    if emp_seq.is_empty() || dept_seq.is_empty() {
+        return fallback;
+    }
+
+    let Ok(members) = dept_members(c, &dept_seq).await else {
+        return fallback;
+    };
+    let me = members
+        .get("members")
+        .and_then(|m| m.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .find(|m| m.get("empSeq").and_then(|v| v.as_str()) == Some(emp_seq.as_str()))
+        })
+        .cloned();
+    let Some(me) = me else {
+        return fallback;
+    };
+
+    // 회사명은 부서경로 첫 마디("(주)이노그리드>…>네이티브 플랫폼팀").
+    let co_name = s(&me, "deptPath")
+        .split('>')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let p = json!({
+        "resolved": true,
+        "empSeq": emp_seq,
+        "name": s(&me, "name"),
+        "deptId": s(&me, "deptId"),
+        "deptName": s(&me, "deptName"),
+        "duty": s(&me, "duty"),          // 직책(팀원/팀장/센터장…) — 결재선 grade 판정의 근거
+        "position": s(&me, "position"),  // 직급(책임연구원/부장…) — 문서 표시용
+        "coName": co_name,
+        "deptPath": s(&me, "deptPath")
+    });
+    c.set_profile(p.clone());
+    p
 }
 
 /// 이름·로그인ID·이메일로 사람 찾기. 결재선/참석자/수신자에 필요한 `empSeq`를 얻는 진입점.

@@ -119,6 +119,15 @@ struct RosterCache {
     fetched_at: Option<Instant>,
 }
 
+/// 본인 표시정보(부서명/직책/직급) 캐시. 조회(gw102A02)는 `modules::org::my_profile`이 한다.
+/// gw050A02 세션정보에는 **직책·직급·부서명이 없어서**(코드/seq만) 조직도에서 한 번 더 가져온다.
+/// 인사이동 주기를 고려해 명부와 같은 TTL(30분).
+#[derive(Default)]
+struct ProfileCache {
+    profile: Option<serde_json::Value>,
+    fetched_at: Option<Instant>,
+}
+
 pub struct GwClient {
     /// 크레덴셜은 lazy 로드/캐시. 시작 시 취득 성공하면 Some로 seed, 실패면 None으로 시작(서버는 뜬다).
     /// 미로드 상태에서 도구 호출 시 브라우저 쿠키에서 재취득 시도 → 실패하면 로그인 안내를 반환.
@@ -128,6 +137,7 @@ pub struct GwClient {
     session: RwLock<SessionCache>,
     calendars: RwLock<CalendarCache>,
     roster: RwLock<RosterCache>,
+    profile: RwLock<ProfileCache>,
 }
 
 impl GwClient {
@@ -139,6 +149,25 @@ impl GwClient {
             session: RwLock::new(SessionCache::default()),
             calendars: RwLock::new(CalendarCache::default()),
             roster: RwLock::new(RosterCache::default()),
+            profile: RwLock::new(ProfileCache::default()),
+        }
+    }
+
+    /// 유효한(TTL 내) 본인 표시정보 캐시. 없거나 만료면 None → `modules::org::my_profile`이 재조회.
+    pub fn cached_profile(&self) -> Option<serde_json::Value> {
+        let cache = self.profile.read().ok()?;
+        cache
+            .fetched_at
+            .is_some_and(|t| t.elapsed() < ROSTER_TTL)
+            .then(|| cache.profile.clone())
+            .flatten()
+    }
+
+    /// 조회한 본인 표시정보를 캐시에 넣는다.
+    pub fn set_profile(&self, p: serde_json::Value) {
+        if let Ok(mut cache) = self.profile.write() {
+            cache.profile = Some(p);
+            cache.fetched_at = Some(Instant::now());
         }
     }
 
