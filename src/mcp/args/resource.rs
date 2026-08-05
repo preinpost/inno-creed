@@ -80,7 +80,8 @@ pub struct FindFreeRoomsArgs {
     pub date: String,
     /// 필요한 시간(분). 예: 2시간=120
     pub duration_min: i64,
-    /// 탐색 구간 HHmm-HHmm (기본 "0900-1800"). 오전만이면 "0900-1200"
+    /// 탐색 구간 HHmm-HHmm (기본 "0900-1800"). 오전만이면 "0900-1200".
+    /// 구간을 넓게 줘도 **점심시간 13:00~14:00은 항상 빠진다**.
     #[serde(default)]
     pub window: String,
     /// 건물/자원종류: ""(전체) | "본사" | "구로" | attrSeq 숫자

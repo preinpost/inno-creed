@@ -33,6 +33,25 @@ pub fn days_to_ymd(z: i64) -> (i64, i64, i64) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// `YYYYMMDD` → epoch days. `days_to_ymd`의 역함수(Howard Hinnant `days_from_civil`).
+/// 8자리가 아니거나 숫자가 아니면 `None`.
+/// 날짜 간 경과일이 필요할 때 쓴다(예: 여러 날에 걸친 예약이 며칠을 덮는지).
+pub fn ymd_to_days(ymd: &str) -> Option<i64> {
+    if ymd.len() != 8 || !ymd.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let y: i64 = ymd[0..4].parse().ok()?;
+    let m: i64 = ymd[4..6].parse().ok()?;
+    let d: i64 = ymd[6..8].parse().ok()?;
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146097 + doe - 719468)
+}
+
 /// (y, m, d) → `YYYYMMDD`. `days_to_ymd`와 짝으로 쓴다.
 pub fn fmt_ymd((y, m, d): (i64, i64, i64)) -> String {
     format!("{y:04}{m:02}{d:02}")
@@ -73,6 +92,23 @@ mod tests {
         assert_eq!(days_to_ymd(19723), (2024, 1, 1));
         assert_eq!(days_to_ymd(19782), (2024, 2, 29)); // 윤일
         assert_eq!(days_to_ymd(20670), (2026, 8, 5));
+    }
+
+    /// `days_to_ymd`의 역함수라는 것이 유일한 계약 — 왕복이 항등이어야 한다.
+    #[test]
+    fn ymd_to_days는_days_to_ymd의_역함수다() {
+        for d in [0i64, -1, 19723, 19782, 20670, 25000] {
+            assert_eq!(ymd_to_days(&fmt_ymd(days_to_ymd(d))), Some(d), "왕복 실패: {d}");
+        }
+        // 경과일 1 — 월/연 경계와 윤일에서도(문자열 뺄셈으로는 못 얻는 값)
+        let diff = |a: &str, b: &str| ymd_to_days(a).unwrap() - ymd_to_days(b).unwrap();
+        assert_eq!(diff("20260807", "20260806"), 1);
+        assert_eq!(diff("20260901", "20260831"), 1);
+        assert_eq!(diff("20270101", "20261231"), 1);
+        assert_eq!(diff("20240301", "20240229"), 1); // 윤일
+
+        assert_eq!(ymd_to_days("2026-08-06"), None); // 8자리 아님
+        assert_eq!(ymd_to_days("2026080a"), None);
     }
 
     #[test]

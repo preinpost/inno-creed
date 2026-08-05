@@ -275,9 +275,47 @@ pub fn slim_reservation(r: &Value) -> Value {
     })
 }
 
+/// 사내 점심시간(자정 기준 분). **아마란스 서버가 아는 값이 아니라 사내 규칙**이라 여기 상수로 둔다.
+/// 서버는 이 시간대 예약을 막지 않으므로, MCP가 ①빈 시간에서 빼고 ②겹치면 경고를 붙인다.
+const LUNCH: (i64, i64) = (13 * 60, 14 * 60);
+/// 사용자에게 보이는 표기. 응답 문구가 여러 곳에 나오므로 한 곳에서 만든다.
+const LUNCH_LABEL: &str = "13:00~14:00";
+
+/// 예약 구간(`YYYYMMDDHHmm`)이 점심시간과 겹치는가.
+/// 여러 날에 걸친 예약은 **하루라도** 점심시간을 덮으면 true(그래서 날짜 경과일 계산이 필요하다).
+/// 형식이 깨졌으면 판단하지 않는다(false) — 경고는 부가 정보라 파싱 실패로 예약을 막지 않는다.
+fn overlaps_lunch(start: &str, end: &str) -> bool {
+    let abs = |s: &str| -> Option<i64> {
+        (s.len() == 12).then_some(())?;
+        let day = crate::util::ymd_to_days(&s[..8])?;
+        let h: i64 = s[8..10].parse().ok()?;
+        let m: i64 = s[10..12].parse().ok()?;
+        Some(day * 1440 + h * 60 + m)
+    };
+    let (Some(a), Some(z)) = (abs(start), abs(end)) else {
+        return false;
+    };
+    if z <= a {
+        return false;
+    }
+    // 걸친 각 날짜의 점심 구간과 비교. 다일 예약도 있으므로(공용좌석 등) 날짜 수만큼 순회한다.
+    let (d0, d1) = (a.div_euclid(1440), (z - 1).div_euclid(1440));
+    (d0..=d1).any(|d| a < d * 1440 + LUNCH.1 && z > d * 1440 + LUNCH.0)
+}
+
+/// 점심시간이 걸릴 때 응답에 실을 경고. 겹치지 않으면 `None`.
+/// **막지 않고 알리기만 한다** — 실제로 점심시간에 회의를 잡는 경우가 있어서, 판단은 사용자 몫이다.
+fn lunch_warning(start: &str, end: &str) -> Option<String> {
+    overlaps_lunch(start, end).then(|| {
+        format!("⚠️ 예약 시간에 점심시간({LUNCH_LABEL})이 포함됩니다. 의도한 것인지 사용자에게 확인하세요.")
+    })
+}
+
 /// 빈 시간 찾기. `date`=YYYYMMDD, `duration_min`=필요 시간(분), `window`=탐색 구간(HHmm-HHmm),
 /// `group`=""|"본사"|"구로". 자원별로 예약을 빼고 `duration_min` 이상인 구간만 남긴다.
 /// 종일·다일 예약(예: 반년짜리 공용좌석)은 해당일 전체 점유로 처리한다.
+/// **점심시간(13:00~14:00)도 예약과 똑같이 점유로 처리**해 빈 구간에 들어가지 않게 한다
+/// (예: 12:00~15:00이 비어도 2시간 요청은 12:00~13:00·14:00~15:00으로 쪼개져 후보에서 빠진다).
 pub async fn find_free_slots(
     c: &GwClient,
     date: &str,
@@ -325,6 +363,11 @@ pub async fn find_free_slots(
                 (z > a).then_some((a, z))
             })
             .collect();
+        // 점심시간을 예약과 동일한 점유로 취급(창 안쪽으로 클립).
+        let lunch = (LUNCH.0.max(win_start), LUNCH.1.min(win_end));
+        if lunch.1 > lunch.0 {
+            busy.push(lunch);
+        }
         busy.sort();
 
         // 겹침 병합 후 빈 구간 산출
@@ -374,6 +417,10 @@ pub async fn find_free_slots(
         "group": if group.trim().is_empty() { "전체" } else { group },
         "roomsChecked": rooms.len(),
         "roomsWithSlot": out.len(),
+        "lunchBreak": LUNCH_LABEL,
+        "note": format!(
+            "점심시간({LUNCH_LABEL})은 빈 구간에서 제외했습니다. 점심시간에 잡아야 한다면 reserve_resource로 시각을 직접 지정하세요."
+        ),
         "rooms": out
     }))
 }
@@ -517,17 +564,25 @@ pub async fn reserve_and_verify(
     let detail = get_reservation(c, res_seq, seq_num, &res_idx)
         .await
         .map_err(|e| anyhow!("등록 후 재조회 실패: {e}"))?;
-    let reflected = detail.get("reqText").and_then(|v| v.as_str()) == Some(req_text);
+    let stored = detail.get("reqText").and_then(|v| v.as_str()).unwrap_or("");
+    let reflected = stored == req_text;
 
-    Ok(json!({
+    // ⚠️ `reqText`는 **요청값이 아니라 재조회로 읽은 실제 저장값**을 싣는다. 요청값을 그대로
+    // 되돌려주면 서버가 다르게 저장했을 때(`ok:false`) 응답만 보고는 무엇이 저장됐는지 알 수 없다.
+    // 수정(`update_and_verify`)도 같은 규칙이다.
+    let mut msg = json!({
         "ok": reflected,
         "seqNum": seq_num,
         "resIdx": res_idx,
         "resSeq": res_seq,
-        "reqText": req_text,
+        "reqText": stored,
         "period": format!("{start}~{end}"),
         "verified_by_readback": reflected
-    }))
+    });
+    if let Some(w) = lunch_warning(start, end) {
+        msg["lunchWarning"] = json!(w);
+    }
+    Ok(msg)
 }
 
 /// 예약 수정 + **소유권 가드 + read-back 검증**. 변경분만 지정하고 나머지는 기존값을 유지한다.
@@ -568,7 +623,7 @@ pub async fn update_and_verify(
     let ag = |k: &str| after.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
     let reflected = ag("startDate") == f.start && ag("endDate") == f.end && ag("reqText") == f.req_text;
 
-    Ok(json!({
+    let mut msg = json!({
         "ok": reflected,
         "seqNum": new_seq,
         "resIdx": new_idx,
@@ -577,7 +632,11 @@ pub async fn update_and_verify(
         "reqText": ag("reqText"),
         "period": format!("{}~{}", ag("startDate"), ag("endDate")),
         "verified_by_readback": reflected
-    }))
+    });
+    if let Some(w) = lunch_warning(&f.start, &f.end) {
+        msg["lunchWarning"] = json!(w);
+    }
+    Ok(msg)
 }
 
 /// 예약 취소 + **소유권 가드 + read-back 검증**.
@@ -757,6 +816,40 @@ mod tests {
 
         // empSeq 필드 자체가 없으면 ""와 비교 → 불일치 → 거부
         assert!(check_owner(&json!({}), "3166", "취소").is_err());
+    }
+
+    /// 점심시간 겹침 판정. 경계(13:00 종료·14:00 시작)는 **겹치지 않는 것**이 핵심 —
+    /// 12:00~13:00 회의에 경고가 뜨면 매일 오전 회의마다 잡음이 된다.
+    #[test]
+    fn overlaps_lunch는_경계를_제외하고_판정한다() {
+        // 겹침
+        assert!(overlaps_lunch("202608061300", "202608061400")); // 정확히 점심
+        assert!(overlaps_lunch("202608061230", "202608061330")); // 앞에서 물림
+        assert!(overlaps_lunch("202608061330", "202608061430")); // 뒤로 물림
+        assert!(overlaps_lunch("202608061000", "202608061800")); // 통째로 포함
+        assert!(overlaps_lunch("202608061310", "202608061320")); // 점심 안쪽
+
+        // 안 겹침 — 경계 맞닿음
+        assert!(!overlaps_lunch("202608061200", "202608061300"));
+        assert!(!overlaps_lunch("202608061400", "202608061500"));
+        assert!(!overlaps_lunch("202608060900", "202608061000"));
+
+        // 다일 예약: 하루라도 점심을 덮으면 겹침
+        assert!(overlaps_lunch("202608061800", "202608081000"), "중간 날(8/7) 점심을 덮는다");
+        assert!(!overlaps_lunch("202608061800", "202608071000"), "8/6 저녁~8/7 오전은 점심 없음");
+        assert!(overlaps_lunch("202608311800", "202609011500"), "월 경계 — 9/1 점심을 덮는다");
+
+        // 형식 오류·역전 구간은 판단하지 않는다(경고는 부가 정보라 예약을 막지 않는다)
+        assert!(!overlaps_lunch("20260806", "202608061400"));
+        assert!(!overlaps_lunch("202608061400", "202608061300"));
+        assert!(!overlaps_lunch("", ""));
+    }
+
+    #[test]
+    fn lunch_warning은_겹칠때만_문구를_준다() {
+        assert!(lunch_warning("202608061230", "202608061330")
+            .is_some_and(|w| w.contains("13:00~14:00")));
+        assert_eq!(lunch_warning("202608061400", "202608061500"), None);
     }
 
     /// rs121A12는 전체 필드를 요구하므로, 미지정 항목은 현재 예약값으로 채워야 한다.

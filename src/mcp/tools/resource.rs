@@ -35,7 +35,7 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "[아마란스] 회의실 빈 시간을 찾는다. 날짜·필요시간(분)·구간·건물을 주면 자원별 예약을 빼고 가능한 구간만 반환. 예: date=20260805, duration_min=120, window=\"0900-1200\", group=\"본사\""
+        description = "[아마란스] 회의실 빈 시간을 찾는다. 날짜·필요시간(분)·구간·건물을 주면 자원별 예약을 빼고 가능한 구간만 반환. 예: date=20260805, duration_min=120, window=\"0900-1200\", group=\"본사\". ⚠️ **점심시간 13:00~14:00은 예약과 동일하게 점유로 처리해 결과에서 제외**한다(응답의 lunchBreak/note 참조) — 점심시간에 잡아야 하면 reserve_resource로 직접 지정할 것."
     )]
     async fn find_free_rooms(
         &self,
@@ -68,7 +68,7 @@ impl Amaranth {
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
-    #[tool(description = "회의실을 예약한다(등록 후 재조회로 실제 생성 확인). 시각은 YYYYMMDDHHmm")]
+    #[tool(description = "회의실을 예약한다(등록 후 재조회로 실제 생성 확인). 시각은 YYYYMMDDHHmm. ⚠️ **13:00~14:00은 점심시간** — 예약 구간이 여기 걸치면 응답에 lunchWarning이 실린다. 막지는 않으니 그 경우 사용자에게 의도한 것인지 확인할 것.")]
     async fn reserve_resource(
         &self,
         Parameters(a): Parameters<ReserveArgs>,
@@ -83,7 +83,7 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "회의실 예약을 수정한다(본인 소유만; 변경분만 지정, 수정 후 재조회로 확인). 시각은 YYYYMMDDHHmm"
+        description = "회의실 예약을 수정한다(본인 소유만; 변경분만 지정, 수정 후 재조회로 확인). 시각은 YYYYMMDDHHmm. ⚠️ 바꾼 시간이 **점심시간 13:00~14:00**에 걸치면 응답에 lunchWarning이 실린다 — 사용자에게 확인할 것."
     )]
     async fn update_reservation(
         &self,
