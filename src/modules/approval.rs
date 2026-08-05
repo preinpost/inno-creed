@@ -6,6 +6,7 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 use crate::client::GwClient;
+use crate::util::{days_to_ymd, digits_only, fmt_ymd, json_str};
 
 /// 함(box) → (목록 API, eaBoxId, menuNo, periodPicker, 응답 list 경로).
 /// 수신계열(미결/기결/수신참조/시행)은 eap105A04(resultData.map.list), 상신함은 eap107A04(resultData.list.list).
@@ -235,10 +236,6 @@ pub async fn pending_digest(c: &GwClient, page_size: i64) -> Result<Value> {
     }))
 }
 
-/// 날짜 문자열에서 숫자만(YYYY-MM-DD → YYYYMMDD).
-fn digits_only(s: &str) -> String {
-    s.chars().filter(|c| c.is_ascii_digit()).collect()
-}
 
 /// 기본 조회 범위(최근 ~3개월) → (sfrDt, stoDt) YYYYMMDD. chrono 없이 SystemTime으로 계산.
 fn default_range() -> (String, String) {
@@ -249,35 +246,12 @@ fn default_range() -> (String, String) {
     (fmt_ymd(days_to_ymd(day - 92)), fmt_ymd(days_to_ymd(day)))
 }
 
-/// epoch days → (year, month, day). Howard Hinnant civil_from_days.
-fn days_to_ymd(z: i64) -> (i64, i64, i64) {
-    let z = z + 719468;
-    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
 
-fn fmt_ymd((y, m, d): (i64, i64, i64)) -> String {
-    format!("{y:04}{m:02}{d:02}")
-}
 
-/// 필드를 문자열로(number/string 혼용 흡수).
-fn json_str(v: Option<&Value>) -> String {
-    match v {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
-        Some(Value::Bool(b)) => b.to_string(),
-        _ => String::new(),
-    }
-}
 
 /// HTML → 대략 평문(태그 제거·엔티티 디코드). 상세 본문이 contentsWord로 안 올 때 fallback.
+/// ⛔ **`board::html_to_text`와 통합 금지 — 동작이 반대다.** 이쪽(결재)은 블록 구분 없이 태그를
+/// 공백 하나로 바꿔 본문을 **한 줄로 눌러** 쓴다. 게시판·메일 쪽은 개행·탭으로 구조를 보존한다.
 fn html_to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut in_tag = false;
@@ -300,7 +274,62 @@ fn html_to_text(html: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// 연속 공백/개행 축약.
+/// 연속 공백/개행 축약. ⛔ **`board::collapse_ws`와 통합 금지** —
+/// 이쪽은 **개행까지 전부 없애** 한 줄로 만들고, 저쪽은 빈 줄을 1개까지 보존한다.
 fn collapse_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 함 이름 → API/menuNo 매핑. 실측으로 확정된 값이라 바뀌면 다른 함을 조회하게 된다.
+    /// 상신함(sent)·임시보관(draft)만 **다른 API·다른 응답 경로**를 쓴다는 점이 핵심.
+    #[test]
+    fn box_spec은_8개_함을_매핑한다() {
+        assert_eq!(box_spec("pending").unwrap(), ("eap105A04", "1000900", "1001000", "ARRIVED_DT", "map"));
+        assert_eq!(box_spec("sent").unwrap(), ("eap107A04", "1000300", "1000400", "REP_DT", "list"));
+        assert_eq!(box_spec("draft").unwrap(), ("eap107A06", "1000300", "1000500", "REP_DT", "list"));
+        for b in ["approved", "approved_ongoing", "approved_done", "reference", "enforcement"] {
+            let (api, _, menu, _, path) = box_spec(b).unwrap();
+            assert_eq!(api, "eap105A04", "{b}는 수신계열 API여야 한다");
+            assert_eq!(path, "map", "{b}는 resultData.map.list 경로여야 한다");
+            assert!(menu.starts_with("1001"), "{b}의 menuNo가 수신계열 대역이 아니다");
+        }
+        assert!(box_spec("없는함").is_err());
+        assert!(box_spec("").is_err());
+    }
+
+    /// ⚠️ 결재의 `html_to_text`/`collapse_ws`는 `board` 의 동명 함수와 **의도적으로 다르다** —
+    /// 여기서는 블록 구분 없이 태그를 공백으로 바꾸고 개행을 전부 없앤다(본문을 한 줄로).
+    /// 근거: `.claude-workspace/todo/refactor-structure/05-shared-util-extraction.md` (B)절.
+    #[test]
+    fn html_to_text는_블록구분_없이_공백으로만_바꾼다() {
+        assert_eq!(html_to_text("<p>가</p><p>나</p>"), " 가  나 ");
+        assert!(!html_to_text("가<br>나").contains('\n'), "결재 본문은 개행을 만들지 않는다");
+        assert_eq!(html_to_text("&lt;a&gt;&nbsp;b"), "<a> b");
+    }
+
+    #[test]
+    fn collapse_ws는_개행까지_전부_없앤다() {
+        assert_eq!(collapse_ws("가\n나  다"), "가 나 다");
+        assert!(!collapse_ws("가\n\n나").contains('\n'), "결재는 한 줄로 눌러야 한다");
+    }
+
+    /// 기본 조회 범위는 "오늘로부터 92일 전 ~ 오늘". 오늘에 의존하므로 불변식만 검증한다.
+    #[test]
+    fn default_range는_92일_구간이다() {
+        let (from, to) = default_range();
+        assert_eq!(from.len(), 8);
+        assert_eq!(to.len(), 8);
+        assert!(from < to, "시작이 종료보다 앞서야 한다");
+        // 같은 함수의 날짜 계산으로 역산해 정확히 92일 차이인지 확인
+        let day = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| (d.as_secs() / 86400) as i64)
+            .unwrap_or(0);
+        assert_eq!(to, fmt_ymd(days_to_ymd(day)));
+        assert_eq!(from, fmt_ymd(days_to_ymd(day - 92)));
+    }
 }

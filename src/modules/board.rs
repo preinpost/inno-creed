@@ -5,6 +5,9 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 use crate::client::GwClient;
+// json_str은 util 소유. mail 모듈이 `board::json_str`로 참조해 온 경로를 유지하려고 재수출한다.
+pub(crate) use crate::util::json_str;
+use crate::util::digits_only;
 
 /// 최근 공지/게시글 목록 — `ViewBoardNewAndNoticeArtList`.
 /// `use_list_art_content:Y`로 본문 프리뷰까지 내려온다. 결과는 유용 필드만 추려서 반환.
@@ -227,10 +230,6 @@ pub async fn download_attachment(
     }))
 }
 
-/// 날짜 문자열에서 숫자만 추출(YYYY-MM-DD/YYYY.MM.DD → YYYYMMDD). 빈값은 그대로 빈값.
-fn digits_only(s: &str) -> String {
-    s.chars().filter(|c| c.is_ascii_digit()).collect()
-}
 
 /// 콤마 구분 uid 문자열 → 개별 uid 벡터(공백/빈값 제거).
 fn split_uids(uid: &str) -> Vec<String> {
@@ -241,18 +240,12 @@ fn split_uids(uid: &str) -> Vec<String> {
         .collect()
 }
 
-/// 필드를 문자열로. 서버가 number/string을 혼용(예: read_cnt는 목록에선 문자열, 상세에선 정수).
-pub(crate) fn json_str(v: Option<&Value>) -> String {
-    match v {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
-        Some(Value::Bool(b)) => b.to_string(),
-        _ => String::new(),
-    }
-}
 
 /// 게시글 HTML 본문을 대략적인 평문으로 변환(외부 크레이트 없이). 블록 경계는 개행으로,
 /// 태그 제거, 주요 엔티티 디코드. 완벽한 렌더링이 아니라 에이전트 읽기용 근사.
+/// ⛔ **`approval::html_to_text`와 통합 금지 — 동작이 반대다.** 이쪽(게시판·메일)은 블록 태그
+/// (br/p/div/tr/li/h1~h3)를 개행으로, td/th를 탭으로 바꿔 **구조를 보존**한다. 결재 쪽은 모든
+/// 태그를 공백 하나로 눌러 한 줄로 만든다. 이름이 같다고 합치면 본문 표시가 조용히 바뀐다.
 pub(crate) fn html_to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut in_tag = false;
@@ -294,6 +287,7 @@ pub(crate) fn html_to_text(html: &str) -> String {
 }
 
 /// 연속 공백/개행 정리(태그 제거 후 남는 과도한 공백 축약). 빈 줄은 최대 1개까지 유지.
+/// ⛔ **`approval::collapse_ws`와 통합 금지** — 이쪽은 **개행을 보존**하고 저쪽은 전부 없앤다.
 pub(crate) fn collapse_ws(s: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     for line in s.split('\n') {
@@ -316,4 +310,56 @@ fn truncate(s: &str, max_chars: usize) -> String {
     }
     let cut: String = s.chars().take(max_chars).collect();
     format!("{cut}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ⚠️ 이 모듈의 `html_to_text`/`collapse_ws`는 `approval` 의 동명 함수와 **의도적으로 다르다**
+    /// (게시판·메일 본문은 줄바꿈을 살리고, 결재 본문은 한 줄로 누른다).
+    /// 이름이 같다고 합치면 게시판/메일 본문 표시가 조용히 바뀐다 — 그걸 막는 테스트다.
+    /// 근거: `.claude-workspace/todo/refactor-structure/05-shared-util-extraction.md` (B)절.
+    #[test]
+    fn html_to_text는_블록구조를_개행으로_살린다() {
+        assert_eq!(html_to_text("<p>가</p><p>나</p>"), "\n가\n\n나\n");
+        assert_eq!(html_to_text("가<br>나"), "가\n나");
+        assert_eq!(html_to_text("<td>가</td><td>나</td>"), "\t가\t\t나\t"); // 셀은 탭
+        assert_eq!(html_to_text("<span>가</span>나"), "가나");            // 인라인은 그대로
+    }
+
+    #[test]
+    fn html_to_text는_엔티티를_디코드한다() {
+        assert_eq!(html_to_text("a&nbsp;b"), "a b");
+        assert_eq!(html_to_text("&lt;tag&gt;"), "<tag>");
+        assert_eq!(html_to_text("&quot;q&quot; &#39;s&#39; &amp;"), "\"q\" 's' &");
+    }
+
+    #[test]
+    fn collapse_ws는_빈줄을_최대_한개만_남긴다() {
+        assert_eq!(collapse_ws("가\n\n\n\n나"), "가\n\n나");
+        assert_eq!(collapse_ws("  가   나  "), "가 나");
+        assert_eq!(collapse_ws("\n\n가\n\n"), "가"); // 앞뒤는 trim
+        assert!(collapse_ws("가\n나").contains('\n'), "게시판/메일은 개행을 보존해야 한다");
+    }
+
+    #[test]
+    fn truncate는_바이트가_아니라_문자로_자른다() {
+        assert_eq!(truncate("가나다라마", 3), "가나다…");
+        assert_eq!(truncate("가나다", 3), "가나다");   // 경계값: 자르지 않음
+        assert_eq!(truncate("가나다", 10), "가나다");
+        assert_eq!(truncate("", 3), "");
+        assert_eq!(truncate("가나다라", 0), "…");
+        // 멀티바이트를 바이트로 자르면 패닉이 난다 — 안 나는 것 자체가 계약이다.
+        assert_eq!(truncate("🙂🙂🙂", 2).chars().count(), 3); // 이모지 2 + 말줄임
+    }
+
+    #[test]
+    fn split_uids는_공백과_빈값을_거른다() {
+        assert_eq!(split_uids("a,b,c"), vec!["a", "b", "c"]);
+        assert_eq!(split_uids(" a , b "), vec!["a", "b"]);
+        assert_eq!(split_uids("a,,b,"), vec!["a", "b"]);
+        assert!(split_uids("").is_empty());
+        assert!(split_uids(" , ").is_empty());
+    }
 }

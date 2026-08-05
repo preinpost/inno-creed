@@ -7,6 +7,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use crate::client::GwClient;
+use crate::util::days_to_ymd;
 
 const BASE: &str = "/human/common/judgeTimeManagement";
 
@@ -184,16 +185,40 @@ pub fn today_kst() -> String {
     format!("{y:04}{m:02}{d:02}")
 }
 
-/// epoch days → (year, month, day). Howard Hinnant civil_from_days.
-fn days_to_ymd(z: i64) -> (i64, i64, i64) {
-    let z = z + 719468;
-    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, m, d)
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn month_range는_윤년과_월경계를_처리한다() {
+        assert_eq!(month_range("202402").unwrap(), ("20240201".into(), "20240229".into())); // 윤년
+        assert_eq!(month_range("202602").unwrap(), ("20260201".into(), "20260228".into())); // 평년
+        assert_eq!(month_range("210002").unwrap(), ("21000201".into(), "21000228".into())); // 100년=평년
+        assert_eq!(month_range("200002").unwrap(), ("20000201".into(), "20000229".into())); // 400년=윤년
+        assert_eq!(month_range("202612").unwrap(), ("20261201".into(), "20261231".into()));
+        assert_eq!(month_range("202601").unwrap(), ("20260101".into(), "20260131".into()));
+        assert_eq!(month_range("202604").unwrap(), ("20260401".into(), "20260430".into()));
+    }
+
+    #[test]
+    fn month_range는_잘못된_입력을_거른다() {
+        assert!(month_range("2026").is_err());   // 6자리 아님
+        assert!(month_range("202613").is_err()); // 월 범위 초과
+        assert!(month_range("202600").is_err()); // 0월
+        assert!(month_range("20260a").is_err()); // 숫자 아님
+        assert!(month_range("").is_err());
+    }
+
+    /// KST 보정이 실제로 걸리는지. 값 자체는 오늘에 의존하므로 형식·자기일관성만 본다.
+    #[test]
+    fn today_kst는_8자리_YYYYMMDD다() {
+        let t = today_kst();
+        assert_eq!(t.len(), 8);
+        assert!(t.chars().all(|c| c.is_ascii_digit()));
+        let (y, m, d) = (&t[0..4], &t[4..6], &t[6..8]);
+        assert!(y >= "2020");
+        assert!((1..=12).contains(&m.parse::<i64>().unwrap()));
+        assert!((1..=31).contains(&d.parse::<i64>().unwrap()));
+    }
 }

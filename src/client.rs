@@ -511,3 +511,46 @@ impl GwClient {
         self.session.read().unwrap().info.co_cd.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// reqwest가 default-features=false라 `.form()`이 없어 직접 구현한 인코더.
+    /// 규칙: 비예약 문자는 그대로, 공백은 `+`, 나머지는 %XX(대문자 hex).
+    /// ⚠️ `approval_submit::encode_uri_component`(공백→%20)와 **규칙이 다르다** — 섞으면 안 된다.
+    #[test]
+    fn form_urlencode는_공백을_플러스로_바꾼다() {
+        assert_eq!(form_urlencode(&[("a", "b c")]), "a=b+c");
+        assert_eq!(form_urlencode(&[("k", "-_.~")]), "k=-_.~"); // 비예약 문자는 보존
+        assert_eq!(form_urlencode(&[("a", "1"), ("b", "2")]), "a=1&b=2");
+        assert_eq!(form_urlencode(&[("q", "가")]), "q=%EA%B0%80"); // UTF-8 바이트별 %XX
+        assert_eq!(form_urlencode(&[("v", "a&b=c")]), "v=a%26b%3Dc"); // 구분자 이스케이프
+        assert_eq!(form_urlencode(&[]), "");
+    }
+
+    #[test]
+    fn parse_cd_filename은_RFC5987을_우선한다() {
+        // filename* 이 있으면 그쪽(퍼센트 디코드)
+        assert_eq!(
+            parse_cd_filename("attachment; filename=\"fallback.txt\"; filename*=UTF-8''%EA%B0%80.txt"),
+            Some("가.txt".to_string())
+        );
+        // 없으면 filename=
+        assert_eq!(
+            parse_cd_filename("attachment; filename=\"보고서.pdf\""),
+            Some("보고서.pdf".to_string())
+        );
+        assert_eq!(parse_cd_filename("attachment"), None);
+        assert_eq!(parse_cd_filename(""), None);
+    }
+
+    #[test]
+    fn pct_decode는_잘린_시퀀스를_원문으로_둔다() {
+        assert_eq!(pct_decode("%EA%B0%80"), "가");
+        assert_eq!(pct_decode("plain"), "plain");
+        assert_eq!(pct_decode("a%2"), "a%2");   // 잘린 %XX → 그대로(패닉 없음)
+        assert_eq!(pct_decode("%zz"), "%zz");   // hex 아님 → 그대로
+        assert_eq!(pct_decode(""), "");
+    }
+}

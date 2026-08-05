@@ -1647,6 +1647,16 @@ mod tests {
 
     /// 라우터 생성이 네트워크·크레덴셜 없이 되는지(=핸들러 구성이 순수한지) 확인.
     /// `GwClient::new(None)` 은 필드 초기화만 한다.
+    /// 서버가 resIdx/seqNum을 number로도 string으로도 준다 — 둘 다 같은 인덱스 문자열이 돼야
+    /// 예약 수정·취소가 대상을 놓치지 않는다.
+    #[test]
+    fn json_idx는_number와_string을_같게_만든다() {
+        assert_eq!(json_idx(Some(&serde_json::json!("3"))), Some("3".into()));
+        assert_eq!(json_idx(Some(&serde_json::json!(3))), Some("3".into()));
+        assert_eq!(json_idx(None), None);
+        assert_eq!(json_idx(Some(&serde_json::Value::Null)), Some("null".into()));
+    }
+
     #[test]
     fn 핸들러는_크레덴셜_없이_만들어진다() {
         let a = Amaranth::new(GwClient::new(None));

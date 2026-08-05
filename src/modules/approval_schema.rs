@@ -129,3 +129,50 @@ fn find_form<'a>(
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 번들 스키마는 양식명·alias·form_id 세 경로로 모두 찾을 수 있어야 한다
+    /// (도구 인자로 "외근신청서"/"외근"/"41" 이 다 들어온다).
+    #[test]
+    fn get_schema는_이름_alias_form_id로_찾는다() {
+        for q in ["외근신청", "외근신청서", "외근", "41"] {
+            let v = get_schema(q).unwrap_or_else(|e| panic!("'{q}' 조회 실패: {e}"));
+            assert_eq!(v["docType"], "외근신청", "'{q}'가 다른 양식으로 갔다");
+        }
+        assert!(get_schema("없는양식").is_err());
+    }
+
+    /// 결재선 스키마는 260801 개정본이어야 한다(0706 PDF는 폐기).
+    #[test]
+    fn 번들_스키마는_260801_개정본이다() {
+        let v = get_schema("연차휴가신청").unwrap();
+        assert_eq!(v["sourceOf"], "bundled");
+        assert_eq!(v["version"], "2026-08-01");
+        assert!(v["positions"].is_object(), "직책 정의가 있어야 pos를 해석할 수 있다");
+        let branches = v["schema"]["branches"].as_array().expect("branches 없음");
+        assert!(!branches.is_empty());
+        // 팀원 구간은 "팀장 → 센터장(전결)" 2단계로 간소화됐다(260801 핵심 변경).
+        let team_member = branches
+            .iter()
+            .find(|b| b["when"]["grade"] == "팀원")
+            .expect("팀원 branch 없음");
+        let line = team_member["line"].as_array().unwrap();
+        assert_eq!(line.len(), 2);
+        assert_eq!(line[0]["pos"], "L_팀장");
+        assert_eq!(line[1]["pos"], "L_센터장");
+        assert_eq!(line[1]["final"], true);
+    }
+
+    #[test]
+    fn list_schemas는_근태_4양식을_담는다() {
+        let v = list_schemas().unwrap();
+        let forms = v["forms"].as_array().unwrap();
+        let ids: Vec<i64> = forms.iter().filter_map(|f| f["formId"].as_i64()).collect();
+        for want in [36, 40, 41, 43] {
+            assert!(ids.contains(&want), "form_id {want} 누락 (연차36/출장40/외근41/휴일43)");
+        }
+    }
+}

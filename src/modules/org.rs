@@ -27,6 +27,7 @@ use serde_json::{json, Value};
 use tokio::task::JoinSet;
 
 use crate::client::GwClient;
+use crate::util::s;
 
 /// 부서 트리 — gw102A01. `parent_seq`="0"이면 전사 트리, 특정 deptId면 그 부서 하위 서브트리.
 /// `isTreeAllOpen:true`로 **전체 노드 펼침**(과거 partial 트리 문제 해소 — 경영지원본부 하위 인사총무팀/인사지원실까지 나옴).
@@ -249,12 +250,3 @@ pub async fn find_person(c: &Arc<GwClient>, query: &str) -> Result<Value> {
     }))
 }
 
-/// 필드를 문자열로(number/string 혼용 흡수).
-fn s(v: &Value, k: &str) -> String {
-    match v.get(k) {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
-        Some(Value::Bool(b)) => b.to_string(),
-        _ => String::new(),
-    }
-}

@@ -32,7 +32,8 @@ fn scope_spec(scope: &str) -> Result<(&'static str, &'static str)> {
 /// `전체` 검색 시 훑을 범위. 실측에서 결과가 나온 6종만(나머지 boardType은 항상 빈 결과).
 const ALL_SCOPES: [&str; 6] = ["메일", "결재", "게시판", "일정", "자원", "파일"];
 
-/// 필드를 문자열로. ⚠️ 일부 필드는 **다국어 객체**(`{kr,en,jp,cn}`)로 온다
+/// 필드를 문자열로. ⛔ **`util::s`와 통합 금지 — 동작이 다르다.**
+/// ⚠️ 일부 필드는 **다국어 객체**(`{kr,en,jp,cn}`)로 온다
 /// (결재 `deptNm`/`userNm`/`formNm` 실측) → 그 경우 한국어 값을 꺼낸다.
 fn s(v: &Value, k: &str) -> String {
     match v.get(k) {
@@ -191,4 +192,90 @@ pub async fn search(
         "totalAcrossModules": total,
         "results": groups
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scope_spec은_별칭을_boardType으로_바꾼다() {
+        assert_eq!(scope_spec("메일").unwrap(), ("0", "메일"));
+        assert_eq!(scope_spec("mail").unwrap(), ("0", "메일"));
+        assert_eq!(scope_spec(" 전자결재 ").unwrap(), ("6", "전자결재"));
+        assert_eq!(scope_spec("공지").unwrap(), ("9", "게시판"));
+        assert_eq!(scope_spec("회의실").unwrap(), ("13", "자원"));
+        assert_eq!(scope_spec("파일").unwrap(), ("10", "파일"));
+        assert!(scope_spec("몰라").is_err());
+        assert!(scope_spec("전체").is_err(), "'전체'는 상위에서 ALL_SCOPES로 펼친다");
+    }
+
+    #[test]
+    fn all_scopes는_전부_해석된다() {
+        for sc in ALL_SCOPES {
+            assert!(scope_spec(sc).is_ok(), "ALL_SCOPES의 '{sc}'가 해석 불가");
+        }
+    }
+
+    /// ⚠️ 이 `s`는 다른 모듈의 동명 함수와 **다르다** — 다국어 객체에서 `kr`을 꺼낸다.
+    /// (결재 deptNm/userNm/formNm이 `{kr,en,jp,cn}`으로 오는 실측 대응.) 통합하면 안 되는 이유.
+    #[test]
+    fn s는_다국어_객체에서_한국어를_꺼낸다() {
+        let v = json!({
+            "plain": "문자열",
+            "num": 42,
+            "multi": {"kr": "인사총무팀", "en": "HR"},
+            "empty_multi": {"en": "HR"},
+            "arr": [1, 2]
+        });
+        assert_eq!(s(&v, "plain"), "문자열");
+        assert_eq!(s(&v, "num"), "42");
+        assert_eq!(s(&v, "multi"), "인사총무팀");
+        assert_eq!(s(&v, "empty_multi"), ""); // kr 없으면 빈 문자열
+        assert_eq!(s(&v, "arr"), "");
+        assert_eq!(s(&v, "없는키"), "");
+    }
+
+    #[test]
+    fn snippet은_공백을_눌러_n자로_자른다() {
+        assert_eq!(snippet("  가나  다라\n마바  ", 100), "가나 다라 마바");
+        assert_eq!(snippet("abcdefghij", 3), "abc");
+        assert_eq!(snippet("한글도 문자수 기준", 3), "한글도"); // 바이트 아님
+        assert_eq!(snippet("", 10), "");
+    }
+
+    /// 정규화의 핵심 계약: **후속 조회 ID가 살아남아야 한다**(muid/docId+formId/artSeqNo).
+    #[test]
+    fn normalize는_모듈별_후속조회_ID를_보존한다() {
+        let mail = normalize("0", "메일", &json!({
+            "subject": "제목", "muid": "123", "boxName": "INBOX",
+            "fromAddrName": "이재학", "fromAddrEmail": "a@b.c", "mailBody": "본문 내용"
+        }));
+        assert_eq!(mail["module"], "메일");
+        assert_eq!(mail["muid"], "123");
+        assert_eq!(mail["title"], "제목");
+
+        let appr = normalize("6", "전자결재", &json!({
+            "docTitle": "외근신청", "docId": "141640", "formId": "41",
+            "deptNm": {"kr": "네이티브 플랫폼팀"}, "userNm": {"kr": "이재학"}
+        }));
+        assert_eq!(appr["docId"], "141640");
+        assert_eq!(appr["formId"], "41");
+        assert_eq!(appr["dept"], "네이티브 플랫폼팀"); // 다국어 객체 해석
+        assert_eq!(appr["who"], "이재학");
+
+        let board = normalize("9", "게시판", &json!({ "artTitle": "공지", "artSeqNo": "3009" }));
+        assert_eq!(board["artSeqNo"], "3009");
+
+        // 모르는 boardType이어도 패닉 없이 빈 껍데기를 준다.
+        let unknown = normalize("99", "미상", &json!({}));
+        assert_eq!(unknown["module"], "미상");
+        assert_eq!(unknown["title"], "");
+    }
+
+    #[test]
+    fn normalize는_empSeq를_모듈_공통으로_붙인다() {
+        let v = normalize("9", "게시판", &json!({ "artTitle": "공지", "empSeq": "3166" }));
+        assert_eq!(v["empSeq"], "3166");
+    }
 }

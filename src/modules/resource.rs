@@ -426,3 +426,87 @@ pub async fn list_reservations(
     )
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iso는_12자리만_변환하고_나머지는_원문이다() {
+        assert_eq!(iso("202608051030"), "2026-08-05T10:30");
+        assert_eq!(iso("2026080510"), "2026080510"); // 12자리 아님 → 원문
+        assert_eq!(iso(""), "");
+        assert_eq!(iso("20260805103a"), "20260805103a"); // 숫자 아님 → 원문
+    }
+
+    /// 다일(多日) 예약은 센티넬로 "하루 전체 점유"를 표현한다 — 빈 시간 계산의 핵심 경계.
+    #[test]
+    fn minutes_of는_다른_날짜를_무한대_센티넬로_바꾼다() {
+        assert_eq!(minutes_of("202608051030", "20260805"), Some(630));
+        assert_eq!(minutes_of("202608050000", "20260805"), Some(0));
+        assert_eq!(minutes_of("202608052359", "20260805"), Some(1439));
+        // 전날 시작 → 사실상 -무한
+        assert!(minutes_of("202608041800", "20260805").unwrap() < 0);
+        // 다음날 종료 → +무한
+        assert!(minutes_of("202608061000", "20260805").unwrap() > 24 * 60);
+        assert_eq!(minutes_of("2026080510", "20260805"), None); // 12자리 아님
+    }
+
+    #[test]
+    fn parse_window는_두_형식을_받는다() {
+        assert_eq!(parse_window("0900-1200").unwrap(), (540, 720));
+        assert_eq!(parse_window("09:00-12:00").unwrap(), (540, 720)); // 콜론은 걸러짐
+        assert_eq!(parse_window("0000-2359").unwrap(), (0, 1439));
+        assert!(parse_window("0900").is_err());      // 구분자 없음
+        assert!(parse_window("900-1200").is_err());  // HHmm 4자리 아님
+        assert!(parse_window("").is_err());
+    }
+
+    #[test]
+    fn hhmm은_분을_시각으로_되돌린다() {
+        assert_eq!(hhmm(0), "00:00");
+        assert_eq!(hhmm(540), "09:00");
+        assert_eq!(hhmm(1439), "23:59");
+    }
+
+    /// 그룹 별칭 → attrSeq. 모르는 값은 숫자로 직접 준 것으로 보고 통과시킨다.
+    #[test]
+    fn attr_filter는_별칭과_직접입력을_모두_받는다() {
+        assert_eq!(attr_filter(""), None);
+        assert_eq!(attr_filter("전체"), None);
+        assert_eq!(attr_filter("all"), None);
+        assert_eq!(attr_filter(" 본사 "), Some("1")); // 공백 제거
+        assert_eq!(attr_filter("hq"), Some("1"));
+        assert_eq!(attr_filter("구로"), Some("3"));
+        assert_eq!(attr_filter("7"), Some("7"));
+    }
+
+    /// 74필드 원본 → 슬림 형태. 후속 조회에 필요한 seqNum/resIdx가 반드시 남아야 한다.
+    #[test]
+    fn slim_reservation은_필요한_필드만_남긴다() {
+        let raw = json!({
+            "resSeq": "12", "resName": "대회의실", "seqNum": 3456, "resIdx": 1,
+            "resStartDate": "202608051000", "resEndDate": "202608051100",
+            "reqText": "주간회의", "empName": "이재학", "empSeq": "3166",
+            "resUserName": "이재학,정선미", "alldayYn": "N",
+            "descText": "본문 전문(버려져야 함)"
+        });
+        let v = slim_reservation(&raw);
+        assert_eq!(v["seqNum"], 3456);          // 숫자 원형 유지(수정·취소에 필요)
+        assert_eq!(v["resIdx"], 1);
+        assert_eq!(v["start"], "2026-08-05T10:00");
+        assert_eq!(v["end"], "2026-08-05T11:00");
+        assert_eq!(v["title"], "주간회의");
+        assert_eq!(v["ownerEmpSeq"], "3166");   // 소유권 가드의 기준값
+        assert_eq!(v["allDay"], false);
+        assert!(v.get("descText").is_none(), "본문 전문은 슬림 형태에 남지 않아야 한다");
+    }
+
+    #[test]
+    fn slim_reservation은_없는_필드를_빈값으로_채운다() {
+        let v = slim_reservation(&json!({}));
+        assert_eq!(v["resSeq"], "");
+        assert_eq!(v["seqNum"], Value::Null);
+        assert_eq!(v["allDay"], false);
+    }
+}

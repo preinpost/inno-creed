@@ -7,3 +7,4 @@ pub mod creds;
 pub mod mcp;
 pub mod modules;
 pub mod sign;
+pub mod util;

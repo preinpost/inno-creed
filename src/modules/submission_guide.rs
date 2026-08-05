@@ -79,3 +79,34 @@ fn find_form<'a>(
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_guide는_이름_alias_form_id로_찾는다() {
+        for q in ["출장신청", "출장", "40"] {
+            let v = get_guide(q).unwrap_or_else(|e| panic!("'{q}' 조회 실패: {e}"));
+            assert_eq!(v["docType"], "출장신청");
+        }
+        assert!(get_guide("없는양식").is_err());
+    }
+
+    /// draftHelp는 submit_approval의 --help 역할이라, 예시 두 개가 반드시 있어야 한다.
+    /// 이게 비면 에이전트가 hp_application_json/bind_data_json을 채울 근거를 잃는다.
+    #[test]
+    fn 모든_양식이_draftHelp_예시를_갖는다() {
+        let list = list_guides().unwrap();
+        let forms = list["forms"].as_array().unwrap();
+        assert!(!forms.is_empty());
+        for f in forms {
+            let name = f["docType"].as_str().unwrap();
+            let g = get_guide(name).unwrap();
+            let dh = &g["guide"]["draftHelp"];
+            assert!(dh["hpApplicationExample"].is_object(), "{name}: hpApplicationExample 없음");
+            assert!(dh["bindDataExample"].is_object(), "{name}: bindDataExample 없음");
+            assert!(dh["fixed"].is_object(), "{name}: fixed 코드 없음");
+        }
+    }
+}

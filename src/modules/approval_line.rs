@@ -11,6 +11,7 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 use crate::client::GwClient;
+use crate::util::s;
 
 /// 저장된 개인결재라인 목록 — eap102A02(body `{}`).
 /// resultData[] : `{line_id, line_nm, form_id, form_nm, proc_id, proc_nm, line_kind, form_list}`.
@@ -120,12 +121,3 @@ pub async fn delete_line(c: &GwClient, row: Value) -> Result<Value> {
     }))
 }
 
-/// 필드를 문자열로(number/string 혼용 흡수).
-fn s(v: &Value, k: &str) -> String {
-    match v.get(k) {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
-        Some(Value::Bool(b)) => b.to_string(),
-        _ => String::new(),
-    }
-}

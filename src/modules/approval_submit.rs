@@ -25,6 +25,7 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 use crate::client::GwClient;
+use crate::util::days_to_ymd;
 
 /// 상신 문서 취소 — 상태(doc_sts)에 따라 결재취소→상신취소→(옵션)임시보관삭제를 순차 실행.
 /// 상태 전이(실측): 30(결재 진행중) --eap110A54 결재취소--> 20(상신) --eap110A18 상신취소--> 10(임시보관) --eap110A19 삭제--> 소멸.
@@ -583,18 +584,42 @@ mod tests {
         assert_eq!(v["singleDeptNm"], "네이티브 플랫폼팀");      // 모르는 값은 유지
         assert_eq!(v["employees"], "이재학 책임연구원");
     }
+
+    /// JS `encodeURIComponent` 동등성. 틀리면 상신 본문이 깨지는데 증상이 서버 2099로만 드러나
+    /// 원인 추적이 매우 어렵다. 기대값은 JS 규격(비이스케이프 집합 `A-Za-z0-9-_.!~*'()`)에서 도출.
+    /// ⚠️ `client::form_urlencode`(공백→`+`)와 **규칙이 다르다** — 여기선 공백이 `%20`.
+    #[test]
+    fn encode_uri_component는_JS와_같은_규칙이다() {
+        assert_eq!(encode_uri_component("a b"), "a%20b");
+        assert_eq!(encode_uri_component("-_.!~*'()"), "-_.!~*'()");
+        assert_eq!(encode_uri_component("azAZ09"), "azAZ09");
+        assert_eq!(encode_uri_component("<div>"), "%3Cdiv%3E");
+        assert_eq!(encode_uri_component("가"), "%EA%B0%80");
+        assert_eq!(encode_uri_component("&=?#/"), "%26%3D%3F%23%2F");
+        assert_eq!(encode_uri_component(""), "");
+    }
+
+    /// a03가 준 참가자 노드는 원본 그대로 두고 `org_div`(=div)만 덧붙인다 —
+    /// 브라우저 성공 payload와의 유일한 차이라서 재구성하면 어긋난다(§8.14).
+    #[test]
+    fn norm_participant는_org_div만_덧붙인다() {
+        let src = json!({ "org_id": "3052", "div": "d", "act_id": 5000, "dept_line": "x" });
+        let out = norm_participant(&src);
+        assert_eq!(out["org_div"], "d");
+        assert_eq!(out["org_id"], "3052");
+        assert_eq!(out["act_id"], 5000);
+        assert_eq!(out["dept_line"], "x");
+        assert_eq!(norm_participant(&json!({ "org_id": "1" }))["org_div"], "m");
+    }
+
+    #[test]
+    fn now_kst_datetime은_상신일시_형식이다() {
+        let t = now_kst_datetime();
+        assert_eq!(t.len(), 19, "YYYY-MM-DD HH:MM:SS");
+        assert_eq!(&t[4..5], "-");
+        assert_eq!(&t[10..11], " ");
+        assert_eq!(&t[13..14], ":");
+        assert!(t.starts_with("20"));
+    }
 }
 
-/// epoch days → (year, month, day). Howard Hinnant civil_from_days.
-fn days_to_ymd(z: i64) -> (i64, i64, i64) {
-    let z = z + 719468;
-    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}

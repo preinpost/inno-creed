@@ -16,7 +16,8 @@
 inno-creed (Rust MCP 서버, 헤드리스)
  ├─ creds    크레덴셜 취득: Chrome 쿠키 복호화 → authToken / signKey
  ├─ sign     wehago-sign(HMAC-SHA256) · transaction-id 생성
- ├─ client   GwClient: ensure_session(gw050A02 lazy 취득+10분 TTL 캐시) · 캘린더 목록 캐시(10분 TTL) · 사원 명부 캐시(30분 TTL) · 헤더 4종 주입 · POST · 응답봉투 파싱 · companyInfo 조립
+ ├─ util     도메인 무관 순수 함수(날짜 days_to_ymd/fmt_ymd · digits_only · JSON 필드 추출 json_str/s)
+ ├─ client   GwClient: ensure_session(gw050A02 lazy 취득+10분 TTL 캐시) · 캘린더 목록 캐시(10분 TTL) · 사원 명부 캐시(30분 TTL) · 본인 표시정보 캐시(30분 TTL) · signed()로 헤더 4종 주입 · 전송 · 응답봉투 파싱 · companyInfo 조립
  ├─ modules  resource(자원) · calendar(일정) · mail(메일) · board(게시판) · approval*(전자결재)
  │           org(조직) · attendance(근태) · search(통합검색) · submission_guide — API 래퍼 + 파생 조회
  └─ mcp      rmcp 서버(stdio): tool 정의 · 소유권 가드 · read-back 검증
