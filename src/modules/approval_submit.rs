@@ -22,10 +22,17 @@ use serde_json::{json, Value};
 
 use crate::client::GwClient;
 
-/// 상신취소 — eap110A98(사전조회) + eap110A18(실행). doc_id는 상신된 문서의 docId.
-/// ⚠️ 필드명: 사전조회는 `docId`(소문자), 실행은 `docID`(대문자) — 실측 확정.
-/// 성공 시 문서는 임시보관(doc_sts 10)으로 복귀하고 채번은 삭제된다.
-pub async fn cancel_approval(c: &GwClient, doc_id: &str) -> Result<Value> {
+/// 상신 문서 취소 — 상태(doc_sts)에 따라 결재취소→상신취소→(옵션)임시보관삭제를 순차 실행.
+/// 상태 전이(실측): 30(결재 진행중) --eap110A54 결재취소--> 20(상신) --eap110A18 상신취소--> 10(임시보관) --eap110A19 삭제--> 소멸.
+/// ⚠️ 필드명: 사전조회 eap110A98은 `docId`(소문자), 실행 콜들은 `docID`(대문자) — 실측 확정.
+/// doc_sts 30이면 결재취소가 선행돼야 하고 그 콜(eap110A54)은 `form_id`를 요구한다(eap110A98 응답엔 없음 → caller가 list_approvals의 formId 전달).
+/// purge=true면 임시보관(10)까지 되돌린 뒤 eap110A19로 완전 삭제. false면 임시보관에 남는다.
+pub async fn cancel_approval(
+    c: &GwClient,
+    doc_id: &str,
+    form_id: &str,
+    purge: bool,
+) -> Result<Value> {
     // ① 사전조회(현재 상태 확인)
     let pre = c
         .call(
@@ -38,17 +45,53 @@ pub async fn cancel_approval(c: &GwClient, doc_id: &str) -> Result<Value> {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // ② 실행(docID 대문자). 응답 resultData는 null이지만 resultCode 0이면 성공.
-    c.call(
-        "/eap/eap110A18",
-        &json!({ "docID": doc_id, "pageCode": "UBAP002" }),
-    )
-    .await?;
+    let mut steps: Vec<&str> = Vec::new();
+
+    // ② 결재취소(진행중 30 → 상신 20). eap110A54는 formID 필요.
+    if doc_sts == "30" {
+        if form_id.trim().is_empty() {
+            anyhow::bail!(
+                "doc_sts=30(결재 진행중) 문서는 결재취소(eap110A54)가 선행돼야 하며 form_id가 필요합니다 — list_approvals의 formId를 넘기세요."
+            );
+        }
+        c.call(
+            "/eap/eap110A54",
+            &json!({ "docID": doc_id, "formID": form_id, "actID": "", "pageCode": "UBAP002" }),
+        )
+        .await
+        .map_err(|e| anyhow!("결재취소(eap110A54) 실패: {e}"))?;
+        steps.push("결재취소(eap110A54)");
+    }
+
+    // ③ 상신취소(상신 20 → 임시보관 10). 응답 resultData는 null이지만 resultCode 0이면 성공.
+    if doc_sts == "30" || doc_sts == "20" {
+        c.call(
+            "/eap/eap110A18",
+            &json!({ "docID": doc_id, "pageCode": "UBAP002" }),
+        )
+        .await
+        .map_err(|e| anyhow!("상신취소(eap110A18) 실패: {e}"))?;
+        steps.push("상신취소(eap110A18)");
+    }
+
+    // ④ (옵션) 임시보관 삭제(10 → 소멸).
+    if purge {
+        c.call(
+            "/eap/eap110A19",
+            &json!({ "docID": doc_id, "pageCode": "UBAP001" }),
+        )
+        .await
+        .map_err(|e| anyhow!("임시보관 삭제(eap110A19) 실패: {e}"))?;
+        steps.push("임시보관삭제(eap110A19)");
+    }
+
     Ok(json!({
         "kind": "approvalCancelled",
         "docId": doc_id,
         "preDocSts": doc_sts,
-        "note": "상신취소 실행 완료. 문서는 임시보관(doc_sts 10)으로 복귀하고 품의번호(채번)는 삭제됨. read_approval이 resultCode 2385(임시저장)로 실패하거나 approval_counts의 sent(상신)가 감소하면 취소 성공."
+        "steps": steps,
+        "purged": purge,
+        "note": "취소 실행 완료. purge=false면 문서는 임시보관(doc_sts 10)으로 복귀(채번 삭제), purge=true면 완전 삭제됨. 검증: read_approval이 2385(임시저장)면 임시보관 복귀, approval_counts의 sent 감소면 상신취소 성공, list_approvals(draft)에서 사라졌으면 삭제 성공."
     }))
 }
 

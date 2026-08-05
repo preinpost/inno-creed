@@ -106,6 +106,21 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // 진단: `probe cancel <docId> [formId] [purge]` → cancel_approval 직접 호출.
+    if args.get(1).map(|s| s.as_str()) == Some("cancel") {
+        let doc_id = args.get(2).ok_or_else(|| anyhow!("usage: probe cancel <docId> [formId] [purge]"))?;
+        let form_id = args.get(3).map(|s| s.as_str()).unwrap_or("");
+        let purge = args.get(4).map(|s| s == "purge" || s == "true").unwrap_or(false);
+        let client = GwClient::new(creds::from_browser().ok());
+        client.ensure_session().await?;
+        let out = inno_creed::modules::approval_submit::cancel_approval(&client, doc_id, form_id, purge).await;
+        match out {
+            Ok(v) => println!("{}", serde_json::to_string_pretty(&v)?),
+            Err(e) => println!("ERR {e}"),
+        }
+        return Ok(());
+    }
+
     let path = args
         .get(1)
         .ok_or_else(|| anyhow!("usage: probe <path> [json|@file]"))?;

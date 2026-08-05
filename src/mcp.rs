@@ -443,8 +443,14 @@ pub struct SubmitApprovalArgs {
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct CancelApprovalArgs {
-    /// 상신취소할 문서의 docId(list_approvals/read_approval의 docId).
+    /// 취소할 문서의 docId(list_approvals/read_approval의 docId).
     pub doc_id: String,
+    /// form_id(list_approvals의 formId). doc_sts=30(결재 진행중) 문서의 결재취소(eap110A54)에 필요. 상신 직후(20) 문서만 취소할 땐 생략 가능.
+    #[serde(default)]
+    pub form_id: String,
+    /// true면 결재취소→상신취소 후 임시보관 문서까지 완전 삭제(eap110A19). false(기본)면 임시보관에 남긴다.
+    #[serde(default)]
+    pub purge: bool,
 }
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
@@ -1501,16 +1507,21 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "상신된 문서를 상신취소한다(eap110A98 사전조회 + eap110A18 실행). 문서는 임시보관으로 복귀하고 채번 삭제. read_approval이 2385(임시저장) 반환 또는 approval_counts의 sent 감소로 확인."
+        description = "상신 문서를 취소한다. 문서 상태(doc_sts)에 따라 결재취소(eap110A54)→상신취소(eap110A18)→(purge시)임시보관삭제(eap110A19)를 순차 실행. ⚠️ doc_sts=30(결재 진행중) 문서는 결재취소가 선행돼야 하며 form_id 필요(list_approvals의 formId). 상신 직후(20)면 form_id 없이 상신취소만. purge=true면 임시보관 문서까지 완전 삭제. 검증: read_approval 2385(임시저장) 또는 approval_counts의 sent 감소, 삭제는 list_approvals(draft)에서 소멸."
     )]
     async fn cancel_approval(
         &self,
         Parameters(a): Parameters<CancelApprovalArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
-        let data = modules::approval_submit::cancel_approval(&self.client, a.doc_id.trim())
-            .await
-            .map_err(|e| ErrorData::internal_error(format!("상신취소 실패: {e}"), None))?;
+        let data = modules::approval_submit::cancel_approval(
+            &self.client,
+            a.doc_id.trim(),
+            a.form_id.trim(),
+            a.purge,
+        )
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("상신취소 실패: {e}"), None))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
