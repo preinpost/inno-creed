@@ -271,6 +271,44 @@ impl GwClient {
         Ok(v.get("resultData").cloned().unwrap_or(Value::Null))
     }
 
+    /// call()과 동일 서명·전송이지만 **성공판정 없이 전체 응답 봉투(resultCode/resultMsg/resultData 포함)를
+    /// 그대로 반환**. 2099 같은 실패 응답의 resultData까지 보려는 디버그/probe 용도.
+    pub async fn call_raw(&self, path: &str, body: &Value) -> Result<Value> {
+        let cr = self.creds()?;
+        let tid = sign::transaction_id();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs()
+            .to_string();
+        let sig = sign::wehago_sign(&cr.auth_token, &tid, &ts, path, &cr.sign_key);
+        let mut req = self
+            .http
+            .post(format!("{}{}", self.base, path))
+            .header("Authorization", format!("Bearer {}", cr.auth_token))
+            .header("timestamp", &ts)
+            .header("transaction-id", &tid)
+            .header("wehago-sign", sig)
+            .header("Content-Type", "application/json");
+        // 진단용: 브라우저 헤더 재현 실험(Cookie/Referer/User-Agent).
+        if let Ok(cookie) = std::env::var("PROBE_COOKIE") {
+            if !cookie.is_empty() {
+                req = req.header("Cookie", cookie);
+            }
+        }
+        if std::env::var("PROBE_BROWSER_HDR").is_ok() {
+            req = req
+                .header("Referer", "https://gw.innogrid.com/")
+                .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36")
+                .header("sec-ch-ua", "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"")
+                .header("sec-ch-ua-mobile", "?0")
+                .header("sec-ch-ua-platform", "\"macOS\"");
+        }
+        let resp = req.json(body).send().await?;
+        let status = resp.status();
+        let v: Value = resp.json().await?;
+        Ok(json!({ "http": status.as_u16(), "response": v }))
+    }
+
     /// multipart/form-data POST. 서명은 동일(4종 헤더), Content-Type은 reqwest가 boundary와
     /// 함께 자동 설정. 응답은 표준 봉투가 아닐 수 있어(예: mail014A04) raw Value로 반환 →
     /// 성공 판정은 호출부 몫.
