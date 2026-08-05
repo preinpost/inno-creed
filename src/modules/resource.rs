@@ -1,9 +1,16 @@
 //! 자원(회의실 예약) 모듈 — `/schres/rs121*`
+//!
+//! ⭐ **이 모듈의 mutation 함수(`*_and_verify`)는 소유권 가드와 read-back 검증을 포함한다**
+//! (`docs/architecture.md` §7). 즉 규칙이 MCP 도구 경로가 아니라 여기 있어서,
+//! 모듈을 직접 쓰는 어떤 호출자도 검증을 우회할 수 없다. 근태 `punch_and_verify`와 같은 형태.
+//! 검증 없는 raw 래퍼(`create_reservation`/`update_reservation`/`delete_reservation`)도 남아 있지만,
+//! **새 호출부는 `*_and_verify`를 쓸 것.**
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 use crate::client::GwClient;
+use crate::error::NotOwner;
 
 /// 자원(회의실) 목록 — `rs121A01`
 pub async fn list_resources(c: &GwClient) -> Result<Value> {
@@ -427,6 +434,221 @@ pub async fn list_reservations(
     .await
 }
 
+/// JSON 값을 인덱스 문자열로. **자원 API 전용 특성** — 서버가 `resIdx`를 number("3")로도
+/// string("3")으로도 준다(실측). 다른 모듈에서 쓰이지 않으므로 util이 아니라 여기 둔다.
+pub(crate) fn json_idx(v: Option<&Value>) -> Option<String> {
+    v.map(|x| match x {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    })
+}
+
+/// 소유권 가드 — 예약 상세의 `empSeq`가 로그인 사용자와 같은지.
+/// ⚠️ `empSeq` 필드가 없으면 `""`와 비교해 **거부**한다(불일치). 이동 전 동작 그대로다.
+fn check_owner(detail: &Value, me: &str, action: &'static str) -> Result<()> {
+    let owner = detail.get("empSeq").and_then(|v| v.as_str()).unwrap_or("");
+    if owner != me {
+        return Err(NotOwner {
+            kind: "예약",
+            action,
+            owner: owner.to_string(),
+            me: me.to_string(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// 수정 시 서버(`rs121A12`)에 보낼 전체 필드. 이 API는 변경분만 받지 않고 **전 필드를 요구**해서,
+/// 지정되지 않은 항목은 현재 예약값으로 채운다.
+#[derive(Debug, PartialEq)]
+pub(crate) struct UpdateFields {
+    pub req_text: String,
+    pub start: String,
+    pub end: String,
+    pub desc: String,
+    /// 원본 식별키(변경 전 시작시각) — 변경 후 값이 아니라 **기존 값**이어야 한다.
+    pub orig_start: String,
+    pub create_date: String,
+    pub res_name: String,
+}
+
+/// 현재 예약 상세 + 변경 요청 → 서버로 보낼 전체 필드(미지정 항목은 기존값 유지).
+fn merge_update(
+    detail: &Value,
+    req_text: Option<&str>,
+    start: Option<&str>,
+    end: Option<&str>,
+    desc: Option<&str>,
+) -> UpdateFields {
+    let get = |k: &str| detail.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    UpdateFields {
+        req_text: req_text.map(String::from).unwrap_or_else(|| get("reqText")),
+        start: start.map(String::from).unwrap_or_else(|| get("startDate")),
+        end: end.map(String::from).unwrap_or_else(|| get("endDate")),
+        desc: desc.map(String::from).unwrap_or_else(|| get("descText")),
+        orig_start: get("startDate"),
+        create_date: get("createDate"),
+        res_name: get("resName"),
+    }
+}
+
+/// 예약 등록 + **read-back 검증**. 등록 응답의 successTf를 믿지 않고 재조회로 확인한다.
+pub async fn reserve_and_verify(
+    c: &GwClient,
+    res_seq: &str,
+    req_text: &str,
+    start: &str,
+    end: &str,
+    desc: &str,
+) -> Result<Value> {
+    let reg = create_reservation(c, res_seq, req_text, start, end, desc)
+        .await
+        .map_err(|e| anyhow!("예약 등록 실패: {e}"))?;
+
+    let seq_num = reg
+        .get("seqNum")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| anyhow!("등록 응답에 seqNum 없음"))?;
+    let res_idx = json_idx(reg.get("resIdx")).unwrap_or_else(|| "1".to_string());
+
+    let detail = get_reservation(c, res_seq, seq_num, &res_idx)
+        .await
+        .map_err(|e| anyhow!("등록 후 재조회 실패: {e}"))?;
+    let reflected = detail.get("reqText").and_then(|v| v.as_str()) == Some(req_text);
+
+    Ok(json!({
+        "ok": reflected,
+        "seqNum": seq_num,
+        "resIdx": res_idx,
+        "resSeq": res_seq,
+        "reqText": req_text,
+        "period": format!("{start}~{end}"),
+        "verified_by_readback": reflected
+    }))
+}
+
+/// 예약 수정 + **소유권 가드 + read-back 검증**. 변경분만 지정하고 나머지는 기존값을 유지한다.
+/// ⚠️ **시간을 바꾸면 서버가 예약을 재발급해 `seqNum`/`resIdx`가 바뀐다**(rs121A12 동작 특성).
+/// 그래서 read-back은 요청에 쓴 값이 아니라 **응답이 준 새 ID**로 한다.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_and_verify(
+    c: &GwClient,
+    res_seq: &str,
+    seq_num: i64,
+    res_idx: Option<&str>,
+    req_text: Option<&str>,
+    start: Option<&str>,
+    end: Option<&str>,
+    desc: Option<&str>,
+) -> Result<Value> {
+    let res_idx = res_idx.unwrap_or("1");
+    let detail = get_reservation(c, res_seq, seq_num, res_idx)
+        .await
+        .map_err(|e| anyhow!("예약 조회 실패(없거나 접근불가): {e}"))?;
+    check_owner(&detail, &c.emp_seq(), "수정")?;
+
+    let f = merge_update(&detail, req_text, start, end, desc);
+    let upd = update_reservation(
+        c, res_seq, seq_num, res_idx,
+        &f.req_text, &f.start, &f.end, &f.desc,
+        &f.orig_start, &f.create_date, &f.res_name,
+    )
+    .await
+    .map_err(|e| anyhow!("예약 수정 실패: {e}"))?;
+
+    let new_seq = upd.get("seqNum").and_then(|v| v.as_i64()).unwrap_or(seq_num);
+    let new_idx = json_idx(upd.get("resIdx")).unwrap_or_else(|| res_idx.to_string());
+
+    let after = get_reservation(c, res_seq, new_seq, &new_idx)
+        .await
+        .map_err(|e| anyhow!("수정 후 재조회 실패: {e}"))?;
+    let ag = |k: &str| after.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let reflected = ag("startDate") == f.start && ag("endDate") == f.end && ag("reqText") == f.req_text;
+
+    Ok(json!({
+        "ok": reflected,
+        "seqNum": new_seq,
+        "resIdx": new_idx,
+        "prev_seqNum": seq_num,
+        "reissued": new_seq != seq_num,
+        "reqText": ag("reqText"),
+        "period": format!("{}~{}", ag("startDate"), ag("endDate")),
+        "verified_by_readback": reflected
+    }))
+}
+
+/// 예약 취소 + **소유권 가드 + read-back 검증**.
+/// ⚠️ 삭제 성공 판정은 **재조회 실패**다(자원 API 규약 — 지워진 예약은 조회가 에러를 낸다).
+pub async fn cancel_and_verify(
+    c: &GwClient,
+    res_seq: &str,
+    seq_num: i64,
+    res_idx: Option<&str>,
+) -> Result<Value> {
+    let res_idx = res_idx.unwrap_or("1");
+    let detail = get_reservation(c, res_seq, seq_num, res_idx)
+        .await
+        .map_err(|e| anyhow!("예약 조회 실패(없거나 접근불가): {e}"))?;
+    check_owner(&detail, &c.emp_seq(), "취소")?;
+
+    let get = |k: &str| detail.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    delete_reservation(
+        c, res_seq, seq_num, res_idx,
+        &get("reqText"), &get("startDate"), &get("endDate"),
+        &get("createDate"), &get("resName"),
+    )
+    .await
+    .map_err(|e| anyhow!("예약 취소 실패: {e}"))?;
+
+    let gone = get_reservation(c, res_seq, seq_num, res_idx).await.is_err();
+    Ok(json!({
+        "ok": gone,
+        "seqNum": seq_num,
+        "canceled": true,
+        "verified_by_readback": gone
+    }))
+}
+
+/// 기간·자원별 예약 현황(조회용 가공 포함).
+/// `res_seqs`가 비면 **전체 회의실**을 대상으로 하고, `verbose=false`면 슬림 형태로 축약한다
+/// (원본은 74필드 + 회의 안건 전문까지 실려 와 토큰을 크게 먹는다).
+pub async fn reservations_view(
+    c: &GwClient,
+    start: &str,
+    end: &str,
+    res_seqs: &[String],
+    verbose: bool,
+) -> Result<Value> {
+    let owned: Vec<String>;
+    let seqs: &[String] = if res_seqs.is_empty() {
+        owned = resources_in_group(c, "")
+            .await?
+            .iter()
+            .filter_map(|r| r.get("resSeq").and_then(|s| s.as_str()).map(String::from))
+            .collect();
+        &owned
+    } else {
+        res_seqs
+    };
+    let refs: Vec<&str> = seqs.iter().map(|s| s.as_str()).collect();
+    let data = list_reservations(c, start, end, &refs).await?;
+    if verbose {
+        return Ok(data);
+    }
+    let rows: Vec<Value> = data
+        .get("resultList")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().map(slim_reservation).collect())
+        .unwrap_or_default();
+    Ok(json!({
+        "period": format!("{start}~{end}"),
+        "count": rows.len(),
+        "reservations": rows
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,5 +730,64 @@ mod tests {
         assert_eq!(v["resSeq"], "");
         assert_eq!(v["seqNum"], Value::Null);
         assert_eq!(v["allDay"], false);
+    }
+
+    /// 서버가 `resIdx`를 number로도 string으로도 준다 — 둘 다 같은 인덱스 문자열이 돼야
+    /// 예약 수정·취소가 대상을 놓치지 않는다. (mcp.rs에서 이 모듈로 이동)
+    #[test]
+    fn json_idx는_number와_string을_같게_만든다() {
+        assert_eq!(json_idx(Some(&json!("3"))), Some("3".into()));
+        assert_eq!(json_idx(Some(&json!(3))), Some("3".into()));
+        assert_eq!(json_idx(None), None);
+        assert_eq!(json_idx(Some(&Value::Null)), Some("null".into()));
+    }
+
+    /// 소유권 가드(§7.2). ⚠️ `empSeq`가 **없으면 거부**하는 것도 계약이다 — mcp.rs에 있던
+    /// 동작(`unwrap_or("")` 후 비교)을 그대로 옮겼는지 확인하는 것이 이 테스트의 목적.
+    #[test]
+    fn check_owner는_타인과_필드누락을_거부한다() {
+        let mine = json!({ "empSeq": "3166", "reqText": "내 예약" });
+        assert!(check_owner(&mine, "3166", "수정").is_ok());
+
+        let others = json!({ "empSeq": "12345", "reqText": "남의 예약" });
+        let err = check_owner(&others, "3166", "수정").unwrap_err();
+        assert!(err.downcast_ref::<NotOwner>().is_some(), "NotOwner 타입으로 올라와야 invalid_params로 매핑된다");
+        assert!(err.to_string().contains("본인 소유 예약이 아니라 수정할 수 없습니다"));
+
+        // empSeq 필드 자체가 없으면 ""와 비교 → 불일치 → 거부
+        assert!(check_owner(&json!({}), "3166", "취소").is_err());
+    }
+
+    /// rs121A12는 전체 필드를 요구하므로, 미지정 항목은 현재 예약값으로 채워야 한다.
+    /// `orig_start`는 **변경 후가 아니라 변경 전** 시작시각(식별키)이라는 점이 핵심.
+    #[test]
+    fn merge_update는_지정한_필드만_덮어쓴다() {
+        let current = json!({
+            "reqText": "기존제목", "startDate": "202608051000", "endDate": "202608051100",
+            "descText": "기존내용", "createDate": "20260801", "resName": "대회의실"
+        });
+        let f = merge_update(&current, Some("새제목"), None, None, None);
+        assert_eq!(f.req_text, "새제목");
+        assert_eq!(f.start, "202608051000"); // 미지정 → 기존 유지
+        assert_eq!(f.end, "202608051100");
+        assert_eq!(f.desc, "기존내용");
+        assert_eq!(f.orig_start, "202608051000");
+        assert_eq!(f.create_date, "20260801");
+        assert_eq!(f.res_name, "대회의실");
+
+        // 시간만 바꾸면 orig_start는 여전히 기존값이어야 한다(식별키가 깨지면 수정이 실패한다).
+        let f2 = merge_update(&current, None, Some("202608051400"), Some("202608051500"), None);
+        assert_eq!(f2.start, "202608051400");
+        assert_eq!(f2.orig_start, "202608051000");
+        assert_eq!(f2.req_text, "기존제목");
+    }
+
+    #[test]
+    fn merge_update는_빈_상세도_견딘다() {
+        let f = merge_update(&json!({}), None, None, None, None);
+        assert_eq!(f, UpdateFields {
+            req_text: "".into(), start: "".into(), end: "".into(), desc: "".into(),
+            orig_start: "".into(), create_date: "".into(), res_name: "".into(),
+        });
     }
 }

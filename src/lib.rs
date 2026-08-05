@@ -4,6 +4,7 @@
 
 pub mod client;
 pub mod creds;
+pub mod error;
 pub mod mcp;
 pub mod modules;
 pub mod sign;

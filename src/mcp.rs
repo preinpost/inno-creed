@@ -11,13 +11,16 @@ use serde::Deserialize;
 
 use crate::{client::GwClient, modules};
 
-/// JSON 값을 인덱스 문자열로. 서버가 resIdx를 number("3")로도 string("3")으로도 준다.
-fn json_idx(v: Option<&serde_json::Value>) -> Option<String> {
-    v.map(|x| match x {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Number(n) => n.to_string(),
-        other => other.to_string(),
-    })
+
+/// 모듈 에러 → MCP 에러 매핑. **소유권 위반(`NotOwner`)만 `invalid_params`**로 분류한다 —
+/// 서버/네트워크 실패가 아니라 호출자가 잘못된 대상을 지목한 것이기 때문이다(리팩터 전 동작 보존).
+/// 문자열 매칭이 아니라 타입(`downcast_ref`)으로 판별한다.
+fn map_domain_err(e: anyhow::Error) -> ErrorData {
+    if e.downcast_ref::<crate::error::NotOwner>().is_some() {
+        ErrorData::invalid_params(e.to_string(), None)
+    } else {
+        ErrorData::internal_error(e.to_string(), None)
+    }
 }
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
@@ -530,43 +533,12 @@ impl Amaranth {
         Parameters(a): Parameters<ListReservationsArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
-        // res_seqs 비면 전체 회의실 자동 채움
-        let seqs: Vec<String> = if a.res_seqs.is_empty() {
-            let resources = modules::resource::list_resources(&self.client)
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-            resources
-                .get("resultList")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|r| r.get("resSeq").and_then(|s| s.as_str()).map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default()
-        } else {
-            a.res_seqs
-        };
-        let refs: Vec<&str> = seqs.iter().map(|s| s.as_str()).collect();
-        let data = modules::resource::list_reservations(&self.client, &a.start, &a.end, &refs)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        // 기본은 슬림(원본은 74필드 + 회의 안건 전문까지 실려 와 토큰을 크게 먹는다).
-        let out = if a.verbose {
-            data
-        } else {
-            let rows: Vec<serde_json::Value> = data
-                .get("resultList")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().map(modules::resource::slim_reservation).collect())
-                .unwrap_or_default();
-            serde_json::json!({
-                "period": format!("{}~{}", a.start, a.end),
-                "count": rows.len(),
-                "reservations": rows
-            })
-        };
-        Ok(CallToolResult::success(vec![ContentBlock::text(out.to_string())]))
+        let data = modules::resource::reservations_view(
+            &self.client, &a.start, &a.end, &a.res_seqs, a.verbose,
+        )
+        .await
+        .map_err(map_domain_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
     #[tool(
@@ -707,41 +679,12 @@ impl Amaranth {
         Parameters(a): Parameters<ReserveArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
-        let reg = modules::resource::create_reservation(
-            &self.client,
-            &a.res_seq,
-            &a.req_text,
-            &a.start,
-            &a.end,
-            &a.desc,
+        let data = modules::resource::reserve_and_verify(
+            &self.client, &a.res_seq, &a.req_text, &a.start, &a.end, &a.desc,
         )
         .await
-        .map_err(|e| ErrorData::internal_error(format!("예약 등록 실패: {e}"), None))?;
-
-        let seq_num = reg.get("seqNum").and_then(|v| v.as_i64()).ok_or_else(|| {
-            ErrorData::internal_error("등록 응답에 seqNum 없음", None)
-        })?;
-        let res_idx = json_idx(reg.get("resIdx")).unwrap_or_else(|| "1".to_string());
-
-        // read-back: 실제 생성·반영 확인
-        let detail =
-            modules::resource::get_reservation(&self.client, &a.res_seq, seq_num, &res_idx)
-                .await
-                .map_err(|e| {
-                    ErrorData::internal_error(format!("등록 후 재조회 실패: {e}"), None)
-                })?;
-        let reflected = detail.get("reqText").and_then(|v| v.as_str()) == Some(a.req_text.as_str());
-
-        let msg = serde_json::json!({
-            "ok": reflected,
-            "seqNum": seq_num,
-            "resIdx": res_idx,
-            "resSeq": a.res_seq,
-            "reqText": a.req_text,
-            "period": format!("{}~{}", a.start, a.end),
-            "verified_by_readback": reflected
-        });
-        Ok(CallToolResult::success(vec![ContentBlock::text(msg.to_string())]))
+        .map_err(map_domain_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
     #[tool(
@@ -752,81 +695,19 @@ impl Amaranth {
         Parameters(a): Parameters<UpdateArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
-        let res_idx = a.res_idx.as_deref().unwrap_or("1");
-        // 현재 스냅샷 + 소유권 확인
-        let detail =
-            modules::resource::get_reservation(&self.client, &a.res_seq, a.seq_num, res_idx)
-                .await
-                .map_err(|e| {
-                    ErrorData::internal_error(format!("예약 조회 실패(없거나 접근불가): {e}"), None)
-                })?;
-        let owner = detail
-            .get("empSeq")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if owner != self.client.emp_seq() {
-            return Err(ErrorData::invalid_params(
-                format!(
-                    "본인 소유 예약이 아니라 수정할 수 없습니다 (소유자 empSeq={owner}, 본인={})",
-                    self.client.emp_seq()
-                ),
-                None,
-            ));
-        }
-        let get = |k: &str| detail.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let orig_start = get("startDate"); // YYYYMMDDHHmm (원본 = 식별키 startDatePk)
-        let create_date = get("createDate");
-        let res_name = get("resName");
-
-        // 변경분만 덮어쓰기, 나머지 기존값 유지
-        let new_req = a.req_text.clone().unwrap_or_else(|| get("reqText"));
-        let new_start = a.start.clone().unwrap_or_else(|| orig_start.clone());
-        let new_end = a.end.clone().unwrap_or_else(|| get("endDate"));
-        let new_desc = a.desc.clone().unwrap_or_else(|| get("descText"));
-
-        let upd = modules::resource::update_reservation(
+        let data = modules::resource::update_and_verify(
             &self.client,
             &a.res_seq,
             a.seq_num,
-            res_idx,
-            &new_req,
-            &new_start,
-            &new_end,
-            &new_desc,
-            &orig_start,
-            &create_date,
-            &res_name,
+            a.res_idx.as_deref(),
+            a.req_text.as_deref(),
+            a.start.as_deref(),
+            a.end.as_deref(),
+            a.desc.as_deref(),
         )
         .await
-        .map_err(|e| ErrorData::internal_error(format!("예약 수정 실패: {e}"), None))?;
-
-        // ⚠️ 시간 변경 시 예약이 재발급되어 seqNum/resIdx가 바뀐다. 응답의 새 ID를 사용.
-        let new_seq = upd.get("seqNum").and_then(|v| v.as_i64()).unwrap_or(a.seq_num);
-        let new_idx = json_idx(upd.get("resIdx")).unwrap_or_else(|| res_idx.to_string());
-
-        // read-back: 새 seqNum으로 실제 반영 확인
-        let after =
-            modules::resource::get_reservation(&self.client, &a.res_seq, new_seq, &new_idx)
-                .await
-                .map_err(|e| {
-                    ErrorData::internal_error(format!("수정 후 재조회 실패: {e}"), None)
-                })?;
-        let ag = |k: &str| after.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let reflected =
-            ag("startDate") == new_start && ag("endDate") == new_end && ag("reqText") == new_req;
-
-        let msg = serde_json::json!({
-            "ok": reflected,
-            "seqNum": new_seq,
-            "resIdx": new_idx,
-            "prev_seqNum": a.seq_num,
-            "reissued": new_seq != a.seq_num,
-            "reqText": ag("reqText"),
-            "period": format!("{}~{}", ag("startDate"), ag("endDate")),
-            "verified_by_readback": reflected
-        });
-        Ok(CallToolResult::success(vec![ContentBlock::text(msg.to_string())]))
+        .map_err(map_domain_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
     #[tool(description = "회의실 예약을 취소한다(본인 소유만; 취소 후 재조회로 확인)")]
@@ -835,54 +716,12 @@ impl Amaranth {
         Parameters(a): Parameters<CancelArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
-        let res_idx = a.res_idx.as_deref().unwrap_or("1");
-        // 스냅샷 + 소유권 확인
-        let detail =
-            modules::resource::get_reservation(&self.client, &a.res_seq, a.seq_num, res_idx)
-                .await
-                .map_err(|e| {
-                    ErrorData::internal_error(format!("예약 조회 실패(없거나 접근불가): {e}"), None)
-                })?;
-        let owner = detail
-            .get("empSeq")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if owner != self.client.emp_seq() {
-            return Err(ErrorData::invalid_params(
-                format!(
-                    "본인 소유 예약이 아니라 취소할 수 없습니다 (소유자 empSeq={owner}, 본인={})",
-                    self.client.emp_seq()
-                ),
-                None,
-            ));
-        }
-        let get = |k: &str| detail.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        modules::resource::delete_reservation(
-            &self.client,
-            &a.res_seq,
-            a.seq_num,
-            res_idx,
-            &get("reqText"),
-            &get("startDate"),
-            &get("endDate"),
-            &get("createDate"),
-            &get("resName"),
+        let data = modules::resource::cancel_and_verify(
+            &self.client, &a.res_seq, a.seq_num, a.res_idx.as_deref(),
         )
         .await
-        .map_err(|e| ErrorData::internal_error(format!("예약 취소 실패: {e}"), None))?;
-
-        // read-back: 조회 시 실패(=삭제됨)여야 정상
-        let gone = modules::resource::get_reservation(&self.client, &a.res_seq, a.seq_num, res_idx)
-            .await
-            .is_err();
-        let msg = serde_json::json!({
-            "ok": gone,
-            "seqNum": a.seq_num,
-            "canceled": true,
-            "verified_by_readback": gone
-        });
-        Ok(CallToolResult::success(vec![ContentBlock::text(msg.to_string())]))
+        .map_err(map_domain_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
     // ── 일정 헬퍼(비-도구) ──
@@ -1647,16 +1486,6 @@ mod tests {
 
     /// 라우터 생성이 네트워크·크레덴셜 없이 되는지(=핸들러 구성이 순수한지) 확인.
     /// `GwClient::new(None)` 은 필드 초기화만 한다.
-    /// 서버가 resIdx/seqNum을 number로도 string으로도 준다 — 둘 다 같은 인덱스 문자열이 돼야
-    /// 예약 수정·취소가 대상을 놓치지 않는다.
-    #[test]
-    fn json_idx는_number와_string을_같게_만든다() {
-        assert_eq!(json_idx(Some(&serde_json::json!("3"))), Some("3".into()));
-        assert_eq!(json_idx(Some(&serde_json::json!(3))), Some("3".into()));
-        assert_eq!(json_idx(None), None);
-        assert_eq!(json_idx(Some(&serde_json::Value::Null)), Some("null".into()));
-    }
-
     #[test]
     fn 핸들러는_크레덴셜_없이_만들어진다() {
         let a = Amaranth::new(GwClient::new(None));
