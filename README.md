@@ -226,4 +226,4 @@ inno-creed (Rust MCP 서버, 헤드리스)
 | [docs/api-reference.md](docs/api-reference.md) | 모듈별 확정 API 스키마 |
 | [tests/live/README.md](tests/live/README.md) | 라이브 스모크 테스트 — 실제 그룹웨어에 붙어 도구를 왕복시키는 하네스(승인 게이트·자동 정리) |
 
-`docs/`에는 **실증으로 확정된 사실만** 담습니다. 조사 과정·미확정 내용은 `.claude-workspace/analyze/`(git 미포함)에 있습니다.
+`docs/`에는 **실증으로 확정된 사실만** 담습니다 — 실제로 호출해 응답을 확인한 것만 적습니다. 거기 없는 것은 확정되지 않았다는 뜻입니다.
