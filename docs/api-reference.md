@@ -314,9 +314,11 @@ body: 위와 동일 + fileSn=<파일 순번(0-base, 목록 배열 인덱스)>
 - **엔드포인트 주의**: 게시판 첨부는 `/ecm/ecm001AXX`(`.do` 없음, `/ecmapi` 없음) 계열. 번들 상수의 `ecmFileDownUrl=/ecm/ecmapi/ecm001A03.do` 등 `.do` 경로는 **다른 파일 컴포넌트용이라 서명 호출 시 404** — 혼동 금지. `ecm001A05`=**삭제**이므로 다운로드로 호출 금지.
 - 다중 첨부: `list_attachments`가 `fileIds`(콤마 구분 uid 전체)로 목록을 받고, `download_attachment`는 `file_sn`(순번)으로 단건 지정.
 
-## 전자결재 — `/eap/*` (읽기 전용)
+## 전자결재 — `/eap/*` (읽기 + 쓰기)
 
 헤더 서명만으로 완결(목록/상세는 companyInfo 불필요, 카운트만 필요). 표준 봉투. 엔드포인트·필드는 실제 트래픽 캡처로 확정했다.
+
+**미구현은 승인/반려뿐**이다 — 조직 의사결정 행위라 의도적으로 제외했다. 상신·상신취소·임시보관삭제·개인결재라인 CRUD는 구현·e2e 실증 완료.
 
 ### 함별 목록 → `list_approvals`
 
@@ -367,7 +369,78 @@ body: { deptSeq, userSe:"USER|AT", compSeq, bizSeq(=compSeq), empSeq, groupSeq, 
 → resultData: { "<menuNo>": "<count>", ... }  # 도구가 menuNo를 box 라벨로 변환
 ```
 
-- **쓰기(상신/승인/반려) 미구현**: 실 결재 발생. 상세의 `btnList`·`outProcessInfo`에 실마리만 확보.
+### 개인결재라인 CRUD
+
+| API | 용도 | 래퍼 |
+|---|---|---|
+| `eap102A02` | 라인 목록 | `list_approval_lines` |
+| `eap102A05` | 라인 상세(결재자 구성) | `read_approval_line` |
+| `eap102A10` | 라인 생성·수정 | `save_approval_line` |
+| `eap102A09` | 라인 삭제 — body `{"lineIdList":[<행 객체>]}` | `delete_approval_line` |
+
+- ⚠️ **삭제는 `lineId` 숫자가 아니라 `eap102A02`가 준 행 객체를 통째로** 넘겨야 한다. 그래서 `list_approval_lines`가 각 항목에 원본 행을 `_row`로 실어 준다.
+- ⚠️ **결재자 객체는 부분 지정이 안 된다.** `[{"user_id":"<empSeq>"}]`만 주면 저장은 성공하고 `lineId`도 돌아오지만, **`eap110A03`이 그 라인을 결재자 0명으로 해석한다**(2026-08-06 실측). `read_approval_line`이 주는 멤버 객체(27필드 — `co_id`/`dept_id`/`duty_cd`/`grade_cd`/`act_id`/`org_div` 등)를 그대로 재사용할 것. 배열 순서 = 결재 순서이고 순서 필드(`doc_line_seq` 등)만 서버가 자동 주입한다.
+
+### 상신 → `submit_approval`
+
+```
+POST /eap/eap110A03   결재선 병합 + form_info.form_d_tp 취득 (읽기, docID:0)
+POST /eap/eap110A06   상신 → resultData.result = 신규 docId
+```
+
+- **`eap110A03`은 개인 라인을 그대로 쓰지 않는다.** 양식필수 합의자·수신참조(`m_Refer`)·시행자(`m_Oper`)를 병합해 돌려주고, 그 결과가 그대로 결재선이 된다. 즉 **개인 라인에는 결재(act_id 3000)만 담으면 된다.** 병합 결과 실측:
+
+  | 양식 | 결재 | 수신참조 | 시행 |
+  |---|---|---|---|
+  | 외근신청서(41) | 개인 라인 그대로 | 인사총무팀·재무회계팀·자금팀 | — |
+  | 연차휴가신청서(36) | 개인 라인 그대로 | 시행자 1명 + 인사총무팀·인사지원실 | 1명 |
+  | 휴직신청서(67) | 개인 라인 그대로 | 없음 | 없음 |
+
+  > `eap110A03`은 **부작용 없는 읽기 콜**이다. 상신 전에 "이 라인으로 올리면 누구에게 가는가"를 미리 확인하는 용도로 쓸 수 있다(`tests/live`의 상신 시나리오가 이 방식으로 사전 가드를 건다).
+
+- **근태 양식(`form_d_tp`가 `HP_HPD0110_*`)은 상신 전에 HP 연동 5콜이 선행돼야 한다.** 빠뜨리면 `eap110A06`이 `resultCode 2099`로 실패한다:
+
+  ```
+  /human/attendapplication/0hr00011            HP 신청 검증·스테이징
+  /human/attendapplication/create              HP 신청 커밋 → appSq, appDt
+  /system/apiUtilEap/GetLinkKey                → linkKey        (approKey — 대문자 K)
+  /personal/hpd0110/saveAttendApplicationLinkKey   linkKey ↔ appSq 명시 바인딩
+  /system/apiUtilEap/SetEnageGroup             approKey에 linkKey·formDTp·콜백 API 등록
+  ```
+
+- ⚠️ `form_d_tp`는 **양식마다 다르다**(연차36 `_00011` / 출장40 `_00021` / 외근41 `_00031` / 휴일43 `_00051` / 휴직67 `_00015` / 교육42 `_00041`). 하드코딩 금지 — `eap110A03` 응답에서 동적 취득한다. 그래서 a03를 interlock 등록보다 먼저 호출한다.
+- casing 함정: `/system/`·`/personal/` 계열은 **`approKey`**(대문자 K), `eap110A03`/`A06`은 **`approkey`**(소문자).
+- `bindData`는 **이중 인코딩**(`JSON.stringify` 두 번)해 전송한다. 본문 HTML은 `encodeURIComponent`.
+- 페이로드의 신원 필드(`coCd`/`deptCd`/`empCd`/이름)는 도구가 **로그인 사용자 값으로 덮어쓴다** — 가이드 예시에 박힌 타인 신원이 그대로 상신되는 것을 막기 위해서다.
+
+### 상신취소 → `cancel_approval`
+
+상태(`doc_sts`)에 따라 단계가 달라진다. 사전조회는 `docId`(소문자), 실행 3콜은 `docID`(대문자) — 실측 확정.
+
+| 단계 | 대상 doc_sts | API | 전이 |
+|---|---|---|---|
+| 사전조회 | — | `eap110A98 {docId, pageCode:"UBAP002"}` | → `doc_sts` |
+| 결재취소 | 30(진행중) | `eap110A54 {docID, formID, actID:"", pageCode:"UBAP002"}` | 30→20 |
+| 상신취소 | 20(상신) | `eap110A18 {docID, pageCode:"UBAP002"}` | 20→10 (**문서채번 반납**) |
+| 임시보관삭제 | 10(보관) | `eap110A19 {docID, pageCode:"UBAP001"}` | 소멸 |
+
+- **상신 직후 문서는 `doc_sts` 30**이라 `eap110A18`만으로는 `2116`("결재자가 결재하여 상신 취소할수 없습니다") — 반드시 `eap110A54`가 선행돼야 한다.
+- `eap110A54`는 `formID`를 요구하는데 `eap110A98` 응답에는 없다 → 호출자가 `list_approvals`의 `formId`를 넘겨야 한다.
+- ⭐ **이 3단계는 HP 근태 레코드(`appSq`)까지 회수한다** (2026-08-06 실측, docId 141760: 상신으로 `appSq 33147` 생성 → `purge` 취소 후 HP 목록에서 소멸, 총건수 59 → 59). 되돌리기는 완전하다.
+- 검증은 `read_approval`이 `2156`("삭제된 문서는 열 수 없습니다")를 주는지로 한다. `purge:false`면 임시보관(10)에 남고 `read_approval`은 `2385`(임시저장).
+
+### 임시보관 문서 삭제 → `delete_temp_approval`
+
+```
+GET /eap/sse/eap107A25?docIdList=<csv>     # ⚠️ SSE 스트림(다른 API와 형태가 다름)
+```
+
+### ⚠️ 되돌릴 수 없는 것 — HP 근태 레코드 고아
+
+**상신이 실패**하면(`eap110A06` 에러) `create`가 만든 HP 신청 레코드만 남고 취소할 eap 문서가 없어 **지울 방법이 없다.** soft delete(`/human/hrd0220/updateAttendApprovalDeleteReq`)는 `deleteReqYn=Y` 플래그만 세우고 `approState 2`로 잔존하며, 배포 번들 전수 조사에도 **하드삭제 API가 없다**.
+
+- 현황 조회(도구 미노출, `probe`로만): `POST /human/attendapplication/at00001` `{approStateList:["0".."5"], linkAtCdList:[], startDate, endDate, calendarViewType:"DEFAULT"}`
+- 상신을 자동으로 반복하는 테스트는 **전후로 이 목록을 찍어 고아 발생을 감지**해야 한다(`tests/live`가 그렇게 한다).
 
 ## 통합검색 — `/gw/APIHandler/gw018A02`
 
@@ -461,12 +534,14 @@ body: a10Domain=https://gw.innogrid.com        # 유일 파라미터
 
 ## 미조사 (다음 단계)
 
-- **전자결재(`/eap/*`) 읽기 3종 구현 완료**(`list_approvals`/`read_approval`/`approval_counts`). 쓰기(상신/승인/반려)는 미조사(실 결재 부작용).
+- **전자결재(`/eap/*`)**: 읽기 3종 + 개인결재라인 CRUD + **상신·상신취소·임시보관삭제** 구현 완료(근태 4양식 순수 API e2e 실증). **미구현은 승인/반려뿐** — 조직 의사결정 행위라 의도적 제외.
+- 전자결재 첨부(문서에 파일 붙여 상신)는 미조사 — 상신 payload의 `fileGroup`/`attachCnt` 자리만 확인.
 - **메신저(대화방)**: gw API 미노출 — 별도 제품(웹 통합알림 `event02A01`도 MAIL/BOARD/HPD만, 메신저 이벤트 없음). 자동화하려면 메신저 서비스 별도 리버싱 필요.
 - 메일 상세 본문·첨부는 구현 완료(read_mail/download_mail_attachment).
 - **메일·결재 검색 구현 완료** — 통합검색 `gw018A02`(위 섹션). 모듈별 전용 검색 API는 존재하지 않는다.
 - 게시판: 읽기(목록/상세/검색/날짜필터/첨부 목록·다운로드) 구현 완료. **미구현** — 쓰기(글/댓글 등록), 특정 게시판별 목록(`ViewBoardArtList`의 "게시판 코드" 라이브 캡처 필요).
-- 근태: punch(`clock_in`/`clock_out`)·오늘 조회·**기간 조회(`attendance_month`)** 구현 완료. 미조사 — 연차 잔여(`/human/hrd0620/0hr00001` 등 경로만 확보), 근태 신청/승인.
+- 근태: punch(`clock_in`/`clock_out`)·오늘 조회·**기간 조회(`attendance_month`)** 구현 완료. **근태 신청은 전자결재 상신 경로에 포함**(`submit_approval`의 HP 연동 5콜 — 위 전자결재 절). 미조사 — 연차 잔여(`/human/hrd0620/0hr00001` 등 경로만 확보), 근태 승인.
+- ⚠️ **HP 근태 신청의 하드삭제 API는 존재하지 않는다**(번들 전수 조사). 상신이 실패해 생긴 고아 레코드는 회수 불가 — 위 전자결재 절의 "되돌릴 수 없는 것" 참조.
 - **회의실 정원(capacity) — 아마란스에 개념 자체가 없음(확정, 재조사 불필요)**. 4중 확인: `rs121A01` 응답에 필드 없음 / langPack 10만 문자열에 "수용인원" 0건 / 자원 HOME·예약 다이얼로그 화면에 정원 표시·입력 없음 / **자원 속성 체계(`rs121A28`·`rs121A29`)가 "회의실명"·"법인차량" 같은 분류 태그일 뿐 숫자 속성이 아님**. "N명 들어가는 회의실" 류 질의는 이 시스템으로 답할 수 없다.
 - ⚠️ `rs121A02`~`A04`는 자원 등록·수정(**쓰기**)일 가능성이 있어 미확인으로 둔다. 공용 자원에 부작용이 가므로 맹목 호출 금지.
 - 일정 확장 item(schCalendar/schAlarm/schMyMemo/schDisclosure/schPlace/schReservation 등)은 key만 확보, 값 구조 미실측.
