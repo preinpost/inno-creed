@@ -557,10 +557,6 @@ pub async fn delete_event_and_verify(c: &GwClient, sch_seq: &str, date: &str) ->
 }
 
 #[cfg(test)]
-// 테스트 이름에 아마란스 실제 필드명(empSeq·delYn·boardType…)을 그대로 적는다 —
-// 무엇을 검증하는지 이름만 보고 알기 위해서다. 소문자로 풀면 실재하지 않는 이름이 되므로
-// 이름을 바꾸는 대신 lint를 끈다. (한글은 대소문자가 없어 경고 대상이 아니다.)
-#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
@@ -585,6 +581,7 @@ mod tests {
 
     /// 빈 `calType`을 `"E"`로 채우는 것이 이 변환의 핵심(그대로 넘기면 조회에서 빠진다).
     #[test]
+    #[allow(non_snake_case)] // 이름 속 `E` — 대문자를 살려야 뜻이 통하는 표기라 소문자로 풀지 않는다
     fn to_cal_list는_빈_caltype을_E로_보정한다() {
         let list = to_cal_list(&sample());
         assert_eq!(list.len(), 3);
@@ -657,6 +654,7 @@ mod tests {
 
     /// 자원의 `check_owner`와 **필드명(createSeq)·호칭(작성자)이 다르다**는 점이 요지.
     #[test]
+    #[allow(non_snake_case)] // 이름 속 `delYn` — 대문자를 살려야 뜻이 통하는 표기라 소문자로 풀지 않는다
     fn shape_events는_delYn을_mine으로_바꾸고_시각을_ISO로_돌린다() {
         let raw = json!({"resultList": [
             {"schSeq":"90270","schTitle":"시너지 미팅","startDate":"202608061400","endDate":"202608061500",

@@ -195,14 +195,11 @@ pub async fn search(
 }
 
 #[cfg(test)]
-// 테스트 이름에 아마란스 실제 필드명(empSeq·delYn·boardType…)을 그대로 적는다 —
-// 무엇을 검증하는지 이름만 보고 알기 위해서다. 소문자로 풀면 실재하지 않는 이름이 되므로
-// 이름을 바꾸는 대신 lint를 끈다. (한글은 대소문자가 없어 경고 대상이 아니다.)
-#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     #[test]
+    #[allow(non_snake_case)] // 이름 속 `boardType` — 대문자를 살려야 뜻이 통하는 표기라 소문자로 풀지 않는다
     fn scope_spec은_별칭을_boardType으로_바꾼다() {
         assert_eq!(scope_spec("메일").unwrap(), ("0", "메일"));
         assert_eq!(scope_spec("mail").unwrap(), ("0", "메일"));
@@ -250,6 +247,7 @@ mod tests {
 
     /// 정규화의 핵심 계약: **후속 조회 ID가 살아남아야 한다**(muid/docId+formId/artSeqNo).
     #[test]
+    #[allow(non_snake_case)] // 이름 속 `ID` — 대문자를 살려야 뜻이 통하는 표기라 소문자로 풀지 않는다
     fn normalize는_모듈별_후속조회_ID를_보존한다() {
         let mail = normalize("0", "메일", &json!({
             "subject": "제목", "muid": "123", "boxName": "INBOX",
@@ -278,6 +276,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(non_snake_case)] // 이름 속 `empSeq` — 대문자를 살려야 뜻이 통하는 표기라 소문자로 풀지 않는다
     fn normalize는_empSeq를_모듈_공통으로_붙인다() {
         let v = normalize("9", "게시판", &json!({ "artTitle": "공지", "empSeq": "3166" }));
         assert_eq!(v["empSeq"], "3166");

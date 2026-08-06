@@ -80,10 +80,6 @@ pub fn s(v: &Value, k: &str) -> String {
 }
 
 #[cfg(test)]
-// 테스트 이름에 아마란스 실제 필드명(empSeq·delYn·boardType…)을 그대로 적는다 —
-// 무엇을 검증하는지 이름만 보고 알기 위해서다. 소문자로 풀면 실재하지 않는 이름이 되므로
-// 이름을 바꾸는 대신 lint를 끈다. (한글은 대소문자가 없어 경고 대상이 아니다.)
-#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use serde_json::json;

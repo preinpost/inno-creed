@@ -81,10 +81,6 @@ fn find_form<'a>(
 }
 
 #[cfg(test)]
-// 테스트 이름에 아마란스 실제 필드명(empSeq·delYn·boardType…)을 그대로 적는다 —
-// 무엇을 검증하는지 이름만 보고 알기 위해서다. 소문자로 풀면 실재하지 않는 이름이 되므로
-// 이름을 바꾸는 대신 lint를 끈다. (한글은 대소문자가 없어 경고 대상이 아니다.)
-#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
@@ -100,6 +96,7 @@ mod tests {
     /// draftHelp는 submit_approval의 --help 역할이라, 예시 두 개가 반드시 있어야 한다.
     /// 이게 비면 에이전트가 hp_application_json/bind_data_json을 채울 근거를 잃는다.
     #[test]
+    #[allow(non_snake_case)] // 이름 속 `draftHelp` — 대문자를 살려야 뜻이 통하는 표기라 소문자로 풀지 않는다
     fn 모든_양식이_draftHelp_예시를_갖는다() {
         let list = list_guides().unwrap();
         let forms = list["forms"].as_array().unwrap();
