@@ -53,8 +53,19 @@ async fn members_of(
 }
 
 /// duty 문자열이 스키마 정의(`"센터장|실장|사업부장"` 같은 OR 표기)에 걸리는지.
+///
+/// ⚠️ **빈 조각은 매칭 후보에서 뺀다.** `duty.contains("")`는 항상 참이라, 거르지 않으면
+/// spec이 비었을 때(`positions[pos].duty`가 없거나 `null`) "조건 없음"이 아니라 **"아무나 통과"**가 된다.
+/// relative(`L_*`) 분기에는 호출부 가드가 없어 그대로 후보 1명이 조용히 확정될 수 있다 —
+/// duty 없는 relative 직책은 스키마 기입 누락으로 보고 **전부 탈락**시켜 `미해결`+경고로 드러나게 한다.
+/// (fixed 분기는 호출부의 `want_duty.is_empty() ||` 단락평가에 먼저 걸려 영향받지 않는다.)
 fn duty_matches(spec: &str, duty: &str) -> bool {
-    !duty.is_empty() && spec.split('|').any(|want| duty.contains(want.trim()))
+    !duty.is_empty()
+        && spec
+            .split('|')
+            .map(str::trim)
+            .filter(|want| !want.is_empty())
+            .any(|want| duty.contains(want))
 }
 
 /// 사람 후보 1건을 결재선 표시용으로 축약(그대로 save_approval_line에 넣을 수 있게 empSeq 포함).
@@ -359,13 +370,63 @@ mod tests {
         assert!(!duty_matches("", "")); // duty가 비면 spec과 무관하게 false
     }
 
-    /// ⚠️ 현재 동작 고정: spec이 비면 `"".split('|')` → `[""]`이고 `contains("")`는 항상 참이라
-    /// **아무 duty나 통과**한다. fixed 분기는 호출부에서 `want_duty.is_empty()`로 막지만
-    /// relative 분기에는 그 가드가 없다.
+    /// ⚠️ spec이 비면 **아무도 통과시키지 않는다**(= "조건 없음"이 아니라 "매칭 대상 없음").
+    /// `"".split('|')` → `[""]`이고 `contains("")`는 항상 참이라 거르지 않으면 아무 duty나 통과하는데,
+    /// relative 분기에는 호출부 가드가 없어 엉뚱한 후보 1명이 경고 없이 확정된다.
+    /// 여기서 막아 `미해결`+경고로 드러나게 한다 — fixed 분기는 호출부 단락평가라 영향 없음.
     #[test]
-    fn duty_matches는_빈_spec이면_아무나_통과시킨다() {
-        assert!(duty_matches("", "팀원"));
-        assert!(duty_matches("", "대표이사"));
+    fn duty_matches는_빈_spec이면_아무도_통과시키지_않는다() {
+        assert!(!duty_matches("", "팀원"));
+        assert!(!duty_matches("", "대표이사"));
+        // 공백뿐이거나 빈 조각만 있는 spec도 같다 — trim 후 빈 조각은 후보에서 빠진다.
+        assert!(!duty_matches("   ", "팀원"));
+        assert!(!duty_matches("|", "팀원"));
+        // 빈 조각이 섞여 있어도 실제 조각만 판정한다(예전엔 빈 조각 하나로 전부 통과했다).
+        assert!(duty_matches("팀장|", "인사총무팀장"));
+        assert!(!duty_matches("팀장|", "팀원"));
+    }
+
+    /// 잠복 조건 재현 — `positions`에 duty 없는 relative 직책이 들어온 경우.
+    /// suggest_line 자체는 조직도 API가 필요해 여기서 못 돌리므로, 그 안의 판정 파이프라인
+    /// (`want_duty` 읽기 → `duty_matches` → `step_status`/`step_warning`)을 같은 순서로 엮어 본다.
+    /// 기대: 부서에 duty 보유자가 있어도 후보 0 → `미해결` + 경고. 조용히 틀리는 경로가 없다.
+    #[test]
+    fn duty_없는_relative_직책은_후보없이_미해결로_떨어진다() {
+        let positions = json!({ "L_상위장": { "kind": "relative" } });
+        let def = positions.get("L_상위장").cloned().unwrap();
+        assert_eq!(def.get("kind").and_then(|v| v.as_str()).unwrap_or(""), "relative");
+        let want_duty = def.get("duty").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(want_duty, "", "duty 키가 없으면 빈 spec으로 내려온다");
+
+        // 부서원 중 duty 보유자가 있어도 걸리지 않아야 한다.
+        let members = ["팀장", "팀원", ""];
+        let hits = members.iter().filter(|d| duty_matches(want_duty, d)).count();
+        assert_eq!(hits, 0);
+        assert_eq!(step_status(hits), "미해결");
+        let w = step_warning(1, "L_상위장", "결재", hits).expect("미해결이면 경고가 붙어야 한다");
+        assert!(w.contains("찾지 못했습니다"), "{w}");
+    }
+
+    /// 위 잠복 조건을 스키마 단계에서 미리 막는 **구조 불변식** — 특정 직책명·duty 값이 아니라
+    /// "relative면 duty가 있어야 한다"는 규칙만 본다(값을 단정하지 않으므로 개정에 견딘다).
+    /// 개정에서 duty 없는 relative가 들어오면 여기서 즉시 실패한다.
+    #[test]
+    fn 번들_스키마의_relative_직책은_duty가_비어있지_않다() {
+        let schema = approval_schema::get_schema("연차휴가신청").unwrap();
+        let positions = schema["positions"].as_object().expect("positions 없음");
+        let mut seen = 0;
+        for (pos, def) in positions {
+            if def.get("kind").and_then(|v| v.as_str()) != Some("relative") {
+                continue;
+            }
+            seen += 1;
+            let duty = def.get("duty").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(
+                !duty.trim().is_empty(),
+                "relative 직책 '{pos}'에 duty가 없다 — duty_matches가 후보를 못 찾아 전 단계가 미해결이 된다"
+            );
+        }
+        assert!(seen > 0, "relative 직책이 하나도 없다 — 불변식이 헛돌고 있다");
     }
 
     #[test]
