@@ -37,7 +37,7 @@ impl Amaranth {
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
-    #[tool(description = "임시보관함(DRAFTS) 최근 20통을 조회한다 — save_mail_draft로 저장한 초안을 확인하는 경로다. ⚠️ 응답은 서버 원본 봉투 그대로다 — 메일 배열은 `Records`(list_mail_inbox와 동일), 각 항목의 `muid`가 read_mail/delete_mail의 키다. 메일함 번호는 계정마다 달라 이름(DRAFTS)으로 해석한다. ⚠️ 전자결재 임시보관함과는 무관하다(그쪽은 list_approvals(box_name=\"draft\")).")]
+    #[tool(description = "임시보관함(DRAFTS) 최근 20통을 조회한다 — save_mail_draft로 저장한 초안을 발송 전에 사용자에게 확인받는 경로다. ⚠️ 응답은 서버 원본 봉투 그대로다 — 메일 배열은 `Records`(list_mail_inbox와 동일), 각 항목의 `muid`가 read_mail/delete_mail의 키다. 메일함 번호는 계정마다 달라 이름(DRAFTS)으로 해석한다. ⚠️ 전자결재 임시보관함과는 무관하다(그쪽은 list_approvals(box_name=\"draft\")).")]
     async fn list_mail_drafts(&self) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
         let data = modules::mail::list_drafts(&self.client, 1, 20)
@@ -47,7 +47,7 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "메일을 발송한다(2단계: 작성폼 초기화→발송). 받는사람 미지정 시 본인에게. attachments에 로컬 파일 경로를 주면 첨부 발송."
+        description = "메일을 발송한다(2단계: 작성폼 초기화→발송). 받는사람 미지정 시 본인에게. attachments에 로컬 파일 경로를 주면 첨부 발송. ⚠️ 발송은 되돌릴 수 없다(수신자에게 나가면 회수 불가) — 곧바로 보내지 말고, 먼저 save_mail_draft로 보낼 형상을 임시보관함에 만들고 list_mail_drafts로 사용자에게 확인을 요청한 뒤, 확인받고 나서 이 도구로 발송하는 흐름을 권장한다(발송 후 남은 초안은 delete_mail로 정리). ⚠️ 이 도구는 초안을 꺼내 보내는 것이 아니라 새로 조립해 보낸다 — 확인받은 초안과 to/subject/html을 글자 그대로 같게 넣어야 사용자가 승인한 그대로 나간다. 사용자가 즉시 발송을 명시적으로 지시했다면 그때는 곧바로 이 도구를 쓴다."
     )]
     async fn send_mail(
         &self,
@@ -69,7 +69,7 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "메일을 임시보관함(DRAFTS)에 저장한다 — **발송하지 않는다**(수신자에게 아무것도 가지 않는다). 사람이 아마란스 웹에서 확인한 뒤 직접 보내는 흐름용이라, 초안만 만들면 될 때는 send_mail 대신 이 도구를 쓴다. 받는사람 미지정 시 본인. attachments에 로컬 파일 경로를 주면 첨부까지 붙여 저장. 반환 draft_muid = 저장된 임시보관 메일의 muid. ⚠️ 전자결재 임시보관함과는 무관하다(그쪽은 list_approvals(box_name=\"draft\"))."
+        description = "메일을 임시보관함(DRAFTS)에 저장한다 — **발송하지 않는다**(수신자에게 아무것도 가지 않는다). 발송 전 사람 확인을 받는 표준 경로라 send_mail보다 이 도구를 먼저 쓴다 — 초안을 만들고 list_mail_drafts로 사용자에게 확인받은 뒤, 확인되면 send_mail로 발송(남은 초안은 delete_mail로 정리)하거나 사용자가 아마란스 웹에서 직접 보낸다. 다만 사용자가 즉시 발송을 명시적으로 지시했다면 초안을 거치지 말고 곧바로 send_mail을 쓴다. 받는사람 미지정 시 본인. attachments에 로컬 파일 경로를 주면 첨부까지 붙여 저장. 반환 draft_muid = 저장된 임시보관 메일의 muid. ⚠️ 전자결재 임시보관함과는 무관하다(그쪽은 list_approvals(box_name=\"draft\"))."
     )]
     async fn save_mail_draft(
         &self,
@@ -97,7 +97,7 @@ impl Amaranth {
         Ok(CallToolResult::success(vec![ContentBlock::text(msg.to_string())]))
     }
 
-    #[tool(description = "메일을 삭제한다(휴지통 이동). uids=콤마구분 muid. list_mail_inbox의 muid 사용.")]
+    #[tool(description = "메일을 삭제한다(휴지통 이동). uids=콤마구분 muid. muid 출처는 list_mail_inbox, 또는 임시보관함 정리라면 list_mail_drafts(= save_mail_draft가 낸 draft_muid).")]
     async fn delete_mail(
         &self,
         Parameters(a): Parameters<DeleteMailArgs>,

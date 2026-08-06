@@ -214,7 +214,7 @@ inno-creed (Rust MCP 서버, 헤드리스)
 
 - **응답 성공 ≠ 실제 반영** — 서버는 권한 밖 대상에 대해 `successTf:true`를 주면서 실제로는 무시(silent no-op)합니다. 그래서 모든 mutation은 직후 **재조회(read-back)로 실제 상태를 확인**하고, 반영되지 않았으면 실패로 처리합니다.
 - **소유권 가드** — 쓰기 도구는 대상의 소유자(예약은 `empSeq`, 일정은 `createSeq`)가 본인일 때만 실행하고, 아니면 명시적 에러를 냅니다. 서버도 남의 데이터 수정을 무시하지만, MCP에서 먼저 걸러 원인을 분명히 알려줍니다. 이 두 규약은 도구 층이 아니라 **각 도메인 모듈의 mutation 함수(`*_and_verify`) 안**에 있어 어떤 호출자도 우회할 수 없습니다.
-- **부작용 있는 도구는 명시** — 근태 punch(`attendance_clock_in`/`attendance_clock_out`), 상신(`submit_approval`), 게시글 열람(`read_notice`, 조회수 증가)은 실제 기록이 남습니다. 사용자가 명시적으로 지시할 때만 호출하세요.
+- **부작용 있는 도구는 명시** — 근태 punch(`attendance_clock_in`/`attendance_clock_out`), 상신(`submit_approval`), 게시글 열람(`read_notice`, 조회수 증가)은 실제 기록이 남습니다. 사용자가 명시적으로 지시할 때만 호출하세요. 메일 발송(`send_mail`)은 되돌릴 수 없어 한 단계 더 두었습니다 — 지시받았더라도 `save_mail_draft`로 초안을 만들어 `list_mail_drafts`로 확인받은 뒤 발송하고, 사용자가 즉시 발송을 지시하면 그때만 곧바로 보냅니다.
 - **서버 자동 결재선 불신** — 서버가 채워주는 기본 결재선은 위임전결 규정과 일치하지 않습니다. `get_approval_line_schema`로 직책 기반 스키마를 받고, `org_chart`로 담당자를 해석한 뒤 사람이 확인하고 상신하세요.
 
 ## 문서

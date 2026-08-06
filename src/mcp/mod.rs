@@ -118,6 +118,9 @@ impl ServerHandler for Amaranth {
              주의:\n\
              - 부작용 있는 도구 — `attendance_clock_in`/`attendance_clock_out`(실제 근태 기록), `submit_approval`(결재요청 발송), \
                `send_mail`, `read_notice`(조회수 증가). 사용자가 명시적으로 지시할 때만 호출한다.\n\
+             - **메일 발송은 되돌릴 수 없다** — 지시받았더라도 곧바로 `send_mail` 하지 말고, \
+               `save_mail_draft`로 초안을 만들어 `list_mail_drafts`로 사용자 확인을 받은 뒤 발송한다. \
+               사용자가 '확인 없이 바로 보내'라고 명시하면 그때는 곧바로 발송한다.\n\
              - 회의실 **정원(수용인원) 데이터는 아마란스에 없다**. 'N명 회의실' 조건은 답할 수 없다.\n\
              - 날짜는 YYYYMMDD, 시각은 YYYYMMDDHHmm(입력). 조회 결과의 시각은 ISO로 정규화해 반환한다."
                 .to_string(),
