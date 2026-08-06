@@ -3,3 +3,8 @@
 /.playwright-mcp
 **/*.rs.bk
 .DS_Store
+
+# 라이브 스모크 — 개인값·잔여물 대장·산출물은 추적하지 않는다(이 저장소는 public).
+/tests/live/fixtures.json
+/tests/live/leaks.json
+/tests/live/out/
