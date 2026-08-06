@@ -1,6 +1,6 @@
 {
  "version": "2026-08-05c",
- "source": "03-document-guide.md + 07-eapproval-api-capture.md §8(KISS 근태폼 HPD0110) + §9(위임전결 260801 개정). approvalLineHint는 위임전결 기준_260801 반영.",
+ "source": "실측 캡처 기준(KISS 근태폼 HPD0110, 위임전결 260801 개정). approvalLineHint는 위임전결 기준_260801 반영.",
  "note": "양식별 '기안 데이터 채우는 법 + 상신 절차' 가이드(결재라인과 별개). 각 폼의 draftHelp 가 submit_approval 의 hp_application_json/bind_data_json 을 어떻게 구성하는지(고정코드/채울필드/실동작 예시) 설명한다 — CLI --help 격. requiredBody/steps 는 아마란스 웹에서 직접 작성할 때의 참고. | 근태 순수API 상신·취소 정식 지원(4양식 실증). 제목은 draftHelp.defaultDocTitle 참고+사용자 확인.",
  "mcpStatus": {
   "approvalLine": "✅ MCP 가능 — get_approval_line_schema(직책 라인) → org_chart(직책→사람) → save_approval_line(등록). 상신 전 사람 확인 필수.",

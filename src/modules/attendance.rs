@@ -1,7 +1,7 @@
 //! 근태 출퇴근(human 모듈) — `/human/common/judgeTimeManagement/*`. ⚠️ **실제 근태 기록(쓰기)**.
-//! 실측: `06-attendance-api-capture.md`. `attendFg` **1=출근(clock in) / 4=퇴근(clock out)**.
+//! `attendFg` **1=출근(clock in) / 4=퇴근(clock out)** — 실호출로 확인한 값이다.
 //! empCd/deptCd/coCd는 ensure_session(gw050A02)에서 확보. 성공 판정은 응답 successCount가 아니라
-//! read-back(getTodayComeLeaveInfo)의 comeTm/leaveTm으로 — [[verify-mutations-with-readback]].
+//! read-back(getTodayComeLeaveInfo)의 comeTm/leaveTm으로 판정한다.
 
 use anyhow::Result;
 use serde_json::{json, Value};

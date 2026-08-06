@@ -2,7 +2,7 @@
 //!
 //! 메일·전자결재·게시판·일정·자원·파일을 **하나의 API**로 검색한다. 모듈별 전용 검색
 //! API(mail003A01 등)에는 검색 파라미터가 없다 — 포털 통합검색이 유일한 경로다.
-//! 실측: `.claude-workspace/analyze/10-endpoint-discovery-js-bundle.md` §⑤.
+//! 이 엔드포인트는 포털 JS 번들을 분석해 확인한 값이다.
 //!
 //! ⚠️ 검색어 필드명은 `tsearchKeyword`다. `searchText`/`keyword` 같은 이름을 넣으면
 //! **서버가 조용히 무시하고 필터 없는 전체 결과를 준다**(에러 없음).

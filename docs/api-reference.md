@@ -316,7 +316,7 @@ body: 위와 동일 + fileSn=<파일 순번(0-base, 목록 배열 인덱스)>
 
 ## 전자결재 — `/eap/*` (읽기 전용)
 
-헤더 서명만으로 완결(목록/상세는 companyInfo 불필요, 카운트만 필요). 표준 봉투. 상세: `.claude-workspace/approval-analysis/07`.
+헤더 서명만으로 완결(목록/상세는 companyInfo 불필요, 카운트만 필요). 표준 봉투. 엔드포인트·필드는 실제 트래픽 캡처로 확정했다.
 
 ### 함별 목록 → `list_approvals`
 

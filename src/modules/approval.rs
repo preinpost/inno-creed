@@ -1,6 +1,6 @@
 //! 전자결재(EAPPROVAL) 모듈 — `/eap/*`. 읽기 전용(함별 목록·문서 상세·미처리 카운트).
 //! 인증은 헤더 서명만으로 완결. 쓰기(상신/승인/반려)는 실 결재 발생이라 미구현.
-//! 실측: `.claude-workspace/approval-analysis/07-eapproval-api-capture.md`.
+//! 엔드포인트·요청 필드·응답 봉투는 실제 트래픽 캡처로 확정한 값이다.
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
@@ -20,7 +20,7 @@ fn box_spec(b: &str) -> Result<(&'static str, &'static str, &'static str, &'stat
         "enforcement" => ("eap105A04", "1000900", "1001400", "REP_DT", "map"),
         "sent" => ("eap107A04", "1000300", "1000400", "REP_DT", "list"),
         // 임시보관(결재작성 중 저장 + 상신취소로 복귀한 문서). eap107A06, menuNo 1000500.
-        // ※ 여기 쌓인 문서가 신규 상신을 막지는 않는다(07 §10.6에서 반증).
+        // ※ 여기 쌓인 문서가 신규 상신을 막지는 않는다(실측으로 반증됨).
         "draft" => ("eap107A06", "1000300", "1000500", "REP_DT", "list"),
         _ => return Err(anyhow!(
             "알 수 없는 함 '{b}'. 사용 가능: pending(미결)/approved(기결)/approved_ongoing(기결진행)/approved_done(기결종결)/reference(수신참조)/enforcement(시행)/sent(상신)/draft(임시보관)"
@@ -303,7 +303,7 @@ mod tests {
 
     /// ⚠️ 결재의 `html_to_text`/`collapse_ws`는 `board` 의 동명 함수와 **의도적으로 다르다** —
     /// 여기서는 블록 구분 없이 태그를 공백으로 바꾸고 개행을 전부 없앤다(본문을 한 줄로).
-    /// 근거: `.claude-workspace/todo/refactor-structure/05-shared-util-extraction.md` (B)절.
+    /// 근거: 공통 유틸 추출(2026-08-05) 때 이 둘은 "이름만 같고 계약이 다르다"고 판단해 합치지 않았다.
     #[test]
     fn html_to_text는_블록구분_없이_공백으로만_바꾼다() {
         assert_eq!(html_to_text("<p>가</p><p>나</p>"), " 가  나 ");

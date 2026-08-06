@@ -1,5 +1,5 @@
 //! 양식별 신청 가이드(문서 본문에 채울 내용 + 상신 절차) 조회 — 번들 데이터.
-//! 데이터: `src/data/submission_guides.json`. 근거: `03-document-guide.md`, `07-eapproval-api-capture.md` §8.
+//! 데이터: `src/data/submission_guides.json`.
 //! ⚠️ 결재라인(누가 결재)과 별개. 본문 입력·상신은 아직 MCP 자동화 불가라, 사람이 손으로 작성하도록 안내하는 용도.
 
 use anyhow::{anyhow, Result};

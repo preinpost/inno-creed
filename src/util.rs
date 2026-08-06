@@ -14,7 +14,7 @@
 //! | `url_decode` | `creds` | authToken 전용 최소 구현(`%7C`→`\|`만). 범용 디코더로 바꾸면 동작이 달라진다. |
 //! | `encode_uri_component` | `modules::approval_submit` | JS 동등 인코더(공백→`%20`). `client::form_urlencode`(공백→`+`)와 규칙이 다르고 상신 본문 인코딩에 종속적이다. |
 //!
-//! 근거: `.claude-workspace/todo/refactor-structure/05-shared-util-extraction.md`
+//! 이 표는 공통 유틸 추출(2026-08-05) 때 "이름이 같아도 동작이 다르면 합치지 않는다"고 판단한 결과다.
 
 use serde_json::Value;
 

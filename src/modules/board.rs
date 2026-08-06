@@ -330,7 +330,6 @@ mod tests {
     /// ⚠️ 이 모듈의 `html_to_text`/`collapse_ws`는 `approval` 의 동명 함수와 **의도적으로 다르다**
     /// (게시판·메일 본문은 줄바꿈을 살리고, 결재 본문은 한 줄로 누른다).
     /// 이름이 같다고 합치면 게시판/메일 본문 표시가 조용히 바뀐다 — 그걸 막는 테스트다.
-    /// 근거: `.claude-workspace/todo/refactor-structure/05-shared-util-extraction.md` (B)절.
     #[test]
     fn html_to_text는_블록구조를_개행으로_살린다() {
         assert_eq!(html_to_text("<p>가</p><p>나</p>"), "\n가\n\n나\n");

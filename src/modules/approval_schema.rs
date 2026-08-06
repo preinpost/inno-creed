@@ -1,10 +1,10 @@
 //! 결재라인 스키마(직책 기반) 조회 — 번들 기본값 + `~/.config` override 논리 병합.
-//! 데이터: `src/data/approval_line_schema.json` (version = 위임전결 PDF 날짜). 근거: `02-delegation-matrix.md`.
+//! 데이터: `src/data/approval_line_schema.json` (version = 위임전결 규정 개정일).
 //! ⚠️ 스키마는 **직책만** 담는다 — 사람은 org_chart 로 해석(후보)하고 **상신 전 사람 확인 필수**.
 //!
 //! override 파일: `$XDG_CONFIG_HOME/inno-creed/approval_line.json` (없으면 `~/.config/inno-creed/...`).
 //! 형식: `{ "overrides": { "<양식명>": { "overridden_at": "YYYY-MM-DD", "branches": [...] } } }`.
-//! 병합 규칙(논리, 파일 미변경): 폼별로 `overridden_at >= 번들.version` 이면 override, 아니면 번들(=새 PDF 가 낡은 override 를 이김).
+//! 병합 규칙(논리, 파일 미변경): 폼별로 `overridden_at >= 번들.version` 이면 override, 아니면 번들(=새 번들이 낡은 override 를 이김).
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};

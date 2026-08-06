@@ -1,9 +1,9 @@
 //! 조직도(ORG) 모듈 — `/gw/APIHandler/gw102A0x`. 읽기 전용.
 //! 부서 트리(gw102A01) + 부서별 사원·직책(gw102A02). 결재선 "직책→담당자" 해석의 재료.
-//! 인증은 헤더 서명만으로 완결(companyInfo 불필요). 실측: `.claude-workspace/approval-analysis/07-eapproval-api-capture.md` §8.
+//! 인증은 헤더 서명만으로 완결(companyInfo 불필요) — 실제 트래픽 캡처로 확정한 사실이다.
 //!
 //! ⚠️ 조회 결과는 정확하지만, 여기서 "이 직책 담당자 = 이 문서 결재자"로 단정하지 말 것.
-//! dutyName(직책 텍스트)이 권위 필드이고 dutyCode 숫자 매핑은 불안정 — [[eapproval-server-default-line-untrusted]].
+//! dutyName(직책 텍스트)이 권위 필드이고 dutyCode 숫자 매핑은 불안정하다.
 //!
 //! ## ⚠️ 시그니처 예외 — 이 모듈의 `roster`/`find_person`만 `&Arc<GwClient>`를 받는다
 //!
@@ -17,7 +17,7 @@
 //! 없앨 수는 있으나 셋 다 대가가 있어 **의도적으로 현 상태를 유지한다**(2026-08-05 판단):
 //! `futures::buffer_unordered` 도입(신규 의존성) / `roster`를 client.rs로 이관(역할 분담 붕괴) /
 //! 직렬화(첫 조회가 부서 수만큼 순차 호출 — 명백한 후퇴).
-//! **새 함수를 추가할 땐 `&GwClient`를 쓸 것.** 근거: `todo/refactor-structure/06-org-arc-signature.md`.
+//! **새 함수를 추가할 땐 `&GwClient`를 쓸 것.**
 
 use std::collections::HashSet;
 use std::sync::Arc;

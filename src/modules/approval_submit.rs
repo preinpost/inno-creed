@@ -1,5 +1,5 @@
 //! 전자결재 상신/상신취소(쓰기) — `eap110A06`(상신) / `eap110A98`+`eap110A18`(상신취소).
-//! 실측 캡처: `07-eapproval-api-capture.md` §8.8~§8.10.
+//! 요청 형식·호출 순서는 실제 트래픽 캡처로 확정했다.
 //! ⚠️ **실제 결재가 발생**한다(결재요청·수신참조 통지가 나감). 테스트는 반드시 테스트 결재라인으로.
 //!
 //! 상신 흐름(팝업이 하던 일을 재현):
@@ -13,13 +13,13 @@
 //!     — 이 셋은 성공 브라우저 상신 payload와 바이트 동일(실측 대조).
 //!  5) eap110A06 POST → resultData.result = 신규 docId.
 //!
-//! ⚠️ **2099(HP_HPD0110_000XX)의 원인은 interlock 등록 3콜 누락**이다(§10.19~§10.20, 2026-08-05 무필터 전량 캡처로 확정).
+//! ⚠️ **2099(HP_HPD0110_000XX)의 원인은 interlock 등록 3콜 누락**이다(2026-08-05 무필터 전량 캡처로 확정).
 //!    eap110A06의 eap→HP 서버간 연동은 approKey에 등록된 linkKey를 찾는데, 등록이 없으면 대상이 없어 HP가 500을 준다.
 //!    (GetLinkKey/SetEnageGroup 누락 → "Internal Server Error", saveAttendApplicationLinkKey 누락 → "종결 처리 오류".)
 //!    초기 캡처가 `/human/`·`/eap/`만 필터링해 `/system/apiUtilEap/*`·`/personal/hpd0110/*`를 통째로 놓친 게
 //!    장기 오진의 원인이었다. **반증된 가설(재도입 금지)**: payload/pOper 누락, 잔여 임시 draft·대기신청 충돌,
 //!    날짜, doc_sts(10/20), eap prep 콜, 쿠키·토큰·헤더·전송계층 지문, 포털로그인(gw050B01) 세션 — 전부 실측 반증.
-//!    HP↔eap 링크도 "서버가 empCd+atDt로 매칭"이 아니라 **linkKey↔appSq 명시 바인딩**이다(§10.20).
+//!    HP↔eap 링크도 "서버가 empCd+atDt로 매칭"이 아니라 **linkKey↔appSq 명시 바인딩**이다(실측으로 확정).
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
@@ -280,7 +280,7 @@ pub async fn submit_approval(
     // eap110A06의 eap→HP 서버간 연동은 이 3콜 등록을 요구한다. 누락 시:
     //   · GetLinkKey/SetEnageGroup 없으면 → HP_HPD0110_000XX "Internal Server Error"(연동 대상 없음)
     //   · saveAttendApplicationLinkKey(linkKey↔appSq 바인딩) 없으면 → "근태신청서 종결 처리 오류"
-    // 브라우저는 이 콜들을 치지만 /system//personal/ 경로라 초기 캡처(/human//eap/만)가 놓쳤던 조각. (§10.19)
+    // 브라우저는 이 콜들을 치지만 /system//personal/ 경로라 초기 캡처(/human//eap/만)가 놓쳤던 조각.
     // menuCode(HPD0110)는 근태 공통 상수지만 formDTp는 양식별(위 form_d_tp). 콜백 API는 eap가 상신 시 서버간 호출하는 HP 엔드포인트.
     if !hp_application_json.trim().is_empty() {
         let glk = c
@@ -324,7 +324,7 @@ pub async fn submit_approval(
         .cloned()
         .unwrap_or_default();
     // 필수 시행자(m_Oper) — 브라우저 성공 payload와 동일하게 pOper로 그대로 실어 보낸다(정합성).
-    // ※ "pOper 누락이 2099의 원인"이라는 이전 가설은 반증됨(§8.14) — 원인은 interlock 등록 누락.
+    // ※ "pOper 누락이 2099의 원인"이라는 이전 가설은 반증됨 — 원인은 interlock 등록 누락.
     let m_oper = result_map
         .get("m_Oper")
         .and_then(|v| v.as_array())
@@ -387,7 +387,7 @@ pub async fn submit_approval(
         "doc_id": 0, "form_id": form_id.to_string(), "numbering_id": numbering_id,
         "rep_dt": rep_dt, "repdt_mod_yn": "0",
         "co_id": co_id, "dept_id": dept_id, "biz_id": co_id, "user_id": user_id,
-        // dept_nm: 브라우저는 기안부서명을 싣는다(§10.17 diff의 유일한 차이였음) — 조직도 값으로 채운다.
+        // dept_nm: 브라우저는 기안부서명을 싣는다(캡처 diff의 유일한 차이였음) — 조직도 값으로 채운다.
         "co_nm": "(주)이노그리드", "dept_nm": id.dept_nm, "user_nm": user_nm,
         "doc_title": doc_title, "doc_sts": "20", "inservice_time": "0",
         "doc_level": "001", "emergency_level": "1", "doc_security": "0", "use_yn": "1",
@@ -432,13 +432,13 @@ pub async fn submit_approval(
         "title": doc_title,
         "lineCount": line_nodes.len(),
         "referCount": refer_nodes.len(),
-        "note": "상신 응답을 성공으로 단정 말 것 — list_approvals(box_name:\"sent\")로 실제 접수 확인, 취소는 cancel_approval(docId). 근태 양식은 create→GetLinkKey→saveAttendApplicationLinkKey→SetEnageGroup(HP interlock 등록) 후 eap110A06으로 상신한다(§10.19). 등록 누락 시 2099(HP_HPD0110). result=null이면 상신 실패이므로 note가 아니라 docId 유무로 판정."
+        "note": "상신 응답을 성공으로 단정 말 것 — list_approvals(box_name:\"sent\")로 실제 접수 확인, 취소는 cancel_approval(docId). 근태 양식은 create→GetLinkKey→saveAttendApplicationLinkKey→SetEnageGroup(HP interlock 등록) 후 eap110A06으로 상신한다. 등록 누락 시 2099(HP_HPD0110). result=null이면 상신 실패이므로 note가 아니라 docId 유무로 판정."
     }))
 }
 
 /// 임시보관 전자결재 문서 삭제 — `GET /eap/sse/eap107A25?docIdList=<csv>`(SSE 스트림).
-/// 콤마구분 docId를 한 콜로 일괄삭제. 상신취소(purge=false)로 되돌아온 문서나 시험 잔여물 정리용
-/// (07 §8.11.2). ⚠️ 상신 실패(2099)와는 무관 — 잔여 draft 원인설은 반증됨(§10.6).
+/// 콤마구분 docId를 한 콜로 일괄삭제. 상신취소(purge=false)로 되돌아온 문서나 시험 잔여물 정리용.
+/// ⚠️ 상신 실패(2099)와는 무관 — 잔여 draft 원인설은 실측으로 반증됐다.
 /// 응답 이벤트별 resultCode + resultData.failCnt로 성공 판정.
 pub async fn delete_temp_approval(c: &GwClient, doc_ids: &str) -> Result<Value> {
     let ids = doc_ids.trim();
@@ -601,7 +601,7 @@ mod tests {
     }
 
     /// a03가 준 참가자 노드는 원본 그대로 두고 `org_div`(=div)만 덧붙인다 —
-    /// 브라우저 성공 payload와의 유일한 차이라서 재구성하면 어긋난다(§8.14).
+    /// 브라우저 성공 payload와의 유일한 차이라서 재구성하면 어긋난다.
     #[test]
     fn norm_participant는_org_div만_덧붙인다() {
         let src = json!({ "org_id": "3052", "div": "d", "act_id": 5000, "dept_line": "x" });

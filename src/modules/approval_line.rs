@@ -1,11 +1,11 @@
 //! 개인결재라인(config) CRUD — `/eap/eap102A0x`. **상신이 아니라 "상신 시 재사용할 결재선 config"**.
-//! 실측(생성→수정→삭제 왕복, 환경 원복 확인): `07-eapproval-api-capture.md` §7.
+//! 생성→수정→삭제 왕복을 실호출로 검증하고 환경을 원복해 확정했다.
 //! 인증은 헤더 서명만으로 완결(ensure_session 불필요).
 //!
 //! ⚠️ 결재자 객체(detailLine)는 `user_id/login_id/dept_id/co_id/duty_cd/grade_cd/act_id`가 필요한데,
 //! 조직도(gw102A02)는 user_id/co_id/grade_cd를 주지 않는다. 따라서 **신규 라인의 결재자 객체는
 //! read_line(eap102A05)으로 기존 라인에서 뽑아 재사용**하는 게 정석이다(임의 신규 인물은 조직-picker
-//! API 미조사라 아직 못 채움). — [[eapproval-server-default-line-untrusted]]
+//! API 미조사라 아직 못 채움). 서버가 자동 생성한 결재선은 규칙과 어긋나므로 그대로 신뢰하지 말 것.
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
