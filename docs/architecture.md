@@ -120,7 +120,21 @@ wehago-sign = Base64( HMAC_SHA256( authToken ‖ transactionId ‖ timestamp ‖
 
 > 모든 mutation(등록/수정/삭제)은 직후 **재조회(read-back)로 실제 상태를 확인**하고, 반영이 안 됐으면 실패로 처리한다.
 
-**구현 위치**: 도구 층이 아니라 **각 도메인 모듈의 mutation 함수 안**이다(`resource::reserve/update/cancel_and_verify`, `calendar::create/update/delete_event_and_verify`, `attendance::punch_and_verify`, `mail::save_mail_draft`). 검증 없는 raw 래퍼도 남아 있으나 새 호출부는 검증하는 쪽을 쓴다 — 규칙이 모듈에 있어야 MCP를 거치지 않는 호출자도 우회할 수 없다.
+**구현 위치**: 도구 층이 아니라 **각 도메인 모듈의 mutation 함수 안**이다(`resource::reserve/update/cancel_and_verify`, `calendar::create/update/delete_event_and_verify`, `attendance::punch_and_verify`, `approval_submit::cancel_and_verify`, `mail::save_mail_draft`). 검증 없는 raw 래퍼도 남아 있으나 새 호출부는 검증하는 쪽을 쓴다 — 규칙이 모듈에 있어야 MCP를 거치지 않는 호출자도 우회할 수 없다.
+
+전자결재 취소(`approval_submit::cancel_and_verify`)는 **재조회 경로를 고르는 것 자체가 판정의 일부**인 사례다. 상세 조회(`eap111A04`)는 취소된 문서에 실패 코드(2385/2156)를 주는데 그것이 `c.call`의 `bail!`을 타서 **"취소 성공"과 "장애"가 같은 모양**이 된다. 그래서 상태 조회(`eap110A98`)를 **성공판정 없이**(`call_raw`) 불러 `doc_sts`로 판정한다 — 상신취소는 `10`(임시보관) 복귀, 삭제는 `999`. 실행 API가 주는 성공 신호(`returnValue:1`)는 **이미 삭제된 문서에도 그대로 오므로**(실측) 보조 신호로만 쓴다.
+
+여기서 얻은 일반 교훈: **재조회 결과를 "반영됨 / 아님" 2분법으로 접으면 안 된다.** 이 조회는 세 가지를 말할 수 있고 셋의 결말이 전부 다르다.
+
+| 재조회가 말하는 것 | 판별 | 결말 |
+|---|---|---|
+| 문서가 있다(상태값 포함) | 응답의 문서 정보 존재 | 상태값으로 반영 여부 판정 |
+| 그 대상이 없다 | 문서 정보가 `null` | **호출자 잘못**(`InvalidInput` → `invalid_params`). 실행 콜을 쏘기 전이면 아예 쏘지 않는다 |
+| 읽지 못했다 | 전송 실패·해석 불가 | **모르는 것**이다. 실행 전이면 멈추고(`Err`), 실행 후면 `ok:false` + "실행은 됐으나 확인 못 함" |
+
+뒤의 둘을 "반영 안 됨"이나 "삭제 확인됨" 어느 쪽으로도 접지 않는 것이 핵심이다. 특히 **삭제처럼 양성 신호(`doc_sts 999`)가 있는 경우 "못 읽음"을 삭제의 증거로 쓰면 안 된다** — 실제로 그렇게 접었다가 사후 조회가 실패했을 때 `ok:true`가 나가는 결함이 있었다. 요청한 종착 상태에 **이미** 도달해 있으면(삭제 요청인데 이미 삭제됨) 실행 없이 `ok:true, already:true, steps:[]`로 끝낸다 — 아무것도 하지 않았음이 응답에 드러나므로 조용한 성공이 아니다(`attendance::punch_and_verify`의 `already`와 같은 규약).
+
+상신(`submit_approval`)은 재조회 대신 응답의 docId 발급 여부로 판정한다(발급이 곧 접수).
 
 이름 규칙은 `*_and_verify`가 기본이지만 `mail::save_mail_draft`는 예외다(대응하는 raw 래퍼가 없어 접미사로 구분할 이유가 없다). 이쪽은 재조회 결과를 **실패로 바꾸지 않고 `verified_by_readback`으로 보고만 한다** — 저장 자체는 성공했는데 조회가 막힌 경우와 정말 저장이 안 된 경우를 서버 응답만으로 가를 수 없기 때문이다. 반영 실패를 곧바로 에러로 올리는 위 셋과 다른 점이라 새 mutation을 만들 때 어느 쪽을 따를지 의식적으로 정할 것.
 
@@ -130,4 +144,7 @@ wehago-sign = Base64( HMAC_SHA256( authToken ‖ transactionId ‖ timestamp ‖
 
 - 자원 예약의 쓰기는 서버가 **소유자(생성자) 본인일 때만** 실제 반영한다(IDOR 아님 — 정보 조회는 열려 있으나 쓰기는 막힘).
 - 서버에 맡기지 않고, 쓰기 전에 대상의 소유자 == 본인 empSeq(authToken에서 추출)를 확인하고 아니면 **명시적 에러**를 반환한다. (조회는 제한 없음.)
-- **소유자 필드는 도메인마다 다르다** — 자원 예약은 `empSeq`("소유자"), 일정은 `createSeq`("작성자"). 그래서 가드 함수는 도메인별로 각자 둔다(`resource::check_owner` / `calendar::check_author`). 다만 **에러는 `error::NotOwner` 타입 하나를 공유**하고, `mcp::map_domain_err`가 `downcast_ref`로 판별해 `invalid_params`로 매핑한다 — 문자열 매칭이 아니라 타입으로 분류하는 것이 핵심이다.
+- **소유자 필드는 도메인마다 다르다** — 자원 예약은 `empSeq`("소유자"), 일정은 `createSeq`("작성자"), 전자결재 문서는 상태 조회(`eap110A98`)가 주는 `user_id`("기안자"). 그래서 가드 함수는 도메인별로 각자 둔다(`resource::check_owner` / `calendar::check_author` / `approval_submit::pre_verdict`). 다만 **에러는 `error::NotOwner` 타입 하나를 공유**하고, `mcp::map_domain_err`가 `downcast_ref`로 판별해 `invalid_params`로 매핑한다 — 문자열 매칭이 아니라 타입으로 분류하는 것이 핵심이다.
+- **가드는 fail-closed다** — 소유자 필드를 읽지 못하면(응답에 없음 → `""`) 그것도 **불일치로 보고 거부**한다. "모른다"를 "내 것"으로 치는 순간 가드가 아니다. 세 곳이 같은 규약이다: `error::NotOwner`의 `owner` 필드 주석, `resource::check_owner`(`unwrap_or("")` 후 `owner != me`), `approval_submit::pre_verdict`. 비용/편익이 비대칭이라 그렇다 — 막혀서 못 고친 것은 웹에서 하면 되지만, 남의 것에 쓰기를 쏜 것은 되돌릴 수 없다.
+- 전자결재 취소의 가드는 **추가 호출 비용이 0**이다 — 어차피 상태를 알려고 부르는 사전조회가 기안자까지 함께 준다. 남의 문서에 취소 콜을 보내면 서버가 어떻게 반응하는지는 **미관측**이라(시험 삼아 쏘지 않았다) 실행 전에 막는다.
+- 같은 이유로 **관측되지 않은 상태에는 파괴 콜을 쏘지 않는다.** 전자결재 취소가 실증된 상태는 `10`(임시보관)·`20`(상신)·`30`(결재 진행중)뿐이라, 종결(`90`)·반려(`100`) 등은 실행 전에 거부하고 **거부 사유에 "이 상태의 취소 거동은 관측되지 않았다"를 밝힌다**. 실행 API(`eap110A19`)가 지울 대상이 없어도 `returnValue:1`을 주므로 **쏜 뒤에는 응답으로 아무것도 알 수 없다** — 판단은 쏘기 전에 끝나야 한다.
