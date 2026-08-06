@@ -160,7 +160,7 @@
 | API | 용도 | 래퍼 |
 |---|---|---|
 | `mail000A01` | 메일함(폴더) 목록 | `list_mailboxes` |
-| `mail003A01` | 메일 목록 조회 | `list_mails` / `list_mail_inbox` |
+| `mail003A01` | 메일 목록 조회 | `list_mails` / `list_mail_inbox` / `list_mail_drafts` |
 | `mail014A01` → `mail014A04` | 메일 발송(2단계, 첨부 지원) | `send_mail` |
 | `mail014A01` → `mail014A14` | 메일 임시저장(2단계, 첨부 지원 — **발송 아님**) | `save_mail_draft` |
 | `mail014A06` | 발송·임시저장 첨부 업로드(multipart `file[]`) | `send_mail`/`save_mail_draft`의 `attachments` |
@@ -176,6 +176,25 @@
 - body에 `mainApiCode:"mail003A01"` 필요(누락 시 실패).
 - `pageSize`를 `TotalRecordCount` 이상으로 주면 **1회 호출로 전량 조회**(상한 없음).
 - 정렬 `sort:"rfc822date"`, `sortType:"desc"`.
+- ⚠️ **`boxName`은 서버가 무시한다. 조회 대상을 정하는 것은 `mboxSeq` 하나뿐이다**(실측:
+  `mboxSeq=26989`(SENT)에 `boxName:"INBOX"`를 실어 호출하니 보낸메일 3건이 나왔다).
+  그래서 임시보관함 조회도 **추가 API 없이 seq만 바꿔** 이 API를 그대로 쓴다.
+
+#### 임시보관함 조회 → `list_mail_drafts`
+
+`mboxSeq`를 DRAFTS로 바꾼 `mail003A01` 호출이다. 응답 형태는 받은메일함과 같다(배열 키 `Records`,
+항목의 `muid`가 `read_mail`/`delete_mail`의 키).
+
+⚠️ **메일함 seq를 상수로 박지 않는다** — 위 실측값은 이 계정의 값이고 계정마다 다르다.
+`mail000A01`(`list_mailboxes`) 응답에서 `fullname`/`name`이 `"DRAFTS"`인 노드를 찾아 그
+`mboxSeq`를 쓴다. 응답이 중첩으로 올 수 있어 트리를 훑고, `mboxSeq`가 숫자/문자열 어느 쪽으로
+와도 흡수한다.
+
+⚠️ **미확인 — `muid`가 재저장·발송 후에도 유지되는지는 확인하지 않았다.** 신규 저장 직후의
+read-back(같은 muid로 목록에서 찾기)까지만 실증됐다. 이 저장소에는 **휴지통 이동 시 muid가
+재부여된다**는 기록이 있어(`delete_mail` 설명), 임시저장 재저장이나 초안 발송에서도 같은 일이
+일어날 가능성이 있다. 초안을 발송 대상으로 지목하는 경로를 만들 때는 **저장 시점의 muid를
+그대로 발송 키로 신뢰하지 말고**, 발송 직전에 `list_mail_drafts`로 다시 확인할 것.
 
 ### 메일 발송 (mail014A01 → A04) — 실측·실증
 
@@ -219,6 +238,10 @@
 - 제목이 비면 `"(제목없음)"`으로 저장한다(프론트 동작 재현).
 - 응답: `resultData.autoMUID` = 저장된 임시보관 메일의 muid → 도구는 `draft_muid`로 반환.
   `resultCode 999` = "로그인 사용자가 변경되어 임시저장을 할 수 없습니다" → 전송 실패와 구분해 안내한다.
+- **read-back 검증**: 저장 직후 임시보관함(위 `list_mail_drafts` 경로)을 재조회해 그 `muid`가
+  목록에 실제로 있는지 보고 `verified_by_readback`으로 반환한다. **통수(+1) 비교가 아니라 muid
+  대조**인 이유는 조회 사이에 메일이 들어오거나 다른 세션이 초안을 지우면 통수가 오탐이 나기 때문이다.
+  조회가 실패하면 "확인 못 함"이지 저장 실패가 아니므로 에러 대신 `false`로 표시한다.
 - 첨부는 발송과 같은 경로(`mail014A06` 업로드 → `uidAuthList`/`bigFileCnt`).
 - **자동 임시저장(`mail014A13`, `draftType=false`/`autoDraftType=true`)은 에디터 전용**이라 MCP에는 구현하지 않았다.
 

@@ -869,9 +869,12 @@ def body(mcp: Mcp, fx: dict, marker: str):
         #    실제로 나간 것이고 되돌릴 수 없다 → 통수가 **정확히 같을 때만** 통과시킨다.
         #    (읽지 못한 경우도 통과시키지 않는다 — 증명 못 한 무발송은 무발송이 아니다.)
         not_sent = now_sent is not None and base_sent is not None and now_sent == base_sent
-        return (bool(muid) and d.get("sent") is False and grew and not_sent,
+        # 도구가 스스로 임시보관함을 재조회해 그 muid를 찾았는지. 저장 응답만으로는 알 수 없다.
+        verified = d.get("verified_by_readback") is True
+        return (bool(muid) and d.get("sent") is False and grew and not_sent and verified,
                 f"draft_muid={muid or '없음'} · 임시보관함 {base_drafts}→{now_drafts} · "
-                f"보낸메일함 {base_sent}→{now_sent}{'(불변)' if not_sent else ' ⚠️발송 의심'}")
+                f"보낸메일함 {base_sent}→{now_sent}{'(불변)' if not_sent else ' ⚠️발송 의심'} · "
+                f"read-back {'확인' if verified else '❌미확인'}")
 
     sd = run(mcp, "save_mail_draft", chk_draft,
              subject=dsubj, html="<p>inno-creed 라이브 점검(임시저장). 자동 삭제됩니다.</p>")
@@ -879,11 +882,32 @@ def body(mcp: Mcp, fx: dict, marker: str):
         dl = track("mail_draft",
                    {"muid": sd["draft_muid"], "subject": dsubj, "beforeExists": base_drafts},
                    f"메일 임시보관함에서 제목 '{dsubj}' 삭제")
+
+        # 임시보관함 조회 — 방금 저장한 draft가 목록에 있고 그 muid를 돌려주는지.
+        # 삭제 전에 봐야 한다(지운 뒤엔 없는 게 정상이라 아무것도 증명하지 못한다).
+        def chk_drafts_list(d, _muid=str(sd["draft_muid"]), _subj=dsubj):
+            rows = d.get("Records")
+            if not isinstance(rows, list):
+                return False, f"Records 배열이 없다(키: {sorted(d)[:6]})"
+            hit = next((m for m in rows if str(m.get("muid")) == _muid), None)
+            if hit is None:
+                return False, f"방금 저장한 muid={_muid} 가 임시보관함 {len(rows)}건에 없음"
+            # muid만 맞고 내용이 비면 후속 도구가 못 쓴다 — 제목까지 실려 오는지 본다.
+            got = str(hit.get("subject", ""))
+            if _subj not in got:
+                return False, f"muid={_muid} 는 있는데 제목이 다르다: {got!r}"
+            return True, f"{len(rows)}건 · muid={_muid} 발견(제목 일치)"
+
+        run(mcp, "list_mail_drafts", chk_drafts_list)
+
         ok, note = undo_mail_draft(mcp, dl["ref"], marker)
         if ok:
             untrack(dl)
         else:
             R.append(("FAIL", "save_mail_draft(정리)", note))
+    else:
+        # 저장이 실패하면 조회할 대상이 없다. 건너뛴 사실을 남겨야 도구_커버리지가 정직해진다.
+        skip("list_mail_drafts", "save_mail_draft 실패 — 조회할 draft가 없음")
 
     submit_scenario(mcp, fx, marker)
 

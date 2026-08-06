@@ -37,6 +37,15 @@ impl Amaranth {
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
+    #[tool(description = "임시보관함(DRAFTS) 최근 20통을 조회한다 — save_mail_draft로 저장한 초안을 확인하는 경로다. ⚠️ 응답은 서버 원본 봉투 그대로다 — 메일 배열은 `Records`(list_mail_inbox와 동일), 각 항목의 `muid`가 read_mail/delete_mail의 키다. 메일함 번호는 계정마다 달라 이름(DRAFTS)으로 해석한다. ⚠️ 전자결재 임시보관함과는 무관하다(그쪽은 list_approvals(box_name=\"draft\")).")]
+    async fn list_mail_drafts(&self) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let data = modules::mail::list_drafts(&self.client, 1, 20)
+            .await
+            .map_err(map_domain_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
+
     #[tool(
         description = "메일을 발송한다(2단계: 작성폼 초기화→발송). 받는사람 미지정 시 본인에게. attachments에 로컬 파일 경로를 주면 첨부 발송."
     )]
@@ -80,7 +89,10 @@ impl Amaranth {
             "draft_muid": data.get("draft_muid"),
             "mail_key": data.get("mail_key"),
             "sent": false,
-            "note": "임시보관함에 저장만 됨(발송 아님). 확인은 아마란스 메일 > 임시보관함"
+            // 임시보관함을 재조회해 그 muid를 실제로 찾았는지. false여도 저장 자체가 실패한 것은
+            // 아니지만(조회가 막혔을 수 있다), 그 경우 사람이 임시보관함을 눈으로 확인해야 한다.
+            "verified_by_readback": data.get("verified_by_readback"),
+            "note": "임시보관함에 저장만 됨(발송 아님). 목록 확인은 list_mail_drafts"
         });
         Ok(CallToolResult::success(vec![ContentBlock::text(msg.to_string())]))
     }

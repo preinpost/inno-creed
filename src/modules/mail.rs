@@ -15,6 +15,10 @@ pub async fn list_mailboxes(c: &GwClient) -> Result<Value> {
 }
 
 /// 메일 목록 조회 — `mail003A01`. `page_size`를 크게 주면 전량 조회(상한 없음).
+///
+/// ⚠️ **`boxName`은 서버가 무시한다**(실측: `mboxSeq`=SENT에 `boxName="INBOX"`를 실어도 보낸메일이
+/// 나온다). 판단 기준은 `mboxSeq` 하나뿐이라 임시보관함 조회도 seq만 바꿔 이 함수를 그대로 쓴다.
+/// 값을 고치지 않고 두는 이유는 받은메일함 조회가 이 값으로 이미 실증돼 있기 때문이다.
 pub async fn list_mails(c: &GwClient, mbox_seq: i64, page: i64, page_size: i64) -> Result<Value> {
     c.call(
         "/mail/mail003A01",
@@ -32,6 +36,55 @@ pub async fn list_mails(c: &GwClient, mbox_seq: i64, page: i64, page_size: i64) 
         }),
     )
     .await
+}
+
+/// 임시보관함 메일함 이름. `INBOX`/`SENT`처럼 seq를 상수로 박지 않는다 —
+/// **메일함 seq는 계정마다 다르므로** 이름으로 해석해야 다른 계정에서도 맞는 함을 본다.
+pub const DRAFTS: &str = "DRAFTS";
+
+/// `list_mailboxes` 응답에서 이름이 `want`인 메일함의 `mboxSeq`를 찾는다.
+///
+/// 응답이 중첩 구조로 올 수 있어(계정·서버 버전차) 키 존재로 노드를 판별하며 트리를 훑는다.
+/// `fullname`("DRAFTS")과 `name` 둘 다 본다 — 어느 쪽에 들어오는지가 함마다 다르다.
+/// `mboxSeq`가 숫자/문자열 양쪽으로 오는 것은 `json_str`로 흡수한다(이 API 계열의 고질).
+fn find_mbox_seq(node: &Value, want: &str) -> Option<i64> {
+    match node {
+        Value::Object(map) => {
+            if map.contains_key("mboxSeq")
+                && [map.get("fullname"), map.get("name")]
+                    .iter()
+                    .any(|v| json_str(*v).eq_ignore_ascii_case(want))
+                && let Ok(seq) = json_str(map.get("mboxSeq")).parse::<i64>()
+            {
+                return Some(seq);
+            }
+            map.values().find_map(|v| find_mbox_seq(v, want))
+        }
+        Value::Array(items) => items.iter().find_map(|v| find_mbox_seq(v, want)),
+        _ => None,
+    }
+}
+
+/// 메일함 이름 → `mboxSeq`. 못 찾으면 어느 이름을 찾았는지 밝힌 에러.
+pub async fn mbox_seq(c: &GwClient, name: &str) -> Result<i64> {
+    let boxes = list_mailboxes(c).await?;
+    find_mbox_seq(&boxes, name).ok_or_else(|| {
+        anyhow!("메일함 '{name}' 을 찾지 못했다 — list_mailboxes 응답에 그 이름의 mboxSeq가 없다")
+    })
+}
+
+/// 임시보관함(DRAFTS) 목록 — 이름으로 seq를 해석한 뒤 `list_mails`.
+/// 응답은 받은메일함과 동일한 서버 원본 봉투(메일 배열 키는 `Records`).
+pub async fn list_drafts(c: &GwClient, page: i64, page_size: i64) -> Result<Value> {
+    let seq = mbox_seq(c, DRAFTS).await?;
+    list_mails(c, seq, page, page_size).await
+}
+
+/// 목록 응답(`Records`)에 그 `muid`가 있는지. read-back 검증용.
+fn has_muid(list: &Value, muid: &str) -> bool {
+    list.get("Records")
+        .and_then(|r| r.as_array())
+        .is_some_and(|rows| rows.iter().any(|m| json_str(m.get("muid")) == muid))
 }
 
 /// 작성폼 초기화 — `mail014A01`. 발송(A04)·임시저장(A14)에 필요한 `sessionKey`/`fileDir`을
@@ -216,11 +269,16 @@ const DRAFT_FIELDS: &[(&str, &str)] = &[
     ("autoDraftType", "false"), // 에디터 자동저장(A13)이 아님
 ];
 
+/// 저장 직후 read-back이 훑는 임시보관함 통수. 목록은 최신순(`rfc822date desc`)이라 방금 저장한
+/// 건이 맨 앞에 오므로 넉넉하다 — 크게 잡을 이유가 없다(조회 비용만 는다).
+const DRAFT_READBACK_PAGE: i64 = 20;
+
 /// 메일 임시저장 — `mail014A01`(작성폼 초기화) → `mail014A14`(multipart) 2단계.
 /// **발송하지 않는다** — 임시보관함(DRAFTS)에 저장만 한다.
 /// 폼은 발송(A04)과 동일하고 `DRAFT_FIELDS` 7개만 더 붙는다. 첨부 경로도 발송과 같다.
-/// 반환: `draft_muid`(= 응답 `resultData.autoMUID`, 후속 조회·삭제 키)와
-/// `mail_key`(= A01의 `mailkey`, 재저장 때 `mailKey`로 되돌려줄 값).
+/// 반환: `draft_muid`(= 응답 `resultData.autoMUID`, 후속 조회·삭제 키),
+/// `mail_key`(= A01의 `mailkey`, 재저장 때 `mailKey`로 되돌려줄 값),
+/// `verified_by_readback`(임시보관함 재조회로 그 muid를 실제로 찾았는지 — 프로젝트 규약 §7).
 pub async fn save_mail_draft(
     c: &GwClient,
     to: &str,
@@ -253,9 +311,23 @@ pub async fn save_mail_draft(
     if draft_muid.is_empty() {
         bail!("메일 임시저장 실패(autoMUID 없음): {v}");
     }
+    // read-back — 성공 응답을 반영으로 단정하지 않는다(프로젝트 규약). 임시보관함을 재조회해
+    // **그 muid가 목록에 실제로 있는지** 본다.
+    // ⚠️ 통수(+1) 비교가 아니라 muid 대조인 이유: 저장 전후 사이에 메일이 들어오거나 다른 세션이
+    // 초안을 지우면 통수는 조용히 오탐이 난다. muid는 우리가 만든 그 한 건만 가리킨다.
+    // 조회 실패(권한·네트워크)는 "확인 못 함"이지 "저장 실패"가 아니므로 에러로 올리지 않는다.
+    // 그 경우 `verified_by_readback: false`로 보고한다 — **저장이 안 됐다는 뜻이 아니라
+    // 확인하지 못했다는 뜻**이고, 목록에 없어서 false인 경우와 응답에서 구분되지 않는다.
+    // 어느 쪽이든 사람이 임시보관함을 눈으로 확인해야 한다.
+    let verified = list_drafts(c, 1, DRAFT_READBACK_PAGE)
+        .await
+        .map(|list| has_muid(&list, &draft_muid))
+        .unwrap_or(false);
+
     Ok(json!({
         "draft_muid": draft_muid,
-        "mail_key": json_str(init.get("mailkey"))
+        "mail_key": json_str(init.get("mailkey")),
+        "verified_by_readback": verified
     }))
 }
 
@@ -535,6 +607,45 @@ mod tests {
         assert_eq!(f["muid"], "0"); // 0 = 신규(답장/전달이 아님)
         assert_eq!(f["immediately"], "false");
         assert_eq!(f["expirationDate"], "Invalid date");
+    }
+
+    /// 메일함 seq는 계정마다 달라 이름으로 찾는다 — 그 탐색이 중첩·타입혼용을 견디는지.
+    #[test]
+    fn 메일함_seq를_이름으로_찾는다() {
+        let boxes = json!({
+            "mailboxList": [
+                { "fullname": "INBOX", "name": "INBOX", "mboxSeq": 26986, "exists": "3" },
+                { "fullname": "SENT", "name": "SENT", "mboxSeq": "26989", "exists": "0" },
+                { "children": [
+                    { "fullname": "DRAFTS", "name": "DRAFTS", "mboxSeq": 26992, "exists": "0" }
+                ]}
+            ]
+        });
+        assert_eq!(find_mbox_seq(&boxes, "DRAFTS"), Some(26992)); // 중첩된 곳도 찾는다
+        assert_eq!(find_mbox_seq(&boxes, "INBOX"), Some(26986));
+        assert_eq!(find_mbox_seq(&boxes, "SENT"), Some(26989)); // mboxSeq가 문자열이어도 흡수
+        assert_eq!(find_mbox_seq(&boxes, "drafts"), Some(26992)); // 대소문자 무시
+        assert_eq!(find_mbox_seq(&boxes, "ARCHIVE"), None); // 없는 함은 None(엉뚱한 함 금지)
+    }
+
+    /// 이름이 `name`에만 있고 `fullname`이 비어도 찾아야 한다(함마다 어느 키에 오는지 다르다).
+    #[test]
+    fn 메일함_이름은_fullname이_없으면_name으로_본다() {
+        let boxes = json!([{ "name": "DRAFTS", "mboxSeq": 1 }]);
+        assert_eq!(find_mbox_seq(&boxes, "DRAFTS"), Some(1));
+        // mboxSeq가 숫자로 파싱되지 않으면 그 노드는 후보가 아니다(빈 문자열 등).
+        assert_eq!(find_mbox_seq(&json!([{ "name": "DRAFTS", "mboxSeq": "" }]), "DRAFTS"), None);
+    }
+
+    /// 임시저장 read-back의 판정부 — 통수가 아니라 muid로 본다.
+    #[test]
+    fn read_back은_목록에서_그_muid를_찾는다() {
+        let list = json!({ "Records": [{ "muid": 13541170 }, { "muid": "13541171" }] });
+        assert!(has_muid(&list, "13541170")); // 숫자로 와도 문자열로 흡수해 비교
+        assert!(has_muid(&list, "13541171"));
+        assert!(!has_muid(&list, "99999999")); // 없는 muid는 미검증
+        assert!(!has_muid(&json!({}), "1")); // Records가 아예 없으면 미검증
+        assert!(!has_muid(&json!({ "Records": [] }), "1"));
     }
 
     #[test]

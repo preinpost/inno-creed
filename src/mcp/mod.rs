@@ -146,7 +146,7 @@ mod tests {
         "download_notice_attachment", "find_free_rooms", "find_person", "get_approval_line_schema",
         "get_approval_submission_guide", "get_attendance_today", "list_approval_line_schemas",
         "list_approval_lines", "list_approval_submission_guides", "list_approvals",
-        "list_calendars", "list_events", "list_mail_inbox", "list_mailboxes",
+        "list_calendars", "list_events", "list_mail_drafts", "list_mail_inbox", "list_mailboxes",
         "list_notice_attachments", "list_notices", "list_reservations", "list_resources",
         "my_reservations", "org_chart", "pending_approvals", "read_approval", "read_approval_line",
         "read_mail", "read_notice", "reserve_resource", "save_approval_line", "save_mail_draft",
