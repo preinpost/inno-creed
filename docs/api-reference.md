@@ -78,11 +78,11 @@
 | 필드 | 예 | 정체 | 어느 API에 있나 |
 |---|---|---|---|
 | `reqText` | `회의` | **실제 예약명**(사용자 입력값) | 목록(`rs121A05`)·상세(`rs121A10`) 둘 다 |
-| `resTitleDisplay` | `[이재학] 회의실 B` | 서버 조립 **표시용** 문자열 | **목록에만** — 상세에는 없다 |
+| `resTitleDisplay` | `[홍길동] 회의실 B` | 서버 조립 **표시용** 문자열 | **목록에만** — 상세에는 없다 |
 
-- 그래서 "예약명을 `회의`로 넣었는데 화면엔 `[이재학] 회의실 B`로 나온다"는 오해가 생긴다. 예약은 정상이다.
+- 그래서 "예약명을 `회의`로 넣었는데 화면엔 `[홍길동] 회의실 B`로 나온다"는 오해가 생긴다. 예약은 정상이다.
 - 웹 예약 폼은 예약명 칸에 `[자원명] 사용자명` 류 기본값을 채워주며, 사용자가 그대로 두면 `reqText` 자체가
-  그 형태가 된다(예: `[회의실 B] 강승억`). MCP는 이름을 지어주지 않으므로 형식이 달라 보일 수 있다.
+  그 형태가 된다(예: `[회의실 B] 홍길동`). MCP는 이름을 지어주지 않으므로 형식이 달라 보일 수 있다.
 - MCP는 두 값을 `title`(목록)/`reqText`(등록·수정)와 `displayTitle`로 **함께** 반환한다. 상세 API에 없는
   등록·수정 경로에서는 같은 규칙으로 조립한다(`modules::resource::display_title`).
 
@@ -486,7 +486,7 @@ GET /eap/sse/eap107A25?docIdList=<csv>     # ⚠️ SSE 스트림(다른 API와 
 ### 기간 근태 현황 (getWorkTimeStatusList)
 
 ```json
-{"coCd":"1000","startDate":"20260701","endDate":"20260804","empCdList":["11097"]}
+{"coCd":"<coCd>","startDate":"20260701","endDate":"20260804","empCdList":["<본인 empCd>"]}
 ```
 
 - 응답 = 배열, **1행 = 1일**(74필드). 핵심: `atDt` / `attresultCd`·`attresultNm` / `comeTm`·`leaveTm` / `basicworkTm`·`overworkTm`·`standardworkTm`(분) / `holiFg`·`holiNm` / `atNm`(연차 등 사유).
