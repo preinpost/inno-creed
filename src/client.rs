@@ -83,6 +83,31 @@ fn pct_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// 401 재시도 정책의 뼈대. `send`를 호출해 응답을 받고, 그것이 인증 실패(`unauthorized`)면
+/// `reacquire`로 크레덴셜을 갈아끼운 뒤 **정확히 한 번만** 다시 보낸다.
+///
+/// 재시도 상한을 재귀·루프가 아니라 **이 함수의 구조**로 못박는다 — `send` 호출 지점이 2개뿐이고
+/// 두 번째 결과는 상태와 무관하게 그대로 반환한다. 전송·재취득을 클로저로 분리한 덕에
+/// 네트워크 없이 호출 횟수를 검증할 수 있다(아래 테스트).
+///
+/// `reacquire`가 false(재취득 실패 — 브라우저 미로그인 등)면 재시도해봐야 같은 결과라
+/// 첫 응답을 그대로 돌려준다. 호출부가 평소의 실패 처리(로그인 안내)를 하도록.
+async fn retry_once_on_401<T, F, Fut>(
+    unauthorized: impl Fn(&T) -> bool,
+    reacquire: impl FnOnce() -> bool,
+    mut send: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let first = send().await?;
+    if !unauthorized(&first) || !reacquire() {
+        return Ok(first);
+    }
+    send().await
+}
+
 /// 로그인 세션에서 동적으로 취득하는 사용자/조직 정보. groupSeq/empSeq는 authToken에서,
 /// 나머지는 `ensure_session()`이 gw050A02(sessionInfo.ucUserInfo)로 채운다(하드코딩 없음 — 배포용).
 #[derive(Default, Clone)]
@@ -221,6 +246,77 @@ impl GwClient {
         Ok(fresh)
     }
 
+    /// 캐시된 크레덴셜을 버리고 브라우저에서 다시 읽는다. 성공하면 true.
+    /// 401을 받은 직후 `retry_once_on_401`이 호출당 최대 한 번 부른다.
+    ///
+    /// 실패해도 캐시는 비운 채로 둔다 — `creds()`가 다음 도구 호출에서 다시 시도하므로,
+    /// 사용자가 그 사이 로그인하면 재시작 없이 복구된다.
+    /// 주의: `INNO_CREED_AUTH_TOKEN`/`INNO_CREED_SIGN_KEY`를 쓰는 환경은 재취득해도 **같은 값**이
+    /// 돌아온다 — 그래서 재시도 상한(1회)이 정책의 핵심이다.
+    fn reacquire_creds(&self) -> bool {
+        if let Ok(mut guard) = self.creds.write() {
+            *guard = None;
+        }
+        let Ok(fresh) = creds::from_browser() else {
+            return false;
+        };
+        if let Ok(mut guard) = self.creds.write() {
+            *guard = Some(fresh);
+        }
+        true
+    }
+
+    /// **모든 전송 함수의 공통 출구** — `signed()`로 요청을 만들어 보내고, 401이면 크레덴셜을
+    /// 재취득해 같은 요청을 1회 재시도한다(`retry_once_on_401`).
+    ///
+    /// `decorate`는 Content-Type·바디처럼 호출부마다 다른 마무리를 붙인다. 재시도 때 요청을
+    /// **다시 만들어야** 하므로(빌더는 `send()`가 소비한다) 클로저로 받는다.
+    async fn send_signed(
+        &self,
+        method: reqwest::Method,
+        sign_path: &str,
+        url_path: &str,
+        decorate: impl Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
+        retry_once_on_401(
+            |r: &reqwest::Response| r.status() == reqwest::StatusCode::UNAUTHORIZED,
+            || self.reacquire_creds(),
+            || async {
+                let req = decorate(self.signed(method.clone(), sign_path, url_path)?);
+                Ok(req.send().await?)
+            },
+        )
+        .await
+    }
+
+    /// 비 2xx 응답을 사용자용 에러로 만든다. **상태코드를 먼저 보고 그 다음 본문을 읽는다** —
+    /// 본문이 JSON이 아니어도 상태·원문을 잃지 않는다.
+    ///
+    /// 401은 크레덴셜 문제가 확정이므로(실측: 토큰 훼손·빈 토큰·서명키 오류가 모두 401) 서버
+    /// 원문 대신 재로그인 안내를 앞세운다. 서버 메시지("인증 값을 레디스에서 찾을 수 없습니다" 등)는
+    /// 사용자가 해석할 수 없어 진단용으로만 덧붙인다. `resultCode`(140=토큰 없음, 112=서명 불일치)도
+    /// 처방이 같아 분기하지 않고 문구에만 싣는다.
+    async fn http_error(path: &str, status: reqwest::StatusCode, resp: reqwest::Response) -> anyhow::Error {
+        let body = resp.text().await.unwrap_or_default();
+        let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+        let code = v.get("resultCode").and_then(|c| c.as_i64()).unwrap_or(-1);
+        let msg = v
+            .get("resultMsg")
+            .and_then(|m| m.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| body.chars().take(300).collect());
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            anyhow!(
+                "로그인이 필요합니다 — gw.innogrid.com 세션이 만료되었거나 유효하지 않습니다({path}).\n\
+                 Chrome 또는 Firefox로 https://gw.innogrid.com 에 로그인하면 서버 재시작 없이 다음 호출에서 복구됩니다.\n\
+                 (재로그인 후에도 같은 안내가 나오면 INNO_CREED_AUTH_TOKEN/INNO_CREED_SIGN_KEY 환경변수가 옛 값으로 고정돼 있는지 확인하세요.)\n\
+                 서버 응답: http=401 resultCode={code} msg={msg}"
+            )
+        } else {
+            anyhow!("api {path} 실패: http={status} resultCode={code} msg={msg}")
+        }
+    }
+
     /// 세션 정보를 lazy 보장. 캐시가 유효(10분 TTL)하면 그대로 반환, 없거나 만료면 gw050A02로
     /// 재조회 후 캐시. 모든 tool 핸들러가 진입 시 1회 호출한다(값이 필요할 때 알아서 채움).
     pub async fn ensure_session(&self) -> Result<()> {
@@ -300,16 +396,18 @@ impl GwClient {
     /// JSON body POST 후 성공 판정(resultCode ∈ {0,200}) → resultData 반환.
     pub async fn call(&self, path: &str, body: &Value) -> Result<Value> {
         let resp = self
-            .signed(reqwest::Method::POST, path, path)?
-            .header("Content-Type", "application/json")
-            .json(body)
-            .send()
+            .send_signed(reqwest::Method::POST, path, path, |b| {
+                b.header("Content-Type", "application/json").json(body)
+            })
             .await?;
 
         let status = resp.status();
+        if !status.is_success() {
+            return Err(Self::http_error(path, status, resp).await);
+        }
         let v: Value = resp.json().await?;
         let code = v.get("resultCode").and_then(|c| c.as_i64()).unwrap_or(-1);
-        if !status.is_success() || !(code == 0 || code == 200) {
+        if !(code == 0 || code == 200) {
             let msg = v
                 .get("resultMsg")
                 .and_then(|m| m.as_str())
@@ -322,25 +420,28 @@ impl GwClient {
     /// call()과 동일 서명·전송이지만 **성공판정 없이 전체 응답 봉투(resultCode/resultMsg/resultData 포함)를
     /// 그대로 반환**. 2099 같은 실패 응답의 resultData까지 보려는 디버그/probe 용도.
     pub async fn call_raw(&self, path: &str, body: &Value) -> Result<Value> {
-        let mut req = self
-            .signed(reqwest::Method::POST, path, path)?
-            .header("Content-Type", "application/json");
-        // 진단용: 브라우저 헤더 재현 실험(Cookie/Referer/User-Agent).
-        if let Ok(cookie) = std::env::var("PROBE_COOKIE")
-            && !cookie.is_empty()
-        {
-            req = req.header("Cookie", cookie);
-        }
-        if std::env::var("PROBE_BROWSER_HDR").is_ok() {
-            req = req
-                .header("Referer", "https://gw.innogrid.com/")
-                .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36")
-                .header("sec-ch-ua", "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"")
-                .header("sec-ch-ua-mobile", "?0")
-                .header("sec-ch-ua-platform", "\"macOS\"");
-        }
-        let resp = req.json(body).send().await?;
+        let resp = self
+            .send_signed(reqwest::Method::POST, path, path, |b| {
+                let mut req = b.header("Content-Type", "application/json");
+                // 진단용: 브라우저 헤더 재현 실험(Cookie/Referer/User-Agent).
+                if let Ok(cookie) = std::env::var("PROBE_COOKIE")
+                    && !cookie.is_empty()
+                {
+                    req = req.header("Cookie", cookie);
+                }
+                if std::env::var("PROBE_BROWSER_HDR").is_ok() {
+                    req = req
+                        .header("Referer", "https://gw.innogrid.com/")
+                        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36")
+                        .header("sec-ch-ua", "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"")
+                        .header("sec-ch-ua-mobile", "?0")
+                        .header("sec-ch-ua-platform", "\"macOS\"");
+                }
+                req.json(body)
+            })
+            .await?;
         let status = resp.status();
+        // 성공 판정을 하지 않는 진단용이라 상태로 걸러내지 않는다 — 실패 봉투를 보는 것이 목적.
         let v: Value = resp.json().await?;
         Ok(json!({ "http": status.as_u16(), "response": v }))
     }
@@ -348,19 +449,23 @@ impl GwClient {
     /// multipart/form-data POST. 서명은 동일(4종 헤더), Content-Type은 reqwest가 boundary와
     /// 함께 자동 설정. 응답은 표준 봉투가 아닐 수 있어(예: mail014A04) raw Value로 반환 →
     /// 성공 판정은 호출부 몫.
-    pub async fn call_multipart(&self, path: &str, form: reqwest::multipart::Form) -> Result<Value> {
+    /// `make_form`은 **폼을 만드는 방법**이지 만들어진 폼이 아니다 — `multipart::Form`은 `Clone`이
+    /// 아니고 `send()`가 소비하므로, 401 재시도 때 같은 요청을 다시 만들려면 재조립이 필요하다.
+    /// (호출당 최대 2회 불린다.)
+    pub async fn call_multipart(
+        &self,
+        path: &str,
+        make_form: impl Fn() -> reqwest::multipart::Form,
+    ) -> Result<Value> {
         let resp = self
-            .signed(reqwest::Method::POST, path, path)?
-            .multipart(form)
-            .send()
+            .send_signed(reqwest::Method::POST, path, path, |b| b.multipart(make_form()))
             .await?;
 
         let status = resp.status();
-        let v: Value = resp.json().await?;
         if !status.is_success() {
-            bail!("api {path} 실패: http={status} body={v}");
+            return Err(Self::http_error(path, status, resp).await);
         }
-        Ok(v)
+        Ok(resp.json().await?)
     }
 
     /// x-www-form-urlencoded POST 후 바이너리 응답을 파일로 저장(ECM 파일 다운로드).
@@ -373,10 +478,10 @@ impl GwClient {
         out_path: &str,
     ) -> Result<(u64, Option<String>)> {
         let resp = self
-            .signed(reqwest::Method::POST, path, path)?
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(form_urlencode(params))
-            .send()
+            .send_signed(reqwest::Method::POST, path, path, |b| {
+                b.header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(form_urlencode(params))
+            })
             .await?;
 
         let status = resp.status();
@@ -391,9 +496,13 @@ impl GwClient {
             .get("content-disposition")
             .and_then(|v| v.to_str().ok())
             .and_then(parse_cd_filename);
+        if !status.is_success() {
+            return Err(Self::http_error(path, status, resp).await);
+        }
         let bytes = resp.bytes().await?;
 
-        if !status.is_success() || ct.contains("json") {
+        // 200인데 JSON이면 서버가 실패 봉투를 준 것(파일이 아님).
+        if ct.contains("json") {
             let snippet = String::from_utf8_lossy(&bytes[..bytes.len().min(300)]);
             bail!("다운로드 실패({path}): http={status} ct={ct} body={snippet}");
         }
@@ -404,16 +513,19 @@ impl GwClient {
     /// x-www-form-urlencoded POST(gw050A02 등). 서명 헤더는 call()과 동일(body 무관).
     pub async fn call_form(&self, path: &str, params: &[(&str, &str)]) -> Result<Value> {
         let resp = self
-            .signed(reqwest::Method::POST, path, path)?
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(form_urlencode(params))
-            .send()
+            .send_signed(reqwest::Method::POST, path, path, |b| {
+                b.header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(form_urlencode(params))
+            })
             .await?;
 
         let status = resp.status();
+        if !status.is_success() {
+            return Err(Self::http_error(path, status, resp).await);
+        }
         let v: Value = resp.json().await?;
         let code = v.get("resultCode").and_then(|c| c.as_i64()).unwrap_or(-1);
-        if !status.is_success() || !(code == 0 || code == 200) {
+        if !(code == 0 || code == 200) {
             let msg = v
                 .get("resultMsg")
                 .and_then(|m| m.as_str())
@@ -429,16 +541,16 @@ impl GwClient {
     pub async fn call_get_sse(&self, sign_path: &str, path_with_query: &str) -> Result<Vec<Value>> {
         // 서명은 pathname(sign_path)으로, 요청은 쿼리 포함 경로로 — 유일하게 둘이 다른 경로다.
         let resp = self
-            .signed(reqwest::Method::GET, sign_path, path_with_query)?
-            .header("Accept", "text/event-stream")
-            .send()
+            .send_signed(reqwest::Method::GET, sign_path, path_with_query, |b| {
+                b.header("Accept", "text/event-stream")
+            })
             .await?;
 
         let status = resp.status();
-        let text = resp.text().await?;
         if !status.is_success() {
-            bail!("api {sign_path} 실패: http={status} body={}", &text[..text.len().min(300)]);
+            return Err(Self::http_error(sign_path, status, resp).await);
         }
+        let text = resp.text().await?;
         let events: Vec<Value> = text
             .lines()
             .filter_map(|l| l.trim_start().strip_prefix("data:"))
@@ -544,6 +656,97 @@ mod tests {
         );
         assert_eq!(parse_cd_filename("attachment"), None);
         assert_eq!(parse_cd_filename(""), None);
+    }
+
+    /// 재시도 정책 테스트용 대역. `T`를 상태코드(u16)로 두고 전송 횟수를 센다.
+    /// 실제 전송·크레덴셜 재취득에서 분리돼 있어 네트워크도 브라우저 쿠키도 필요 없다.
+    struct Spy {
+        /// 매 전송이 돌려줄 상태코드(앞에서부터 하나씩 소비).
+        responses: std::cell::RefCell<std::collections::VecDeque<Result<u16>>>,
+        sends: std::cell::Cell<u32>,
+        reacquires: std::cell::Cell<u32>,
+    }
+
+    impl Spy {
+        fn new(responses: Vec<Result<u16>>) -> Self {
+            Self {
+                responses: std::cell::RefCell::new(responses.into()),
+                sends: std::cell::Cell::new(0),
+                reacquires: std::cell::Cell::new(0),
+            }
+        }
+        async fn run(&self, reacquire_ok: bool) -> Result<u16> {
+            retry_once_on_401(
+                |s: &u16| *s == 401,
+                || {
+                    self.reacquires.set(self.reacquires.get() + 1);
+                    reacquire_ok
+                },
+                || async {
+                    self.sends.set(self.sends.get() + 1);
+                    self.responses
+                        .borrow_mut()
+                        .pop_front()
+                        .unwrap_or_else(|| bail!("전송 횟수 상한 초과 — 대역에 준비된 응답이 없다"))
+                },
+            )
+            .await
+        }
+    }
+
+    #[tokio::test]
+    async fn 성공응답은_재시도도_재취득도_하지_않는다() {
+        let spy = Spy::new(vec![Ok(200)]);
+        assert_eq!(spy.run(true).await.unwrap(), 200);
+        assert_eq!(spy.sends.get(), 1);
+        assert_eq!(spy.reacquires.get(), 0);
+    }
+
+    /// 401 외의 실패(403·500 등)는 크레덴셜 문제가 아니므로 건드리지 않는다.
+    #[tokio::test]
+    async fn 사백일이_아닌_실패는_재시도하지_않는다() {
+        for status in [400u16, 403, 404, 500] {
+            let spy = Spy::new(vec![Ok(status)]);
+            assert_eq!(spy.run(true).await.unwrap(), status);
+            assert_eq!(spy.sends.get(), 1, "http={status}");
+            assert_eq!(spy.reacquires.get(), 0, "http={status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn 사백일이면_재취득후_한번_재시도한다() {
+        let spy = Spy::new(vec![Ok(401), Ok(200)]);
+        assert_eq!(spy.run(true).await.unwrap(), 200);
+        assert_eq!(spy.sends.get(), 2);
+        assert_eq!(spy.reacquires.get(), 1);
+    }
+
+    /// 재시도까지 401이면 **거기서 끝난다**. 세 번째 전송이 있었다면 대역이 준비한 응답이
+    /// 떨어져 Err가 났을 것이므로, Ok(401)이라는 사실 자체가 상한을 증명한다.
+    #[tokio::test]
+    async fn 재시도도_사백일이면_더_재시도하지_않는다() {
+        let spy = Spy::new(vec![Ok(401), Ok(401)]);
+        assert_eq!(spy.run(true).await.unwrap(), 401);
+        assert_eq!(spy.sends.get(), 2);
+        assert_eq!(spy.reacquires.get(), 1);
+    }
+
+    /// 브라우저 미로그인 등으로 재취득이 실패하면 재시도는 무의미 — 첫 401을 그대로 돌려준다.
+    #[tokio::test]
+    async fn 재취득_실패하면_재시도하지_않고_첫응답을_돌려준다() {
+        let spy = Spy::new(vec![Ok(401), Ok(200)]);
+        assert_eq!(spy.run(false).await.unwrap(), 401);
+        assert_eq!(spy.sends.get(), 1);
+        assert_eq!(spy.reacquires.get(), 1);
+    }
+
+    /// 전송 자체가 실패(네트워크 오류 등)하면 인증 문제가 아니므로 재취득으로 새지 않는다.
+    #[tokio::test]
+    async fn 전송_에러는_그대로_전파된다() {
+        let spy = Spy::new(vec![Err(anyhow!("연결 실패"))]);
+        assert!(spy.run(true).await.is_err());
+        assert_eq!(spy.sends.get(), 1);
+        assert_eq!(spy.reacquires.get(), 0);
     }
 
     #[test]

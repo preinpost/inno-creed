@@ -63,6 +63,11 @@ pub async fn send_mail(
         let uploaded = upload_files(c, attachments).await?;
         (uploaded, attachments.len().to_string())
     };
+    // `init`(mail014A01 응답)에서 오는 값들 — sessionKey/filedir/email/bigFileDay/externalSendLimit/
+    // insideDomainArray/groupMailOption. 크레덴셜이 아니라 **작성폼 세션**에서 온 것이라 재취득으로
+    // 바뀌지 않는다. 다만 발송 직전에 토큰이 만료되면 이 스냅샷도 함께 낡을 수 있는데, 폼 조립은
+    // 동기 클로저라 여기서 A01을 다시 부를 수 없다. 그 경우 재시도가 실패하고 로그인 안내로 끝난다
+    // (다음 호출의 compose_init이 새 세션을 받으므로 사용자가 다시 보내면 정상 발송된다).
     let g = |k: &str| init.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
     let gmo = init.get("groupMailOption");
     let gm = |k: &str| {
@@ -76,10 +81,17 @@ pub async fn send_mail(
         Some(v) if !v.is_null() => v.to_string(),
         _ => "[]".to_string(),
     };
-    // body용 authToken: 헤더용(groupSeq|empSeq|secret) 앞에 loginId를 덧붙인 형식.
-    let body_auth = format!("{}|{}", c.email_addr(), c.auth_token());
-
-    let form = reqwest::multipart::Form::new()
+    // 폼을 "만드는 방법"으로 넘긴다 — 401 재취득 재시도 때 클라이언트가 재조립해야 하기 때문
+    // (`multipart::Form`은 Clone이 아니고 전송이 소비한다). 호출당 최대 2회 평가된다.
+    //
+    // ⚠️ **크레덴셜에서 파생되는 값은 반드시 이 클로저 안에서 읽어야 한다.** 밖에서 스냅샷하면
+    // 재취득 후 재조립해도 옛 토큰이 그대로 실려 재시도가 형식만 남는다.
+    // (`init`에서 온 값들은 크레덴셜 파생이 아니다 — 위 `g` 정의의 주석 참조.)
+    let form = || {
+        // body용 authToken: 헤더용(groupSeq|empSeq|secret) 앞에 loginId를 덧붙인 형식.
+        // 조립할 때마다 새로 읽는다 — 재취득된 토큰이 여기 반영돼야 재시도가 의미를 갖는다.
+        let body_auth = format!("{}|{}", c.email_addr(), c.auth_token());
+        reqwest::multipart::Form::new()
         .text("from", email.clone())
         .text("fromName", c.emp_name().to_string())
         .text("to", to.to_string())
@@ -90,10 +102,10 @@ pub async fn send_mail(
         .text("fileDir", g("filedir"))
         .text("bigFile", "")
         .text("bigFileDay", g("bigFileDay"))
-        .text("bigFileCnt", big_file_cnt)
+        .text("bigFileCnt", big_file_cnt.clone())
         .text("bigFilePeriod", "")
         .text("mail_kind", "me")
-        .text("uidAuthList", uid_auth_list)
+        .text("uidAuthList", uid_auth_list.clone())
         .text("fwFile", "")
         .text("urlList", "")
         .text("fileNameList", "")
@@ -113,10 +125,11 @@ pub async fn send_mail(
         .text("mimeHeader", "")
         .text("sessionKey", g("sessionKey"))
         .text("externalSendLimit", g("externalSendLimit"))
-        .text("insideDomainArray", inside)
+        .text("insideDomainArray", inside.clone())
         .text("aiResultJSON", "")
         .text("subject", subject.to_string())
-        .text("authToken", body_auth);
+        .text("authToken", body_auth)
+    };
 
     let v = c.call_multipart("/mail/mail014A04", form).await?;
     // 발송 응답은 표준 봉투로 감싸짐: {"resultCode":0,"resultData":{"result":true,"muid":..,"resultMessage":"SUCCESS"}}
@@ -132,18 +145,28 @@ pub async fn send_mail(
 /// (JSON 문자열)을 조립한다. 업로드 응답 `resultData.list[]`의 `fileId`를 그대로 사용.
 /// (필드명 `file[]`·응답구조는 프론트 번들 실측)
 async fn upload_files(c: &GwClient, paths: &[String]) -> Result<String> {
-    let mut form = reqwest::multipart::Form::new();
+    // 파일 내용을 먼저 읽어둔다 — 폼 조립은 401 재시도 때 한 번 더 일어날 수 있으므로
+    // 디스크 I/O(와 그 실패 처리)를 조립 밖으로 뺀다.
+    let mut files = Vec::new();
     for p in paths {
         let bytes = std::fs::read(p).map_err(|e| anyhow!("첨부 읽기 실패 {p}: {e}"))?;
         let fname = std::path::Path::new(p)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "file".into());
-        let part = reqwest::multipart::Part::bytes(bytes)
-            .file_name(fname)
-            .mime_str("application/octet-stream")?;
-        form = form.part("file[]", part);
+        files.push((fname, bytes));
     }
+    // 이 폼은 파일 내용뿐이라 크레덴셜 파생 값이 없다(인증은 서명 헤더가 전담 — 재시도 때
+    // `signed()`가 새 토큰으로 다시 계산한다). 발송 폼의 body authToken 같은 함정이 없다.
+    let form = || {
+        files.iter().fold(reqwest::multipart::Form::new(), |f, (name, bytes)| {
+            let part = reqwest::multipart::Part::bytes(bytes.clone())
+                .file_name(name.clone())
+                .mime_str("application/octet-stream")
+                .expect("고정 MIME 문자열 — 파싱 실패할 수 없다");
+            f.part("file[]", part)
+        })
+    };
     let up = c.call_multipart("/mail/mail014A06", form).await?;
     let list = up
         .pointer("/resultData/list")
