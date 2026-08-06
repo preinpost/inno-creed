@@ -186,8 +186,10 @@ class Mcp:
         if name in blocked:
             # ② 물리 차단. 이 예외는 잡지 않는다 — 테스트를 즉시 죽이는 것이 의도다.
             raise AssertionError(f"금지 도구 호출 시도: {name} ({blocked[name]})")
-        if name == "send_mail" and args.get("to"):
-            raise AssertionError("send_mail 은 본인 앞으로만 보낸다 — to 를 지정할 수 없다")
+        if name in ("send_mail", "send_mail_from_draft") and args.get("to"):
+            # send_mail_from_draft 는 to 를 안 주면 **초안에 저장된 수신자**로 나간다.
+            # 점검이 만드는 초안은 수신자가 본인이므로, to 를 막으면 남에게 갈 경로가 없다.
+            raise AssertionError(f"{name} 은 본인 앞으로만 보낸다 — to 를 지정할 수 없다")
         self.called.add(name)
         m = self._rpc("tools/call", {"name": name, "arguments": args})
         if m.get("error"):
@@ -909,10 +911,72 @@ def body(mcp: Mcp, fx: dict, marker: str):
         # 저장이 실패하면 조회할 대상이 없다. 건너뛴 사실을 남겨야 도구_커버리지가 정직해진다.
         skip("list_mail_drafts", "save_mail_draft 실패 — 조회할 draft가 없음")
 
+    draft_send_scenario(mcp, marker)
+
     submit_scenario(mcp, fx, marker)
 
     for n, why in FORBIDDEN.items():
         skip(n, f"금지 — {why}")
+
+
+def draft_send_scenario(mcp: Mcp, marker: str):
+    """초안 저장 → 그 초안을 발송 → 받은메일함에서 확인 후 삭제.
+
+    ⚠️ **이 도구는 실제로 메일을 보낸다.** 수신자는 초안에 저장된 값인데, 여기서 만드는 초안은
+    `to` 를 안 줘서 본인 앞이다(`Mcp.call` 이 `to` 지정 자체를 막는다). 남에게 갈 경로가 없다.
+
+    확인하는 것 3가지 — 하나라도 어긋나면 FAIL:
+      1. 발송됐다(`sent`) · 보낸메일함이 정확히 1 늘었다
+      2. **임시보관함 원본이 사라졌다**(`draft_deleted` + 통수 복귀). 남으면 중복 발송으로 이어진다
+      3. 본인 받은메일함에 마커 붙은 그 메일이 실제로 도착했다 → 그걸로 정리한다
+    """
+    before = mailbox_counts(mcp)
+    base_drafts, base_sent = before.get("DRAFT"), before.get("SENT")
+    sent_at = datetime.now()
+    subj = f"{marker} 초안발송 점검 {sent_at.strftime('%Y%m%d-%H%M%S')}"
+
+    sd = mcp.call("save_mail_draft", subject=subj,
+                  html="<p>inno-creed 라이브 점검(초안 발송). 자동 삭제됩니다.</p>")
+    if sd[0] == "ERR" or not (sd[1] or {}).get("draft_muid"):
+        skip("send_mail_from_draft", f"발송할 초안을 만들지 못함: {sd[1] if sd[0] == 'ERR' else 'draft_muid 없음'}")
+        return
+    muid = str(sd[1]["draft_muid"])
+    # 발송 전까지는 초안이 잔여물이다 — 발송이 실패해도 대장에 남아 다음 실행이 청소한다.
+    dl = track("mail_draft", {"muid": muid, "subject": subj, "beforeExists": base_drafts},
+               f"메일 임시보관함에서 제목 '{subj}' 삭제")
+
+    def chk_send(d, _muid=muid, _bd=base_drafts, _bs=base_sent):
+        after = mailbox_counts(mcp)  # read-back — 발송 응답만 믿지 않는다
+        now_drafts, now_sent = after.get("DRAFT"), after.get("SENT")
+        sent_ok = d.get("sent") is True and str(d.get("draft_muid")) == _muid
+        # 초안이 임시보관함에서 빠졌는가. 통수가 원래대로 돌아와야 한다(저장으로 +1 됐던 것이 상환).
+        gone = (d.get("draft_deleted") is True and now_drafts is not None
+                and _bd is not None and now_drafts == _bd)
+        # 실제로 나갔는가 — 보낸메일함이 정확히 1 늘어야 한다.
+        grew = now_sent is not None and _bs is not None and now_sent == _bs + 1
+        return (sent_ok and gone and grew,
+                f"muid={_muid} · 임시보관함 {_bd}→{now_drafts}"
+                f"{'(원본 삭제 확인)' if gone else ' ⚠️원본 잔존'} · "
+                f"보낸메일함 {_bs}→{now_sent}{'' if grew else ' ⚠️발송 미확인'}")
+
+    got = run(mcp, "send_mail_from_draft", chk_send, draft_muid=muid)
+    if got is None:
+        # 발송이 실패했으면 초안은 그대로 남아 있다 — 대장에 둔 채 즉시 정리를 시도한다.
+        ok, note = undo_mail_draft(mcp, dl["ref"], marker)
+        if ok:
+            untrack(dl)
+        else:
+            R.append(("FAIL", "send_mail_from_draft(정리)", note))
+        return
+
+    # 발송이 성공했으면 초안은 서버가 지웠다 — 잔여물은 이제 '발송된 메일' 쪽이다.
+    untrack(dl)
+    ml = track("mail", {"subject": subj, "sentAt": sent_at.strftime("%Y-%m-%d %H:%M:%S")},
+               f"메일함에서 제목 '{subj}' 삭제")
+    ok, note = undo_mail(mcp, ml["ref"], marker)
+    R.append(("PASS" if ok else "FAIL", "send_mail_from_draft(정리)", note))
+    if ok:
+        untrack(ml)
 
 
 def submit_scenario(mcp: Mcp, fx: dict, marker: str):

@@ -24,7 +24,7 @@ inno-creed (Rust MCP 서버, 헤드리스)
  │           API 래퍼 + 파생 조회 + **소유권 가드 · read-back 검증**(`*_and_verify`)
  └─ mcp/     rmcp 서버(stdio)
     ├─ mod.rs   서버 골격: Amaranth · 라우터 합성(all_tools) · ensure_session · 에러 변환 · instructions
-    ├─ tools/   도구 48개 — 도메인 11개(resource·calendar·mail·board·approval{,_line,_submit,_meta}·org·attendance·search)
+    ├─ tools/   도구 49개 — 도메인 11개(resource·calendar·mail·board·approval{,_line,_submit,_meta}·org·attendance·search)
     └─ args/    도구 인자 스키마 — 도메인 8개. ⚠️ doc comment가 그대로 LLM 프롬프트가 된다
 ```
 
@@ -123,6 +123,8 @@ wehago-sign = Base64( HMAC_SHA256( authToken ‖ transactionId ‖ timestamp ‖
 **구현 위치**: 도구 층이 아니라 **각 도메인 모듈의 mutation 함수 안**이다(`resource::reserve/update/cancel_and_verify`, `calendar::create/update/delete_event_and_verify`, `attendance::punch_and_verify`, `mail::save_mail_draft`). 검증 없는 raw 래퍼도 남아 있으나 새 호출부는 검증하는 쪽을 쓴다 — 규칙이 모듈에 있어야 MCP를 거치지 않는 호출자도 우회할 수 없다.
 
 이름 규칙은 `*_and_verify`가 기본이지만 `mail::save_mail_draft`는 예외다(대응하는 raw 래퍼가 없어 접미사로 구분할 이유가 없다). 이쪽은 재조회 결과를 **실패로 바꾸지 않고 `verified_by_readback`으로 보고만 한다** — 저장 자체는 성공했는데 조회가 막힌 경우와 정말 저장이 안 된 경우를 서버 응답만으로 가를 수 없기 때문이다. 반영 실패를 곧바로 에러로 올리는 위 셋과 다른 점이라 새 mutation을 만들 때 어느 쪽을 따를지 의식적으로 정할 것.
+
+**`mail::send_mail_from_draft`는 세 번째 갈래 — 사전 확인(pre-check)이다.** 발송은 되돌릴 수 없어 사후 read-back으로는 늦다. 그래서 보내기 **전에** 임시보관함을 조회해 그 muid가 실재할 때만 진행하고, 조회 자체가 실패하면 "없다"가 아니라 "확인 못 했다"로 보고 발송을 중단한다. 되돌릴 수 없는 mutation은 이 방향을 따를 것.
 
 ### 7.2 소유권 가드
 

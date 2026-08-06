@@ -4,6 +4,7 @@ use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 
 use crate::client::GwClient;
+use crate::error::InvalidInput;
 use crate::modules::board::{collapse_ws, html_to_text, json_str};
 
 pub const INBOX: i64 = 26986;
@@ -116,6 +117,15 @@ struct ComposeForm {
     to: String,
     subject: String,
     html: String,
+    /// 폼의 `fwFile`. 신규 발송·임시저장은 항상 빈 값이고, **초안 발송이 첨부를 승계할 때만**
+    /// 서버에 이미 있는 첨부의 `originalFileName`을 콤마로 이어 싣는다(실측).
+    fw_file: String,
+    /// 폼의 `muid`. 신규 발송·임시저장은 `"0"`, **초안 발송만** 그 초안의 muid를 싣는다.
+    muid: String,
+    /// 폼의 `mail_kind`. 신규는 `"me"`, 초안 발송은 `"draft"`.
+    mail_kind: String,
+    /// 폼의 `mimeHeader`. 신규는 빈 값, 초안 발송은 그 초안의 mime 헤더 JSON.
+    mime_header: String,
 }
 
 impl ComposeForm {
@@ -159,7 +169,28 @@ impl ComposeForm {
             to: to.to_string(),
             subject: subject.to_string(),
             html: html.to_string(),
+            // 아래 4개의 기본값 = 신규 발송/임시저장의 실측값. 초안 발송만 덮어쓴다.
+            fw_file: String::new(),
+            muid: "0".to_string(),
+            mail_kind: "me".to_string(),
+            mime_header: String::new(),
         }
+    }
+
+    /// 초안 발송 좌표를 싣는다 — 브라우저가 임시보관 메일을 보낼 때 신규 발송과 달라지는 값이다.
+    /// `fileDir`/`sessionKey`는 draft 모드 `mail014A01` 응답을 `new`에 넘기면 자동으로 반영되므로
+    /// 여기서 따로 다루지 않는다(그래서 실측 차이 5개 중 3개만 여기 있다).
+    fn with_draft(mut self, muid: &str, mime_header: String) -> Self {
+        self.muid = muid.to_string();
+        self.mail_kind = "draft".to_string();
+        self.mime_header = mime_header;
+        self
+    }
+
+    /// 승계한 첨부의 파일명 목록(`fwFile`)을 싣는다. 첨부를 승계할 때만 부른다.
+    fn with_fw_file(mut self, fw_file: String) -> Self {
+        self.fw_file = fw_file;
+        self
     }
 
     /// 실측 FormData 전 필드.
@@ -182,9 +213,9 @@ impl ComposeForm {
             ("bigFileDay", self.big_file_day.clone()),
             ("bigFileCnt", self.big_file_cnt.clone()),
             ("bigFilePeriod", String::new()),
-            ("mail_kind", "me".into()),
+            ("mail_kind", self.mail_kind.clone()),
             ("uidAuthList", self.uid_auth_list.clone()),
-            ("fwFile", String::new()),
+            ("fwFile", self.fw_file.clone()),
             ("urlList", String::new()),
             ("fileNameList", String::new()),
             ("receipt_notific", String::new()),
@@ -198,9 +229,9 @@ impl ComposeForm {
             ("neobizaddr", self.neobiz_addr.clone()),
             ("neobizIntedAddr", self.neobiz_inted_addr.clone()),
             ("neobizOrg", self.neobiz_org.clone()),
-            ("muid", "0".into()),
+            ("muid", self.muid.clone()),
             ("domainSeq", String::new()),
-            ("mimeHeader", String::new()),
+            ("mimeHeader", self.mime_header.clone()),
             ("sessionKey", self.session_key.clone()),
             ("externalSendLimit", self.external_send_limit.clone()),
             ("insideDomainArray", self.inside_domain.clone()),
@@ -329,6 +360,602 @@ pub async fn save_mail_draft(
         "mail_key": json_str(init.get("mailkey")),
         "verified_by_readback": verified
     }))
+}
+
+/// 초안을 **여는** 작성폼 초기화 — 신규 작성과 **같은 `mail014A01`**에 draft 좌표를 실어 부른다.
+///
+/// 이 한 콜이 초안 발송에 필요한 것을 전부 준다(2026-08-06 브라우저 캡처):
+/// `mailkey`(발송 뒤 원본 삭제용) · 새 `sessionKey`/`filedir` · `mailInfo.mime.header`(폼의 `mimeHeader`) ·
+/// `mailInfo.mime.body.html`(본문) · `decodeMime.subject`(제목) · `decodeMime.to`(수신자) ·
+/// `mailInfo.mime.fileList`(첨부).
+/// 덕분에 MCP가 호출마다 독립이어도 `mailkey`를 인자로 들고 다닐 필요가 없다.
+///
+/// ⚠️ **경로를 줄여 적지 말 것** — 본문·첨부는 `mailInfo` 바로 밑이 아니라 `mailInfo.mime` 밑이다.
+/// 코드가 `mailInfo.body.html`/`mailInfo.fileList`도 보는 것은 응답 모양이 다를 때를 대비한
+/// **fallback**이지 정본이 아니다.
+///
+/// `mailTo`/`viewFlag`/`fromFlag`/`readType`/`domainSeq`는 브라우저가 보내는 값을 그대로 재현한 것이다
+/// — 무엇이 필수인지는 실측하지 않았으므로 빼지 말 것.
+pub async fn compose_init_draft(c: &GwClient, draft_muid: &str) -> Result<Value> {
+    c.call("/mail/mail014A01", &draft_init_body(draft_muid)).await
+}
+
+/// `compose_init_draft`가 보내는 body. 실측 캡처 그대로다.
+fn draft_init_body(draft_muid: &str) -> Value {
+    json!({
+        "mailKind": "draft",
+        "mailTo": "(Unknown)",
+        "uid": draft_muid,
+        "mbox": DRAFTS,
+        "viewFlag": "noRead",
+        "fromFlag": true,
+        "readType": "",
+        "domainSeq": ""
+    })
+}
+
+/// 초안 발송 뒤 임시보관함 원본을 지운다 — `mail002A07`(JSON).
+///
+/// 프론트가 발송 성공 직후 반드시 치는 콜이다. **서버는 자동으로 정리하지 않는다**(실측).
+/// 빼먹으면 보낸 메일이 임시보관함에 남아 다음에 또 보내는 사고가 난다.
+async fn delete_draft_original(c: &GwClient, mail_key: &str, draft_muid: &str) -> Result<Value> {
+    let before: i64 = draft_muid
+        .parse()
+        .map_err(|_| anyhow!("draft muid가 숫자가 아니다: {draft_muid}"))?;
+    c.call(
+        "/mail/mail002A07",
+        &json!({ "mailKey": mail_key, "beforeMUID": before }),
+    )
+    .await
+}
+
+/// 임시보관 메일 발송 — `mail014A01`(draft 모드) → (첨부 있으면 `mail014A08`) → `mail014A04`
+/// → `mail002A07`.
+///
+/// **전용 발송 API는 없다.** 신규 발송과 같은 `mail014A04`를 쓰고, 실측 차이는 값 5개뿐이다
+/// (`muid`=초안 muid / `mail_kind`="draft" / `mimeHeader`=초안 mime 헤더 / `fileDir`·`sessionKey`=draft 모드
+/// A01 응답 / 첨부를 승계하면 `uidAuthList`·`bigFileCnt`·`fwFile`).
+/// 나머지 필드는 발송 폼 그대로다 — 브라우저가 보내는 것은 전부 보낸다.
+/// (브라우저는 `bigFilePeriod`에 기간 문자열을 싣지만 우리는 빈 값이다 — `bigFileCnt`가 0이라
+/// 쓸 데가 없고 기존 `send_mail`이 빈 값으로 성공해 왔다.)
+///
+/// 안전장치:
+/// 1. **muid 실재 확인** — 발송 전에 임시보관함을 조회해 그 muid가 실제로 있는지 본다.
+///    없으면 발송하지 않는다(이미 보냈거나 지워진 초안을 다시 보내는 사고 방지).
+/// 2. **판정 불가는 전부 중단** — 첨부 목록·본문·제목 중 하나라도 응답에서 읽어내지 못하면
+///    보내지 않는다. 조용히 빈 값으로 나가면 첨부가 빠지거나 **내용이 텅 빈 메일**이 수신자에게
+///    가는데, 어느 쪽도 회수할 수 없다.
+/// 3. **첨부는 승계하되 미실측 경로는 거부** — `mail014A08`로 발송용 `fileId`를 받아 승계한다.
+///    파일명에 콤마가 있거나 동명 파일이 둘 이상이거나 대용량 첨부(`bigFile`)면 중단한다
+///    (자세한 이유는 `inherit_draft_attachments`).
+/// 4. **참조(cc/bcc) 걸린 초안 거부** — 폼이 `cc`/`bcc`를 빈 값으로 보내 참조가 조용히 빠진다
+///    (`refuse_if_carbon_copy`).
+/// 5. **발송 성공 ≠ 정리 성공** — 원본 삭제가 실패해도 발송은 성공으로 보고하되
+///    `draft_deleted:false`와 안내를 함께 실어 중복 발송을 사람이 막을 수 있게 한다.
+///
+/// `to_override`가 비어 있으면 초안에 저장된 수신자(`draft_recipient`)로 보낸다.
+pub async fn send_mail_from_draft(
+    c: &GwClient,
+    draft_muid: &str,
+    to_override: &str,
+) -> Result<Value> {
+    let draft_muid = draft_muid.trim();
+    if draft_muid.is_empty() {
+        return Err(InvalidInput("draft_muid가 비어 있다".into()).into());
+    }
+
+    // ① 임시보관함 조회. 조회 자체가 실패하면 "없다"가 아니라 "확인 못 했다"이므로 발송하지 않는다
+    //    — 발송은 되돌릴 수 없어서, 모르는 채로 진행하는 쪽이 더 나쁘다.
+    let drafts = list_drafts(c, 1, DRAFT_READBACK_PAGE)
+        .await
+        .map_err(|e| anyhow!("임시보관함 조회 실패로 draft_muid를 확인하지 못해 발송을 중단한다: {e}"))?;
+    // muid 실재 확인. 반환값(`DraftExists`)이 ③의 입력이라 **이 확인을 건너뛰면 컴파일되지 않는다.**
+    let found = ensure_draft_exists(&drafts, draft_muid)?;
+
+    // ② 초안 열기. 발송에 필요한 값이 전부 이 응답에서 나온다.
+    let init = compose_init_draft(c, draft_muid).await?;
+
+    // ③ **보낼 것을 확정한다.** 판정은 전부 여기(순수 함수)에 있다 — 거부 사유도 여기서 나온다.
+    let plan = plan_draft_send(found, &init, draft_muid, to_override)?;
+
+    // ④ 첨부 승계. 보낼 내용이 다 확인된 뒤에 부른다 — 어차피 거부될 발송에 콜을 더 쓰지 않는다.
+    let (uid_auth_list, big_file_cnt, fw_file) = if plan.files.is_empty() {
+        (String::new(), "0".to_string(), String::new())
+    } else {
+        inherit_draft_attachments(c, &init, draft_muid, &plan.files).await?
+    };
+
+    let cf = ComposeForm::new(
+        &init,
+        &plan.to,
+        &plan.subject,
+        &plan.html,
+        uid_auth_list,
+        big_file_cnt,
+    )
+    .with_draft(draft_muid, plan.mime_header.clone())
+    .with_fw_file(fw_file);
+    let v = c.call_multipart("/mail/mail014A04", || cf.build(c)).await?;
+    let rd = v.get("resultData").unwrap_or(&v);
+    if !rd.get("result").and_then(|r| r.as_bool()).unwrap_or(false) {
+        bail!("초안 발송 실패: {v}");
+    }
+
+    // ⑤ 원본 정리. 실패해도 발송은 이미 나갔으므로 에러로 올리지 않는다 — 대신 사실을 실어 보고한다.
+    let mail_key = json_str(init.get("mailkey"));
+    let (draft_deleted, delete_note) = match delete_draft_original(c, &mail_key, draft_muid).await {
+        Ok(_) => (true, String::new()),
+        Err(e) => (
+            false,
+            format!("메일은 발송됐으나 임시보관함 원본을 지우지 못했다({e}) — 그대로 두면 같은 메일을 또 보낼 수 있으니 임시보관함에서 직접 삭제할 것"),
+        ),
+    };
+
+    Ok(json!({
+        "sent": true,
+        "draft_muid": draft_muid,
+        "to": plan.to,
+        "subject": plan.subject,
+        "attachments": plan.files.len(),
+        "draft_deleted": draft_deleted,
+        "note": if draft_deleted {
+            "발송 후 임시보관함 원본을 삭제했다(mail002A07). 이 삭제는 휴지통을 거치지 않는 것으로 보인다".to_string()
+        } else {
+            delete_note
+        }
+    }))
+}
+
+/// "임시보관함에 그 초안이 실재한다"는 증거. `plan_draft_send`가 이것을 **인자로 요구한다** —
+/// 발송은 되돌릴 수 없어서, 실재 확인이 코드에서 조용히 사라지는 것을 타입으로 막는다.
+/// (보증 범위: `ensure_draft_exists` **호출을 지우면 컴파일되지 않는다.** 같은 모듈 안에서 이 값을
+/// 손으로 만들어 우회하는 것까지는 막지 못한다 — 그건 검증을 건너뛰겠다는 명시적 행위다.)
+struct DraftExists;
+
+/// 임시보관함 목록에 그 muid가 실제로 있는지. 없으면 발송하지 않는다
+/// (이미 보냈거나 지워진 초안을 다시 보내는 사고 방지).
+fn ensure_draft_exists(drafts: &Value, draft_muid: &str) -> Result<DraftExists> {
+    if !has_muid(drafts, draft_muid) {
+        return Err(InvalidInput(format!(
+            "임시보관함 최근 {DRAFT_READBACK_PAGE}건에 draft_muid={draft_muid}가 없다 — 이미 발송했거나 삭제된 초안일 수 있다. list_mail_drafts로 확인할 것"
+        ))
+        .into());
+    }
+    Ok(DraftExists)
+}
+
+/// 초안 발송에 실을 값. `plan_draft_send`가 낸다.
+struct DraftSendPlan {
+    to: String,
+    subject: String,
+    html: String,
+    mime_header: String,
+    /// 초안이 들고 있는 첨부(`mailInfo.mime.fileList`) 원본. 빈 배열이면 첨부 없음.
+    files: Vec<Value>,
+}
+
+/// **초안 발송의 판정 전부**를 한자리에 모은 순수 함수 — 무엇을 보낼지, 아니면 왜 보내지 않을지.
+///
+/// I/O(A01·A08·A04)와 갈라둔 이유는 회귀 때문이다. 이 판단들은 전부 "틀리면 잘못된 메일이
+/// 나가고 회수할 수 없는" 종류인데, 호출부에 인라인으로 두면 **가드를 지워도 테스트가 통과한다.**
+/// 여기 있으면 캡처한 A01 응답 JSON만으로 전부 검증된다.
+///
+/// 막는 것(전부 "조용히 잘못 나가는" 경우다):
+/// - **첨부 목록을 못 읽음** → 첨부 없음이 아니라 판정 불가
+/// - **본문·제목이 빔** → 내용이 텅 빈 메일 발송
+/// - **참조(cc/bcc)가 걸림** → 참조 수신자 누락(`refuse_if_carbon_copy`)
+/// - **수신자가 없거나 주소로 보이지 않음** → 엉뚱한 곳으로 나가거나 실패
+fn plan_draft_send(
+    _found: DraftExists,
+    init: &Value,
+    draft_muid: &str,
+    to_override: &str,
+) -> Result<DraftSendPlan> {
+    let mail_info = init.get("mailInfo").cloned().unwrap_or(Value::Null);
+
+    // 첨부 목록은 `mailInfo.mime.fileList`에 있다(실측: 첨부 없는 초안이 `[]`).
+    // **키가 아예 없으면 "첨부 없음"이 아니라 "판정 불가"로 본다** — 응답 모양이 예상과 다른 채로
+    // 진행하면 첨부를 조용히 빠뜨린 메일이 나가는데, 그건 되돌릴 수 없다.
+    let file_list = mail_info
+        .pointer("/mime/fileList")
+        .or_else(|| mail_info.get("fileList"));
+    let Some(files) = file_list.and_then(|v| v.as_array()) else {
+        bail!(
+            "초안(draft_muid={draft_muid})의 첨부 목록(mailInfo.mime.fileList)을 응답에서 찾지 못해 \
+             첨부 유무를 판정할 수 없다 — 첨부를 빠뜨린 채 보낼 위험이 있어 발송하지 않는다"
+        );
+    };
+
+    // 제목은 서버가 디코드해준 값(`decodeMime.subject`)을 쓴다 — mime 헤더 쪽 subject는
+    // `=?UTF-8?B?...?=` 인코딩 상태라 그대로 쓰면 안 된다.
+    let subject = json_str(init.pointer("/decodeMime/subject"));
+    let html = json_str(mail_info.pointer("/mime/body/html"));
+    let html = if html.is_empty() {
+        json_str(mail_info.pointer("/body/html"))
+    } else {
+        html
+    };
+    // ⚠️ **본문·제목도 첨부와 같은 기준이다 — 판정 불가는 중단이다.**
+    // 두 경로 어디에도 본문이 없으면 `html`이 빈 문자열인 채로 A04가 나가고, 내용이 텅 빈 메일이
+    // 수신자에게 도착한다(회수 불가). 재저장(2회차 이상) 초안의 응답 모양은 실측하지 않았으므로
+    // "빈 값이 곧 빈 본문"이라고 단정할 수 없다.
+    if html.trim().is_empty() {
+        bail!(
+            "초안(draft_muid={draft_muid})의 본문(mailInfo.mime.body.html)이 비어 있거나 응답에서 \
+             찾지 못했다 — 내용이 텅 빈 메일이 나가는 것을 막기 위해 발송하지 않는다. \
+             임시보관함에서 그 초안을 확인할 것"
+        );
+    }
+    if subject.trim().is_empty() {
+        bail!(
+            "초안(draft_muid={draft_muid})의 제목(decodeMime.subject)이 비어 있거나 응답에서 \
+             찾지 못했다 — 제목 없는 메일이 나가는 것을 막기 위해 발송하지 않는다. \
+             임시보관함에서 그 초안을 확인할 것"
+        );
+    }
+
+    // 폼의 `mimeHeader`는 초안의 헤더 객체를 JSON 문자열로 직렬화한 것이다(브라우저와 동일).
+    let header = mail_info.pointer("/mime/header").cloned().unwrap_or(Value::Null);
+    let mime_header = if header.is_null() {
+        String::new()
+    } else {
+        header.to_string()
+    };
+
+    // 참조(cc/bcc)가 걸린 초안은 거부한다 — 폼은 `cc`/`bcc`를 **항상 빈 값으로** 보내므로
+    // (`ComposeForm::fields`) 그대로 발송하면 참조 수신자가 조용히 빠진다.
+    refuse_if_carbon_copy(init, draft_muid)?;
+
+    // 수신자: 인자 우선, 없으면 초안에 저장된 값.
+    let to = if to_override.trim().is_empty() {
+        draft_recipient(init, draft_muid)?
+    } else {
+        to_override.trim().to_string()
+    };
+    if to.trim().is_empty() {
+        return Err(InvalidInput(format!(
+            "초안(draft_muid={draft_muid})에 수신자가 없다 — to 인자로 수신자를 지정해 발송할 것"
+        ))
+        .into());
+    }
+
+    Ok(DraftSendPlan {
+        to,
+        subject,
+        html,
+        mime_header,
+        files: files.clone(),
+    })
+}
+
+/// 헤더 값(주소·표시명)의 **HTML 엔티티만** 되돌린다.
+///
+/// ⛔ **`html_to_text`를 주소에 쓰지 말 것.** 그쪽은 ① 태그 제거 → ② 엔티티 디코드 순서라,
+/// 입력이 이미 언이스케이프된 `홍길동 <a@b.c>`면 `<a@b.c>`를 태그로 보고 **통째로 버린다**
+/// (남는 값 `"홍길동 "`은 공백이 있어 빈 값 검사도 통과한다). 로컬파트가 `p`/`br`/`div` 같은
+/// 블록태그로 시작하면(`<p.kim@x.co>`) 개행 하나로 치환되기까지 한다.
+/// 주소에 필요한 것은 엔티티 언이스케이프뿐이다.
+fn unescape_entities(s: &str) -> String {
+    // `&amp;`를 마지막에 푸는 순서는 `html_to_text`와 같다 — `&amp;lt;`가 `<`로 접히지 않게.
+    s.replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+}
+
+/// 초안에 저장된 수신자를 폼에 실을 형태로 꺼낸다. 없으면 빈 문자열(호출부가 거절한다).
+///
+/// ⚠️ **`mime.header.to`를 쓰지 않는다.** 수신자가 채워진 초안을 열어 실측해 보니 그 값은
+/// 표시명이 `=?UTF-8?B?...?=`로 MIME 인코딩된 데다 `<`/`>`가 `&lt;`/`&gt;`로 HTML 이스케이프돼
+/// 온다 — 그대로 실으면 표시명이 깨지고 주소 파싱도 깨질 수 있다. 브라우저가 실제로 A04에 싣는
+/// 값은 `decodeMime.to`(서버가 디코드해준 표시형)를 HTML 언이스케이프한 것이라 그쪽을 쓴다.
+///
+/// **수신자가 여럿이어도 안전하다** — 이 함수도 브라우저도 `decodeMime.to` **문자열을 통째로**
+/// 싣는다. 우리가 주소를 쪼개거나 다시 잇지 않으므로 구분자가 무엇이든 브라우저가 보내는 것과
+/// 같은 값이 나간다(구분자 자체는 여전히 미실측이지만 그 값을 해석할 일이 없다).
+///
+/// ⚠️ **변환이 주소를 먹었는지 검사한다** — `decodeMime.to`가 늘 이스케이프돼 온다는 근거는
+/// 관측 1건뿐이다. 값이 있는데 `@`가 없으면 조용히 통과시키지 않고 거부한다.
+fn draft_recipient(init: &Value, draft_muid: &str) -> Result<String> {
+    let decoded = unescape_entities(&json_str(init.pointer("/decodeMime/to")));
+    if !decoded.trim().is_empty() {
+        if !decoded.contains('@') {
+            bail!(
+                "초안(draft_muid={draft_muid})의 수신자(decodeMime.to)가 주소로 보이지 않는다('{decoded}') \
+                 — 엉뚱한 곳으로 보내지 않도록 발송하지 않는다. to 인자로 수신자를 지정할 것"
+            );
+        }
+        return Ok(decoded);
+    }
+    // `decodeMime.to`가 비면 `paramTo`(주소만)를 본다 — 표시명은 잃지만 주소는 맞다.
+    // ⚠️ 단 수신자 없는 초안은 이 자리가 `(Unknown)`으로 올 수 있다(실측: 그런 초안의 URL이
+    // `mailTo=(Unknown)`이었다). 그건 주소가 아니므로 "수신자 없음"으로 본다.
+    let p = json_str(init.get("paramTo"));
+    if p.trim() == "(Unknown)" || p.trim().is_empty() {
+        return Ok(String::new());
+    }
+    if !p.contains('@') {
+        bail!(
+            "초안(draft_muid={draft_muid})의 수신자(paramTo)가 주소로 보이지 않는다('{p}') \
+             — 엉뚱한 곳으로 보내지 않도록 발송하지 않는다. to 인자로 수신자를 지정할 것"
+        );
+    }
+    Ok(p)
+}
+
+/// 초안에 **참조(cc/bcc)가 걸려 있으면 발송을 거부**한다.
+///
+/// 발송 폼은 `cc`/`bcc`를 항상 빈 값으로 보낸다 — 초안에 참조가 있어도 읽지 않는다. 그대로
+/// 보내면 참조 수신자가 조용히 빠진 채 나가고 회수할 수 없다(빈 본문·첨부 누락과 같은 부류다).
+///
+/// 참조가 실려 오는 자리는 수신자(`to`)와 같은 세 곳으로 본다 — `mailInfo.mime.header` ·
+/// `decodeMime` · 최상위 `param*`. **하나도 읽을 수 없으면 "참조 없음"이 아니라 판정 불가**로
+/// 보고 중단한다(실측: 참조 없는 초안도 `mailInfo.mime.header.cc`를 빈 문자열로 들고 온다).
+///
+/// ⚠️ **`bcc`는 관측된 응답 어디에도 키가 없었다** — 원래 메시지 헤더에 남지 않는 필드다.
+/// 실려 오기만 하면 cc와 같은 기준으로 막지만, "bcc가 있는데 응답에 실리지 않는" 경우는
+/// 이 검사로 잡을 수 없다(미실측 잔여 위험 — docs에 남겨두었다).
+fn refuse_if_carbon_copy(init: &Value, draft_muid: &str) -> Result<()> {
+    let mut readable = false;
+    for (kind, paths) in [
+        ("cc", ["/mailInfo/mime/header/cc", "/decodeMime/cc", "/paramCc"]),
+        ("bcc", ["/mailInfo/mime/header/bcc", "/decodeMime/bcc", "/paramBcc"]),
+    ] {
+        for p in paths {
+            let Some(v) = init.pointer(p) else { continue };
+            readable = true;
+            if !is_blank(v) {
+                return Err(InvalidInput(format!(
+                    "참조({kind})가 걸린 초안은 아직 발송할 수 없다(참조 승계 미구현 — 그대로 보내면 \
+                     참조 수신자가 조용히 빠진다) — 아마란스 웹에서 그 초안을 열어 발송할 것"
+                ))
+                .into());
+            }
+        }
+    }
+    if !readable {
+        bail!(
+            "초안(draft_muid={draft_muid})의 참조(cc/bcc)를 응답 어디에서도 읽지 못해 참조 유무를 \
+             판정할 수 없다 — 참조를 빠뜨린 채 보낼 위험이 있어 발송하지 않는다"
+        );
+    }
+    Ok(())
+}
+
+/// JSON 어딘가에 그 키가 **비어 있지 않은 값**으로 들어 있는지(정확한 키 이름 일치).
+/// 초안이 우리가 재현하지 않는 값을 들고 있는지 감지하는 데 쓴다.
+fn has_nonempty_key(v: &Value, key: &str) -> bool {
+    match v {
+        Value::Object(m) => {
+            if let Some(x) = m.get(key)
+                && !is_blank(x)
+            {
+                return true;
+            }
+            m.values().any(|x| has_nonempty_key(x, key))
+        }
+        Value::Array(a) => a.iter().any(|x| has_nonempty_key(x, key)),
+        _ => false,
+    }
+}
+
+/// "값이 없는 것과 같다"의 판정 — 빈 문자열·빈 배열·빈 객체·null.
+fn is_blank(v: &Value) -> bool {
+    match v {
+        Value::Null => true,
+        Value::String(s) => s.trim().is_empty(),
+        Value::Array(a) => a.is_empty(),
+        Value::Object(m) => m.is_empty(),
+        _ => false,
+    }
+}
+
+/// 초안이 **이미 서버에 들고 있는** 첨부를 발송 폼으로 승계한다 — `mail014A08`(초안 `fileSn` →
+/// 발송용 `fileId`). 반환은 폼에 실을 `(uidAuthList, bigFileCnt, fwFile)`.
+///
+/// ⛔ **신규 업로드(`upload_files`)와 공유하지 않는다.** 브라우저가 만드는 `uidAuthList` 항목의
+/// 키 구성이 서로 다르다(실측) — 이쪽은 A08 응답 객체를 **그대로 두고** 7개를 덧붙이고,
+/// `serverFile`/`useDownView`/`offset`/`encoding`처럼 신규 업로드에는 없는 키가 함께 간다.
+/// 하나로 합치면 어느 한쪽이 조용히 깨진다.
+///
+/// **막는 것**(전부 "조용히 잘못 나가는" 경우라 명시적으로 중단한다):
+/// - **파일명에 콤마** — 폼의 `fwFile`이 콤마로 파일을 구분한다. 서버가 그 콤마를 어떻게 읽는지
+///   실측하지 않았고, 이름이 쪼개져 엉뚱한 파일 목록이 될 수 있다.
+/// - **동명 파일 둘 이상** — A08 응답 순서가 요청 순서와 같은지는 실측하지 않아 **이름으로**
+///   짝짓는데, 이름이 겹치면 짝을 확정할 수 없다.
+/// - **대용량 첨부(`bigFile`/`bigFilePeriod`)** — 우리 폼은 이 두 값을 빈 값으로 보낸다.
+///   초안이 값을 들고 있으면 그 부분이 빠진 채 나가므로 보내지 않는다.
+///   ⚠️ 대용량 첨부가 `fileList`에 아예 실리지 않는 형태라면 이 검사에 걸리지 않는다(미실측).
+/// - **개수 불일치** — A08이 요청한 수만큼 돌려주지 않으면 일부를 빠뜨린 채 보내게 되므로 중단.
+async fn inherit_draft_attachments(
+    c: &GwClient,
+    init: &Value,
+    draft_muid: &str,
+    files: &[Value],
+) -> Result<(String, String, String)> {
+    // ① 승계 가능한 모양인지 먼저 판정한다(A08을 부르기 전에 — 부작용 없는 순서).
+    let want = draft_attachment_plan(init, draft_muid, files)?;
+
+    // ② A08 — `fileSn`은 **콤마로 이어붙여 한 번에** 보낸다(실측).
+    // `authKeyMap`의 email/empSeq는 **A01 응답값**을 쓴다(실측 사양) — 클라이언트 세션값과
+    // 갈릴 여지를 두지 않는다. 없으면 판정 불가이므로 보내지 않는다.
+    let email = json_str(init.get("email"));
+    let emp_seq = json_str(init.get("empSeq"));
+    if email.is_empty() || emp_seq.is_empty() {
+        bail!(
+            "초안 열기 응답에 email/empSeq가 없어 첨부를 승계할 수 없다(draft_muid={draft_muid}) \
+             — 첨부를 빠뜨린 채 보낼 위험이 있어 발송하지 않는다"
+        );
+    }
+    let auth = json!({ "email": email, "empSeq": emp_seq, "muid": draft_muid }).to_string();
+    let sns = want
+        .0
+        .iter()
+        .map(|(_, _, s)| s.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let a08 = c
+        .call_form(
+            "/mail/mail014A08",
+            &[
+                ("moduleGbn", "MAIL"),
+                ("authKeyMap", &auth),
+                ("fileSn", &sns),
+                ("condition", "99"),
+            ],
+        )
+        .await?;
+
+    // ③ 응답 → 폼 값. 개수 검사와 조립은 순수 함수에 있다(회귀를 테스트로 잡기 위해).
+    let list = a08.get("list").and_then(|v| v.as_array()).ok_or_else(|| {
+        anyhow!("mail014A08 응답에 list가 없어 첨부를 승계할 수 없다 — 발송하지 않는다: {a08}")
+    })?;
+    build_inherited_fields(&want, list)
+}
+
+/// A08 응답 → 폼에 실을 `(uidAuthList, bigFileCnt, fwFile)`.
+///
+/// **개수가 어긋나면 보내지 않는다** — 응답이 요청보다 적으면 일부를 빠뜨린 채 발송하게 되고,
+/// 많으면 우리가 요청하지 않은 파일이 섞여 온 것이라 어느 쪽도 그대로 보낼 수 없다.
+fn build_inherited_fields(
+    plan: &AttachmentPlan,
+    list: &[Value],
+) -> Result<(String, String, String)> {
+    let want = &plan.0;
+    if list.len() != want.len() {
+        bail!(
+            "mail014A08이 첨부 {}개 중 {}개만 돌려줬다 — 일부를 빠뜨린 채 보낼 수 없어 발송하지 않는다",
+            want.len(),
+            list.len()
+        );
+    }
+    let items: Vec<Value> = want
+        .iter()
+        .enumerate()
+        .map(|(i, (orig, ext, sn))| build_inherited_item(list, i, orig, ext, sn))
+        .collect::<Result<_>>()?;
+    let fw_file = want
+        .iter()
+        .map(|(o, _, _)| o.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok((
+        Value::Array(items).to_string(),
+        want.len().to_string(),
+        fw_file,
+    ))
+}
+
+/// 승계할 첨부 `(originalFileName, fileExtsn, fileSn)`의 **검증된** 목록.
+/// `draft_attachment_plan`이 내고 `build_inherited_fields`가 요구한다 — 검증 **호출만 지우면
+/// 컴파일되지 않는다**(타입이 안 맞는다). `DraftExists`와 같은 보증 범위다: 같은 모듈에서 이
+/// 값을 손으로 조립해 우회하는 것까지는 막지 못한다.
+struct AttachmentPlan(Vec<(String, String, String)>);
+
+/// 초안 첨부 목록 → 승계 계획 `(originalFileName, fileExtsn, fileSn)`. **A08을 부르기 전에**
+/// 승계할 수 없는 모양을 전부 걸러낸다(부작용 없는 순서). 막는 이유는 `inherit_draft_attachments`.
+///
+/// ⚠️ **대용량 첨부 감지의 미확인 지점** — 우리 폼은 `bigFile`/`bigFilePeriod`를 빈 값으로
+/// 보내므로 초안이 그 값을 들고 있으면 거부한다. 그런데 **참조한 A01 캡처는 발췌라, 정상 초안의
+/// 응답에도 `bigFilePeriod`가 (값을 가진 채) 늘 실려 오는지는 확인하지 못했다.** 실려 온다면
+/// 첨부 있는 초안이 전부 거부된다 — fail-closed 방향이라 위험은 아니지만, **첫 실사용에서
+/// 확인할 지점**이다(거부가 잦으면 이 키 목록부터 볼 것).
+fn draft_attachment_plan(
+    init: &Value,
+    draft_muid: &str,
+    files: &[Value],
+) -> Result<AttachmentPlan> {
+    for key in ["bigFile", "bigFilePeriod"] {
+        if has_nonempty_key(init, key) {
+            return Err(InvalidInput(format!(
+                "초안(draft_muid={draft_muid})이 대용량 첨부({key})를 들고 있어 발송할 수 없다 \
+                 — 그 경로는 실측하지 않아 값을 빠뜨린 채 보내게 된다. 아마란스 웹에서 그 초안을 열어 발송할 것"
+            ))
+            .into());
+        }
+    }
+    let mut want: Vec<(String, String, String)> = Vec::with_capacity(files.len());
+    for f in files {
+        let orig = json_str(f.get("originalFileName"));
+        let ext = json_str(f.get("fileExtsn"));
+        let sn = json_str(f.get("fileSn"));
+        if orig.is_empty() || sn.is_empty() {
+            return Err(InvalidInput(format!(
+                "초안(draft_muid={draft_muid}) 첨부의 originalFileName/fileSn이 비어 있어 승계할 수 없다 \
+                 — 아마란스 웹에서 그 초안을 열어 발송할 것"
+            ))
+            .into());
+        }
+        if orig.contains(',') || ext.contains(',') {
+            return Err(InvalidInput(format!(
+                "첨부 파일명에 콤마가 있어 발송할 수 없다('{orig}') — 발송 폼의 fwFile이 콤마로 파일을 \
+                 구분해서 이름이 쪼개진다. 파일명을 바꿔 다시 첨부하거나 아마란스 웹에서 발송할 것"
+            ))
+            .into());
+        }
+        if want.iter().any(|(o, e, _)| o == &orig && e == &ext) {
+            return Err(InvalidInput(format!(
+                "같은 이름의 첨부가 둘 이상이라 발송할 수 없다('{orig}') — 첨부 재조회 응답을 이름으로 \
+                 짝짓는데(응답 순서 보장이 미실측이다) 이름이 겹치면 어느 것이 어느 것인지 확정할 수 없다. \
+                 아마란스 웹에서 그 초안을 열어 발송할 것"
+            ))
+            .into());
+        }
+        want.push((orig, ext, sn));
+    }
+    Ok(AttachmentPlan(want))
+}
+
+/// A08 응답 한 항목 → 발송 폼 `uidAuthList` 원소. 브라우저가 덧붙이는 것을 그대로 재현한다.
+fn build_inherited_item(
+    list: &[Value],
+    idx: usize,
+    orig: &str,
+    ext: &str,
+    sn: &str,
+) -> Result<Value> {
+    // ⚠️ **인덱스로 짝짓지 않는다** — A08 응답 순서가 요청 순서와 같은지는 실측하지 않았다.
+    let got = list
+        .iter()
+        .find(|x| json_str(x.get("originalFileName")) == orig && json_str(x.get("fileExtsn")) == ext)
+        .ok_or_else(|| {
+            anyhow!("mail014A08 응답에서 첨부 '{orig}'를 찾지 못했다 — 발송하지 않는다")
+        })?;
+    let mut o = got
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow!("mail014A08 응답 항목이 객체가 아니다: {got}"))?;
+    if json_str(got.get("fileId")).is_empty() {
+        bail!("mail014A08이 첨부 '{orig}'의 fileId를 주지 않았다 — 발송하지 않는다");
+    }
+    let size: i64 = json_str(got.get("fileSize")).parse().unwrap_or(0);
+    o.insert("fileSize".into(), json!(format!("{size} Bytes")));
+    // `authKeyMap`은 객체가 아니라 **JSON 문자열로 한 번 더 감싸** 보낸다(브라우저 실측).
+    let ak = got.get("authKeyMap").cloned().unwrap_or(Value::Null);
+    o.insert(
+        "authKeyMap".into(),
+        json!(if ak.is_null() {
+            String::new()
+        } else {
+            ak.to_string()
+        }),
+    );
+    // A08 응답의 `fileSn`은 빈 문자열로 온다 — 요청에 쓴 초안 토큰을 되살린다(브라우저 실측).
+    o.insert("fileSn".into(), json!(sn));
+    for (k, v) in [
+        ("link", "N"),
+        ("fileDeleteYN", "Y"),
+        ("serverFile", "Y"),
+        ("useDownView", "N"),
+    ] {
+        o.insert(k.into(), json!(v));
+    }
+    o.insert("fileClass".into(), json!(format!("icon_{ext}")));
+    o.insert("noConvertFileSize".into(), json!(size));
+    o.insert("id".into(), json!(idx));
+    Ok(Value::Object(o))
 }
 
 /// 로컬 파일들을 `mail014A06`(multipart `file[]`)로 업로드하고, 발송의 `uidAuthList`
@@ -607,6 +1234,18 @@ mod tests {
         assert_eq!(f["muid"], "0"); // 0 = 신규(답장/전달이 아님)
         assert_eq!(f["immediately"], "false");
         assert_eq!(f["expirationDate"], "Invalid date");
+
+        // ⚠️ **빈 값도 절대값이다.** 이름 집합만 보면 `ComposeForm::new`의 기본값이 조용히 바뀌어도
+        // 통과하고, 초안 발송 테스트도 "base와 draft의 차이"만 보므로 함께 바뀌면 못 잡는다.
+        // 신규 발송이 실제로 무엇을 보내는지를 여기서 못박는다(전부 실측값).
+        for k in [
+            "cc", "bcc", "bigFile", "bigFilePeriod", "fwFile", "urlList", "fileNameList",
+            "receipt_notific", "securitymailuse", "securitymailpass_enc_web", "importantmailuse",
+            "eachTrans", "domainSeq", "mimeHeader", "aiResultJSON",
+        ] {
+            assert_eq!(f[k], "", "신규 발송의 {k}는 빈 값이어야 한다");
+        }
+        assert_eq!(f["toBeDeleted"], "false");
     }
 
     /// 메일함 seq는 계정마다 달라 이름으로 찾는다 — 그 탐색이 중첩·타입혼용을 견디는지.
@@ -652,6 +1291,381 @@ mod tests {
     fn 도메인배열은_응답에_없으면_빈_배열로_보낸다() {
         let cf = ComposeForm::new(&json!({}), "to", "s", "", String::new(), "0".to_string());
         assert_eq!(fields_of(&cf)["insideDomainArray"], "[]");
+    }
+
+    /// 초안 발송은 **필드를 더하지 않는다** — 발송 폼 37개 그대로에서 값 3개만 바뀐다
+    /// (나머지 1개인 `fileDir`/`sessionKey`는 draft 모드 A01 응답을 `new`에 넘겨 반영된다).
+    /// 필드가 늘거나 다른 값이 함께 바뀌면 브라우저 재현이 깨진 것이다.
+    #[test]
+    fn 초안발송은_발송_폼에서_값_3개만_바꾼다() {
+        // ⚠️ **두 폼을 같은 클라이언트로 뽑는다** — `authToken`은 크레덴셜에서 파생돼 인스턴스마다
+        // 달라질 수 있어서, 클라이언트를 따로 만들면 "바뀐 필드"에 authToken이 섞여 들어온다.
+        let c = GwClient::new(None);
+        let fields = |cf: &ComposeForm| -> std::collections::HashMap<String, String> {
+            cf.fields(&c).into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+        };
+
+        let base = ComposeForm::new(&sample_init(), "to", "제목", "<p>본문</p>", String::new(), "0".into());
+        let base_names: Vec<&str> = base.fields(&c).iter().map(|(k, _)| *k).collect();
+        let b = fields(&base);
+
+        let header = json!({"mime-version": "1.0", "to": "", "subject": "=?UTF-8?B?...?="});
+        let draft = ComposeForm::new(&sample_init(), "to", "제목", "<p>본문</p>", String::new(), "0".into())
+            .with_draft("13542607", header.to_string());
+        let draft_names: Vec<&str> = draft.fields(&c).iter().map(|(k, _)| *k).collect();
+        let d = fields(&draft);
+
+        assert_eq!(base_names, draft_names, "초안 발송이 필드를 더하거나 뺐다");
+        assert_eq!(d["muid"], "13542607", "초안 muid가 실려야 한다");
+        assert_eq!(d["mail_kind"], "draft");
+        assert_eq!(d["mimeHeader"], header.to_string());
+
+        // 이 3개 말고는 한 글자도 달라지면 안 된다.
+        let changed: Vec<&str> = base_names
+            .iter()
+            .copied()
+            .filter(|k| b[*k] != d[*k])
+            .collect();
+        assert_eq!(changed, vec!["mail_kind", "muid", "mimeHeader"]);
+    }
+
+    /// 초안 열기는 신규 작성과 **같은 엔드포인트**에 draft 좌표를 싣는다. 캡처한 8개 키를 그대로 보내야
+    /// 한다 — 무엇이 필수인지 실측하지 않았으므로 줄이면 안 된다.
+    #[test]
+    fn 초안열기_body는_실측한_draft_좌표_8개를_싣는다() {
+        let b = draft_init_body("13542607");
+        let mut keys: Vec<&str> = b.as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["domainSeq", "fromFlag", "mailKind", "mailTo", "mbox", "readType", "uid", "viewFlag"]
+        );
+        assert_eq!(b["mailKind"], "draft");
+        assert_eq!(b["mbox"], DRAFTS, "임시보관함은 이름으로 지정한다");
+        assert_eq!(b["uid"], "13542607");
+        assert_eq!(b["fromFlag"], true, "bool 이다 — 문자열로 보내지 말 것");
+
+        // 신규 작성용 compose_init 과 섞이면 안 된다(그쪽은 mailKind:"me" 하나뿐이다).
+        assert_ne!(b["mailKind"], "me");
+    }
+
+    /// 초안 열기(draft 모드 `mail014A01`) 응답의 실측 모양. 발송 판정에 쓰이는 자리만 담았다.
+    fn sample_draft_init() -> Value {
+        json!({
+            "email": "me@example.com",
+            "empSeq": "12345",
+            "filedir": "/dir/2026",
+            "sessionKey": "SK-D",
+            "mailkey": "1785993246615_x.eml",
+            "paramTo": "hong@example.com",
+            "mailInfo": { "mime": {
+                "header": { "mime-version": "1.0", "to": "=?UTF-8?B?7ZmN?= &lt;hong@example.com&gt;",
+                            "cc": "", "subject": "=?UTF-8?B?...?=" },
+                "body": { "html": "<p>본문</p>", "plain": "본문" },
+                "fileList": []
+            }},
+            "decodeMime": { "subject": "제목", "to": "홍길동 &lt;hong@example.com&gt;" }
+        })
+    }
+
+    /// 실재 확인 — 목록에 없으면 발송하지 않는다. 반환값이 `plan_draft_send`의 입력이라
+    /// **이 확인을 건너뛰면 컴파일되지 않는다**(그게 이 타입의 목적이다).
+    #[test]
+    fn 실재하지_않는_초안은_발송_계획을_세울_수_없다() {
+        let drafts = json!({ "Records": [{ "muid": "13542607" }] });
+        assert!(ensure_draft_exists(&drafts, "13542607").is_ok());
+        assert!(ensure_draft_exists(&drafts, "99999999").is_err());
+        assert!(ensure_draft_exists(&json!({}), "13542607").is_err()); // 목록을 못 읽으면 미검증
+    }
+
+    /// **발송 판정 전체**의 회귀 기준선. 가드를 지워도 순수 헬퍼 테스트는 통과할 수 있으므로,
+    /// 실제로 판정을 조립하는 이 함수를 캡처 JSON으로 직접 검사한다.
+    #[test]
+    fn 발송_계획은_보낼_것을_확정하거나_이유를_대고_거부한다() {
+        let plan = plan_draft_send(DraftExists, &sample_draft_init(), "1", "").unwrap();
+        assert_eq!(plan.to, "홍길동 <hong@example.com>");
+        assert_eq!(plan.subject, "제목");
+        assert_eq!(plan.html, "<p>본문</p>");
+        assert!(plan.files.is_empty());
+        assert!(plan.mime_header.contains("mime-version"), "mimeHeader는 헤더 객체 JSON이다");
+
+        // to 인자는 초안 수신자를 덮어쓴다.
+        let over = plan_draft_send(DraftExists, &sample_draft_init(), "1", " x@y.z ").unwrap();
+        assert_eq!(over.to, "x@y.z");
+
+        // 첨부가 있으면 계획에 그대로 실린다(승계는 호출부가 한다).
+        let mut with_att = sample_draft_init();
+        with_att["mailInfo"]["mime"]["fileList"] =
+            json!([{ "originalFileName": "a", "fileExtsn": "txt", "fileSn": "SN" }]);
+        assert_eq!(plan_draft_send(DraftExists, &with_att, "1", "").unwrap().files.len(), 1);
+
+        // ⛔ 아래는 전부 **보내면 안 되는** 초안이다. 하나라도 통과하면 잘못된 메일이 나간다.
+        let mut no_files = sample_draft_init();
+        no_files["mailInfo"]["mime"].as_object_mut().unwrap().remove("fileList");
+        assert!(plan_draft_send(DraftExists, &no_files, "1", "").is_err(), "첨부 판정 불가");
+
+        let mut no_body = sample_draft_init();
+        no_body["mailInfo"]["mime"]["body"] = json!({ "plain": "본문" });
+        assert!(plan_draft_send(DraftExists, &no_body, "1", "").is_err(), "빈 본문");
+
+        let mut blank_body = sample_draft_init();
+        blank_body["mailInfo"]["mime"]["body"]["html"] = json!("   ");
+        assert!(plan_draft_send(DraftExists, &blank_body, "1", "").is_err(), "공백뿐인 본문");
+
+        let mut no_subject = sample_draft_init();
+        no_subject["decodeMime"]["subject"] = json!("");
+        assert!(plan_draft_send(DraftExists, &no_subject, "1", "").is_err(), "빈 제목");
+
+        let mut with_cc = sample_draft_init();
+        with_cc["mailInfo"]["mime"]["header"]["cc"] = json!("누군가 <x@y.z>");
+        assert!(plan_draft_send(DraftExists, &with_cc, "1", "").is_err(), "참조 누락");
+
+        let mut no_cc_key = sample_draft_init();
+        no_cc_key["mailInfo"]["mime"]["header"].as_object_mut().unwrap().remove("cc");
+        assert!(plan_draft_send(DraftExists, &no_cc_key, "1", "").is_err(), "참조 판정 불가");
+
+        let mut no_to = sample_draft_init();
+        no_to["decodeMime"].as_object_mut().unwrap().remove("to");
+        no_to["paramTo"] = json!("(Unknown)");
+        assert!(plan_draft_send(DraftExists, &no_to, "1", "").is_err(), "수신자 없음");
+    }
+
+    /// A08 응답이 요청과 개수가 다르면 **일부를 빠뜨린 채 보내게 되므로** 중단한다.
+    #[test]
+    fn 승계는_a08_응답_개수가_어긋나면_중단한다() {
+        let want = AttachmentPlan(vec![
+            ("a".to_string(), "txt".to_string(), "SN-A".to_string()),
+            ("b".to_string(), "txt".to_string(), "SN-B".to_string()),
+        ]);
+        let one = vec![json!({ "originalFileName": "a", "fileExtsn": "txt",
+                               "fileSize": "66", "fileId": "FID-A" })];
+        assert!(build_inherited_fields(&want, &one).is_err(), "2개 요청에 1개 응답");
+
+        let two = vec![
+            json!({ "originalFileName": "a", "fileExtsn": "txt", "fileSize": "66", "fileId": "FID-A" }),
+            json!({ "originalFileName": "b", "fileExtsn": "txt", "fileSize": "84", "fileId": "FID-B" }),
+        ];
+        let (uid, cnt, fw) = build_inherited_fields(&want, &two).unwrap();
+        assert_eq!(cnt, "2");
+        assert_eq!(fw, "a,b", "fwFile은 파일명을 콤마로 잇는다");
+        assert_eq!(uid.matches("\"fileId\"").count(), 2);
+
+        // ⚠️ **요청보다 많이 와도 막는다** — 요청한 이름이 전부 들어 있어도 우리가 부탁하지 않은
+        // 파일이 섞여 온 것이라 그대로 보낼 수 없다(이름 짝짓기만으로는 이 경우를 못 잡는다).
+        let mut three = two.clone();
+        three.push(json!({ "originalFileName": "c", "fileExtsn": "txt",
+                           "fileSize": "10", "fileId": "FID-C" }));
+        assert!(build_inherited_fields(&want, &three).is_err(), "3개 응답에 2개 요청");
+    }
+
+    /// 참조 없는 초안의 실측 모양 — `mailInfo.mime.header.cc`가 **빈 문자열로 실려 온다**
+    /// (그래서 "읽을 수 있다"). `bcc` 키는 어디에도 없다.
+    fn init_without_cc() -> Value {
+        json!({ "mailInfo": { "mime": { "header": { "to": "", "cc": "", "subject": "=?UTF-8?B?...?=" } } } })
+    }
+
+    /// 참조가 걸린 초안은 **보내지 않는다** — 폼이 `cc`/`bcc`를 빈 값으로 보내 조용히 빠지기 때문이다.
+    #[test]
+    fn 참조가_걸린_초안은_발송을_거부한다() {
+        // 참조 없는 초안은 통과한다(cc 키가 빈 값으로 읽힌다).
+        assert!(refuse_if_carbon_copy(&init_without_cc(), "1").is_ok());
+
+        // cc가 실려 오는 세 자리 어디에서든 값이 있으면 거부.
+        for init in [
+            json!({ "mailInfo": { "mime": { "header": { "cc": "누군가 <x@y.z>" } } } }),
+            json!({ "mailInfo": { "mime": { "header": { "cc": "" } } }, "decodeMime": { "cc": "누군가 &lt;x@y.z&gt;" } }),
+            json!({ "mailInfo": { "mime": { "header": { "cc": "" } } }, "paramCc": "x@y.z" }),
+        ] {
+            assert!(refuse_if_carbon_copy(&init, "1").is_err(), "cc가 있으면 막아야 한다: {init}");
+        }
+
+        // bcc도 같은 기준이다 — 실려 오기만 하면 막는다.
+        for init in [
+            json!({ "mailInfo": { "mime": { "header": { "cc": "", "bcc": "x@y.z" } } } }),
+            json!({ "mailInfo": { "mime": { "header": { "cc": "" } } }, "paramBcc": "x@y.z" }),
+        ] {
+            assert!(refuse_if_carbon_copy(&init, "1").is_err(), "bcc가 있으면 막아야 한다: {init}");
+        }
+
+        // 참조를 **어디에서도 읽지 못하면** "참조 없음"이 아니라 판정 불가 → 중단.
+        assert!(refuse_if_carbon_copy(&json!({}), "1").is_err());
+        assert!(
+            refuse_if_carbon_copy(&json!({ "mailInfo": { "mime": { "header": { "to": "" } } } }), "1")
+                .is_err()
+        );
+    }
+
+    /// 발송 폼은 `cc`/`bcc`를 **항상 빈 값으로** 보낸다 — 위 거부가 필요한 이유 그 자체라
+    /// 여기서 함께 못박는다(누가 폼에 cc를 채우면 그 거부는 과잉 차단이 된다).
+    #[test]
+    fn 발송_폼은_참조를_싣지_않는다() {
+        let cf = ComposeForm::new(&sample_init(), "to", "제목", "본문", String::new(), "0".into())
+            .with_draft("13542607", "{}".into());
+        let f = fields_of(&cf);
+        assert_eq!(f["cc"], "");
+        assert_eq!(f["bcc"], "");
+    }
+
+    /// 수신자 복원 — 브라우저가 싣는 값과 같은 형태를 내야 하고, 여럿이어도 통째로 옮겨야 한다.
+    #[test]
+    fn 초안_수신자는_엔티티만_풀고_주소를_보존한다() {
+        let init = json!({
+            "mailInfo": { "mime": { "header": { "to": "=?UTF-8?B?7J207J6s7ZWZ?= &lt;a@b.c&gt;" } } },
+            "decodeMime": { "to": "홍길동 &lt;a@b.c&gt;" },
+            "paramTo": "a@b.c"
+        });
+        assert_eq!(
+            draft_recipient(&init, "1").unwrap(),
+            "홍길동 <a@b.c>",
+            "MIME 인코딩된 header.to를 쓰면 안 된다"
+        );
+
+        // ⛔ **본문 렌더러(html_to_text)를 쓰면 안 되는 이유** — 서버가 이미 언이스케이프된 값을
+        // 주면 그쪽은 `<a@b.c>`를 태그로 보고 통째로 버려 `"홍길동 "`만 남는다(공백이라 빈 값
+        // 검사도 통과한다). 여기서 그 입력을 못박는다.
+        let plain = json!({ "decodeMime": { "to": "홍길동 <a@b.c>" } });
+        assert_eq!(draft_recipient(&plain, "1").unwrap(), "홍길동 <a@b.c>");
+
+        // 로컬파트가 블록태그로 시작하는 주소(`<p.kim@x.co>`)는 html_to_text에서 **개행으로
+        // 치환**된다 — 그 손실도 일어나면 안 된다.
+        for addr in ["p.kim@x.co", "br.lee@x.co", "div.han@x.co", "td.oh@x.co", "h1.no@x.co"] {
+            let v = json!({ "decodeMime": { "to": format!("아무개 <{addr}>") } });
+            assert_eq!(draft_recipient(&v, "1").unwrap(), format!("아무개 <{addr}>"));
+        }
+
+        // 여러 명이어도 **문자열을 통째로** 옮긴다 — 쪼개거나 다시 잇지 않는다(구분자 무관).
+        let many = json!({ "decodeMime": { "to": "가 &lt;a@x.y&gt;, 나 &lt;b@x.y&gt;" } });
+        assert_eq!(draft_recipient(&many, "1").unwrap(), "가 <a@x.y>, 나 <b@x.y>");
+
+        // decodeMime.to가 비면 paramTo(주소만)로 떨어진다.
+        assert_eq!(draft_recipient(&json!({ "paramTo": "a@b.c" }), "1").unwrap(), "a@b.c");
+        // ⚠️ 수신자 없는 초안의 `(Unknown)`은 주소가 아니다 — 그대로 실어 보내면 안 된다.
+        assert_eq!(draft_recipient(&json!({ "paramTo": "(Unknown)" }), "1").unwrap(), "");
+        assert_eq!(draft_recipient(&json!({}), "1").unwrap(), "");
+
+        // 값이 있는데 주소로 보이지 않으면(변환이 주소를 먹었을 때) 조용히 통과시키지 않는다.
+        assert!(draft_recipient(&json!({ "decodeMime": { "to": "홍길동 " } }), "1").is_err());
+        assert!(draft_recipient(&json!({ "paramTo": "홍길동" }), "1").is_err());
+    }
+
+    /// 엔티티 언이스케이프는 `&amp;`를 마지막에 푼다 — `&amp;lt;`가 `<`로 접히면 안 된다.
+    #[test]
+    fn 엔티티_언이스케이프는_태그를_지우지_않는다() {
+        assert_eq!(unescape_entities("가 &lt;a@b.c&gt;"), "가 <a@b.c>");
+        assert_eq!(unescape_entities("<b>가</b> <a@b.c>"), "<b>가</b> <a@b.c>");
+        assert_eq!(unescape_entities("a&amp;lt;b"), "a&lt;b");
+    }
+
+    fn draft_file(orig: &str, ext: &str, sn: &str) -> Value {
+        json!({ "originalFileName": orig, "fileSize": "66", "fileExtsn": ext, "fileSn": sn })
+    }
+
+    /// 첨부 승계가 **A08을 부르기 전에** 막아야 하는 것들. 전부 "조용히 잘못 나가는" 경우다.
+    #[test]
+    fn 첨부_승계는_승계할_수_없는_모양을_먼저_막는다() {
+        // 정상: 이름이 다르면 통과하고 (이름, 확장자, fileSn) 그대로 계획이 선다.
+        let ok = draft_attachment_plan(
+            &json!({}),
+            "1",
+            &[draft_file("a", "txt", "SN-A"), draft_file("b", "txt", "SN-B")],
+        )
+        .expect("정상 첨부는 통과해야 한다");
+        assert_eq!(
+            ok.0,
+            vec![
+                ("a".into(), "txt".into(), "SN-A".into()),
+                ("b".into(), "txt".into(), "SN-B".into())
+            ]
+        );
+
+        // 파일명에 콤마 — fwFile이 콤마 구분이라 이름이 쪼개진다.
+        assert!(draft_attachment_plan(&json!({}), "1", &[draft_file("a,b", "txt", "SN")]).is_err());
+        // 동명 파일 — A08 응답을 이름으로 짝짓는데 짝을 확정할 수 없다.
+        assert!(
+            draft_attachment_plan(&json!({}), "1", &[draft_file("a", "txt", "S1"), draft_file("a", "txt", "S2")])
+                .is_err()
+        );
+        // 확장자만 다르면 동명이 아니다(짝지을 수 있다).
+        assert!(
+            draft_attachment_plan(&json!({}), "1", &[draft_file("a", "txt", "S1"), draft_file("a", "pdf", "S2")])
+                .is_ok()
+        );
+        // 대용량 첨부(bigFile)를 들고 있으면 승계 불가 — 우리 폼은 그 값을 빈 값으로 보낸다.
+        for key in ["bigFile", "bigFilePeriod"] {
+            let init = json!({ "mailInfo": { "mime": { key: "http://x/y" } } });
+            assert!(
+                draft_attachment_plan(&init, "1", &[draft_file("a", "txt", "SN")]).is_err(),
+                "{key}가 있으면 막아야 한다"
+            );
+        }
+        // fileSn·이름이 비면 승계 불가.
+        assert!(draft_attachment_plan(&json!({}), "1", &[draft_file("a", "txt", "")]).is_err());
+        assert!(draft_attachment_plan(&json!({}), "1", &[draft_file("", "txt", "SN")]).is_err());
+    }
+
+    /// 대용량 첨부 감지 — 우리 폼은 `bigFile`/`bigFilePeriod`를 빈 값으로 보내므로,
+    /// 초안이 값을 들고 있으면 그 부분이 빠진 채 나간다.
+    #[test]
+    fn 대용량_첨부_키는_중첩돼_있어도_찾는다() {
+        let init = json!({ "mailInfo": { "mime": { "bigFile": "http://x/y" } } });
+        assert!(has_nonempty_key(&init, "bigFile"));
+        // 빈 값·빈 배열·null은 "없음"이다(정상 초안이 이 값들을 빈 채로 들고 온다).
+        assert!(!has_nonempty_key(&json!({ "bigFile": "" }), "bigFile"));
+        assert!(!has_nonempty_key(&json!({ "a": { "bigFile": [] } }), "bigFile"));
+        assert!(!has_nonempty_key(&json!({ "bigFile": null }), "bigFile"));
+        // 키 이름은 **정확히** 일치해야 한다 — bigFileDay(정상 폼 값)에 걸리면 안 된다.
+        assert!(!has_nonempty_key(&json!({ "bigFileDay": "30" }), "bigFile"));
+    }
+
+    /// 승계 항목은 **A08 응답 객체를 그대로 두고** 브라우저가 덧붙이는 것만 더한다(실측).
+    /// 신규 업로드(`upload_files`)가 만드는 항목과 키 구성이 달라 공유하지 않는다.
+    #[test]
+    fn 승계_항목은_a08_응답에_실측_키를_덧붙인다() {
+        let list = vec![
+            json!({ "originalFileName": "b", "fileExtsn": "txt", "fileSize": "84",
+                    "fileId": "FID-B", "fileSn": "", "encoding": "base64", "offset": "1940",
+                    "muid": "13544740", "authKeyMap": { "muid": "13544740" } }),
+            json!({ "originalFileName": "a", "fileExtsn": "txt", "fileSize": "66",
+                    "fileId": "FID-A", "fileSn": "", "encoding": "base64", "offset": "0",
+                    "muid": "13544740", "authKeyMap": { "muid": "13544740" } }),
+        ];
+        // 응답이 요청과 **다른 순서**로 와도 이름으로 짝지어야 한다(순서 보장이 미실측이다).
+        let it = build_inherited_item(&list, 0, "a", "txt", "SN-A").unwrap();
+        assert_eq!(it["fileId"], "FID-A");
+        assert_eq!(it["encoding"], "base64", "A08 응답 키는 그대로 남아야 한다");
+        assert_eq!(it["fileSize"], "66 Bytes", "'<n> Bytes' 문자열로 바꾼다");
+        assert_eq!(it["noConvertFileSize"], 66, "정수로도 함께 싣는다");
+        assert_eq!(it["fileSn"], "SN-A", "A08의 빈 fileSn 대신 초안 토큰을 되살린다");
+        assert_eq!(
+            it["authKeyMap"], r#"{"muid":"13544740"}"#,
+            "authKeyMap은 객체가 아니라 JSON 문자열로 한 번 더 감싼다"
+        );
+        assert_eq!(it["fileClass"], "icon_txt");
+        assert_eq!(it["link"], "N");
+        assert_eq!(it["fileDeleteYN"], "Y");
+        assert_eq!(it["serverFile"], "Y");
+        assert_eq!(it["useDownView"], "N");
+        assert_eq!(it["id"], 0);
+
+        // 이름이 없거나 fileId가 비면 보내지 않는다.
+        assert!(build_inherited_item(&list, 0, "없는파일", "txt", "SN").is_err());
+        let no_id = vec![json!({ "originalFileName": "a", "fileExtsn": "txt", "fileId": "" })];
+        assert!(build_inherited_item(&no_id, 0, "a", "txt", "SN").is_err());
+    }
+
+    /// 첨부를 승계하면 `fwFile`이 **콤마로 이어진 파일명 목록**이 된다(신규 발송은 항상 빈 값).
+    #[test]
+    fn 첨부_승계는_fw_file에_파일명을_콤마로_잇는다() {
+        let base = ComposeForm::new(&sample_init(), "to", "제목", "본문", String::new(), "0".into());
+        assert_eq!(fields_of(&base)["fwFile"], "", "신규 발송은 빈 값이다");
+
+        let cf = ComposeForm::new(&sample_init(), "to", "제목", "본문", "[]".into(), "2".into())
+            .with_draft("13544740", "{}".into())
+            .with_fw_file("creed-test-a,creed-test-b".into());
+        let f = fields_of(&cf);
+        assert_eq!(f["fwFile"], "creed-test-a,creed-test-b");
+        assert_eq!(f["bigFileCnt"], "2");
+        assert_eq!(f["uidAuthList"], "[]");
     }
 
     #[test]

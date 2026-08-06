@@ -40,6 +40,19 @@ pub struct SaveMailDraftArgs {
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
+pub struct SendMailFromDraftArgs {
+    /// 발송할 임시보관 메일의 muid. save_mail_draft의 `draft_muid` 또는 list_mail_drafts 결과의 muid.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
+    pub draft_muid: String,
+    /// 받는사람(선택, 표시형 "이름 <email>" 또는 email). 미지정 시 **초안에 저장된 수신자**로 보낸다.
+    /// 초안에 수신자가 없으면 에러가 나므로 그때 지정할 것.
+    #[serde(default)]
+    pub to: Option<String>,
+}
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
 pub struct DeleteMailArgs {
     /// 삭제할 메일 muid 목록(콤마 구분). list_mail_inbox의 muid 사용.
     #[serde(deserialize_with = "super::flex_string")]

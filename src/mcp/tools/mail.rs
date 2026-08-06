@@ -37,7 +37,7 @@ impl Amaranth {
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
-    #[tool(description = "임시보관함(DRAFTS) 최근 20통을 조회한다 — save_mail_draft로 저장한 초안을 발송 전에 사용자에게 확인받는 경로다. ⚠️ 응답은 서버 원본 봉투 그대로다 — 메일 배열은 `Records`(list_mail_inbox와 동일), 각 항목의 `muid`가 read_mail/delete_mail의 키다. 메일함 번호는 계정마다 달라 이름(DRAFTS)으로 해석한다. ⚠️ 전자결재 임시보관함과는 무관하다(그쪽은 list_approvals(box_name=\"draft\")).")]
+    #[tool(description = "임시보관함(DRAFTS) 최근 20통을 조회한다 — save_mail_draft로 저장한 초안을 발송 전에 사용자에게 확인받는 경로다. 확인되면 그 항목의 muid를 send_mail_from_draft(draft_muid)에 넘겨 초안 그대로 발송한다. ⚠️ 응답은 서버 원본 봉투 그대로다 — 메일 배열은 `Records`(list_mail_inbox와 동일), 각 항목의 `muid`가 read_mail/delete_mail의 키다. 메일함 번호는 계정마다 달라 이름(DRAFTS)으로 해석한다. ⚠️ 전자결재 임시보관함과는 무관하다(그쪽은 list_approvals(box_name=\"draft\")).")]
     async fn list_mail_drafts(&self) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
         let data = modules::mail::list_drafts(&self.client, 1, 20)
@@ -47,7 +47,7 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "메일을 발송한다(2단계: 작성폼 초기화→발송). 받는사람 미지정 시 본인에게. attachments에 로컬 파일 경로를 주면 첨부 발송. ⚠️ 발송은 되돌릴 수 없다(수신자에게 나가면 회수 불가) — 곧바로 보내지 말고, 먼저 save_mail_draft로 보낼 형상을 임시보관함에 만들고 list_mail_drafts로 사용자에게 확인을 요청한 뒤, 확인받고 나서 이 도구로 발송하는 흐름을 권장한다(발송 후 남은 초안은 delete_mail로 정리). ⚠️ 이 도구는 초안을 꺼내 보내는 것이 아니라 새로 조립해 보낸다 — 확인받은 초안과 to/subject/html을 글자 그대로 같게 넣어야 사용자가 승인한 그대로 나간다. 사용자가 즉시 발송을 명시적으로 지시했다면 그때는 곧바로 이 도구를 쓴다."
+        description = "메일을 **새로 조립해 발송한다**(2단계: 작성폼 초기화→발송). 받는사람 미지정 시 본인에게. attachments에 로컬 파일 경로를 주면 첨부 발송. ⚠️ 발송은 되돌릴 수 없다(수신자에게 나가면 회수 불가) — 곧바로 보내지 말고, 먼저 save_mail_draft로 보낼 형상을 임시보관함에 만들고 list_mail_drafts로 사용자에게 확인을 요청한 뒤, 확인받고 나서는 **이 도구가 아니라 send_mail_from_draft(draft_muid)로 그 초안을 그대로 발송한다**(확인받은 형상과 실제 발송물이 어긋날 여지가 없고, 원본 초안 정리도 그 도구가 한다). 이 도구는 **초안을 거치지 않는 직접 발송용**이다 — 사용자가 즉시 발송을 명시적으로 지시했거나, 본인 앞 메모·자동화처럼 사람 확인이 필요 없는 발송에 쓴다."
     )]
     async fn send_mail(
         &self,
@@ -69,7 +69,7 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "메일을 임시보관함(DRAFTS)에 저장한다 — **발송하지 않는다**(수신자에게 아무것도 가지 않는다). 발송 전 사람 확인을 받는 표준 경로라 send_mail보다 이 도구를 먼저 쓴다 — 초안을 만들고 list_mail_drafts로 사용자에게 확인받은 뒤, 확인되면 send_mail로 발송(남은 초안은 delete_mail로 정리)하거나 사용자가 아마란스 웹에서 직접 보낸다. 다만 사용자가 즉시 발송을 명시적으로 지시했다면 초안을 거치지 말고 곧바로 send_mail을 쓴다. 받는사람 미지정 시 본인. attachments에 로컬 파일 경로를 주면 첨부까지 붙여 저장. 반환 draft_muid = 저장된 임시보관 메일의 muid. ⚠️ 전자결재 임시보관함과는 무관하다(그쪽은 list_approvals(box_name=\"draft\"))."
+        description = "메일을 임시보관함(DRAFTS)에 저장한다 — **발송하지 않는다**(수신자에게 아무것도 가지 않는다). 발송 전 사람 확인을 받는 표준 경로라 send_mail보다 이 도구를 먼저 쓴다 — 초안을 만들고 list_mail_drafts로 사용자에게 확인받은 뒤, 확인되면 **send_mail_from_draft(draft_muid)로 그 초안을 그대로 발송**하거나 사용자가 아마란스 웹에서 직접 보낸다. 다만 사용자가 즉시 발송을 명시적으로 지시했다면 초안을 거치지 말고 곧바로 send_mail을 쓴다. 받는사람 미지정 시 본인. attachments에 로컬 파일 경로를 주면 첨부까지 붙여 저장. 반환 draft_muid = 저장된 임시보관 메일의 muid. ⚠️ 전자결재 임시보관함과는 무관하다(그쪽은 list_approvals(box_name=\"draft\"))."
     )]
     async fn save_mail_draft(
         &self,
@@ -95,6 +95,23 @@ impl Amaranth {
             "note": "임시보관함에 저장만 됨(발송 아님). 목록 확인은 list_mail_drafts"
         });
         Ok(CallToolResult::success(vec![ContentBlock::text(msg.to_string())]))
+    }
+
+    #[tool(
+        description = "임시보관함(DRAFTS)에 저장된 초안을 **실제로 발송한다** — ⚠️ 되돌릴 수 없다. save_mail_draft로 만든 초안을 사람이 확인한 뒤 '이제 보내라'고 지시할 때 쓰는 도구다. 제목·본문·수신자·첨부는 **초안에 저장된 것을 그대로** 쓴다(to 인자를 주면 수신자만 덮어쓴다). 발송 성공 후 임시보관함 원본을 삭제한다 — ⚠️ 이 삭제는 휴지통을 거치지 않는 것으로 보인다(발송 직후 휴지통 건수 불변 관측). 삭제가 실패하면 발송은 성공으로 보고하되 `draft_deleted:false`가 실리니, 그때는 사람이 임시보관함에서 지워야 같은 메일을 또 보내지 않는다. 제약 — ① **초안을 못 찾으면 보내지 않는다**: 실재 확인이 임시보관함 **최근 20건**만 훑으므로 초안이 21건 이상 쌓인 계정에서는 오래된 초안을 이 도구로 못 보낸다(웹에서 발송하거나 초안을 정리할 것). ② 본문·제목·첨부목록 중 하나라도 초안 응답에서 읽어내지 못하면 **보내지 않는다**(내용이 빈 메일·첨부 누락 방지). ③ 첨부는 승계하지만 **파일명에 콤마가 있거나, 같은 이름의 첨부가 둘 이상이거나, 대용량 첨부(bigFile)면 거부**한다(그 경로는 미실측 — 웹에서 발송할 것). ④ **참조(cc/bcc)가 응답에 보이면 거부**한다 — 참조 승계 경로가 없어 그대로 보내면 참조 수신자가 조용히 빠지기 때문이다. ⚠️ 단 **bcc는 서버가 응답에 싣지 않는 형태면 감지할 수 없다**(관측된 응답에 bcc 키가 없었다) — bcc가 중요한 초안은 이 도구로 보내지 말고 아마란스 웹에서 발송할 것."
+    )]
+    async fn send_mail_from_draft(
+        &self,
+        Parameters(a): Parameters<SendMailFromDraftArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        // 여기서는 `recipient_or_self`를 쓰지 않는다 — 미지정의 뜻이 "본인에게"가 아니라
+        // "초안에 저장된 수신자 그대로"이기 때문이다(모듈이 그 판단을 한다).
+        let to = a.to.as_deref().unwrap_or("");
+        let data = modules::mail::send_mail_from_draft(&self.client, &a.draft_muid, to)
+            .await
+            .map_err(map_domain_err_ctx("초안 발송 실패"))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
     #[tool(description = "메일을 삭제한다(휴지통 이동). uids=콤마구분 muid. muid 출처는 list_mail_inbox, 또는 임시보관함 정리라면 list_mail_drafts(= save_mail_draft가 낸 draft_muid).")]
