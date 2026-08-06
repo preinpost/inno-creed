@@ -5,7 +5,7 @@
 
 use rmcp::{handler::server::wrapper::Parameters, model::{CallToolResult, ContentBlock}, tool, tool_router, ErrorData};
 
-use crate::mcp::Amaranth;
+use crate::mcp::{map_domain_err, Amaranth};
 use crate::mcp::args::approval::*;
 use crate::modules;
 
@@ -21,7 +21,7 @@ impl Amaranth {
         self.ensure_session().await?;
         let data = modules::approval::pending_digest(&self.client, a.page_size.unwrap_or(20))
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -35,7 +35,7 @@ impl Amaranth {
         let data =
             modules::approval::list_approvals(&self.client, &a.box_name, a.page, a.page_size, &a.from, &a.to)
                 .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+                .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -48,7 +48,7 @@ impl Amaranth {
     ) -> Result<CallToolResult, ErrorData> {
         let data = modules::approval::read_approval(&self.client, &a.doc_id, &a.form_id)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -57,7 +57,7 @@ impl Amaranth {
         self.ensure_session().await?;
         let data = modules::approval::approval_counts(&self.client)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 }

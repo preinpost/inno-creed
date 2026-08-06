@@ -5,7 +5,7 @@
 
 use rmcp::{handler::server::wrapper::Parameters, model::{CallToolResult, ContentBlock}, tool, tool_router, ErrorData};
 
-use crate::mcp::Amaranth;
+use crate::mcp::{map_domain_err, map_domain_err_ctx, Amaranth};
 use crate::mcp::args::approval::*;
 use crate::modules;
 
@@ -21,7 +21,7 @@ impl Amaranth {
         self.ensure_session().await?;
         let data = modules::approval_line_suggest::suggest_line(&self.client, &a.doc_type, &a.trip)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -31,7 +31,7 @@ impl Amaranth {
     async fn list_approval_lines(&self) -> Result<CallToolResult, ErrorData> {
         let data = modules::approval_line::list_lines(&self.client)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -44,7 +44,7 @@ impl Amaranth {
     ) -> Result<CallToolResult, ErrorData> {
         let data = modules::approval_line::read_line(&self.client, &a.line_id)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -66,7 +66,7 @@ impl Amaranth {
             detail,
         )
         .await
-        .map_err(|e| ErrorData::internal_error(format!("결재라인 저장 실패: {e}"), None))?;
+        .map_err(map_domain_err_ctx("결재라인 저장 실패"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -81,7 +81,7 @@ impl Amaranth {
             .map_err(|e| ErrorData::invalid_params(format!("row_json 파싱 실패: {e}"), None))?;
         let data = modules::approval_line::delete_line(&self.client, row)
             .await
-            .map_err(|e| ErrorData::internal_error(format!("결재라인 삭제 실패: {e}"), None))?;
+            .map_err(map_domain_err_ctx("결재라인 삭제 실패"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 }

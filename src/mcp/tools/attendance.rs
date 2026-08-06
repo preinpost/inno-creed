@@ -5,7 +5,7 @@
 
 use rmcp::{handler::server::wrapper::Parameters, model::{CallToolResult, ContentBlock}, tool, tool_router, ErrorData};
 
-use crate::mcp::Amaranth;
+use crate::mcp::{map_domain_err, map_domain_err_ctx, Amaranth};
 use crate::mcp::args::attendance::*;
 use crate::modules;
 
@@ -27,7 +27,7 @@ impl Amaranth {
         };
         let data = modules::attendance::work_time_status(&self.client, &start, &end)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -46,7 +46,7 @@ impl Amaranth {
         };
         let data = modules::attendance::today(&self.client, &wd)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -57,7 +57,7 @@ impl Amaranth {
         self.ensure_session().await?;
         let data = modules::attendance::punch_and_verify(&self.client, "1")
             .await
-            .map_err(|e| ErrorData::internal_error(format!("출근 기록 실패: {e}"), None))?;
+            .map_err(map_domain_err_ctx("출근 기록 실패"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -68,7 +68,7 @@ impl Amaranth {
         self.ensure_session().await?;
         let data = modules::attendance::punch_and_verify(&self.client, "4")
             .await
-            .map_err(|e| ErrorData::internal_error(format!("퇴근 기록 실패: {e}"), None))?;
+            .map_err(map_domain_err_ctx("퇴근 기록 실패"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 }

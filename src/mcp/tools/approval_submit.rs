@@ -5,7 +5,7 @@
 
 use rmcp::{handler::server::wrapper::Parameters, model::{CallToolResult, ContentBlock}, tool, tool_router, ErrorData};
 
-use crate::mcp::Amaranth;
+use crate::mcp::{map_domain_err_ctx, Amaranth};
 use crate::mcp::args::approval::*;
 use crate::modules;
 
@@ -30,7 +30,7 @@ impl Amaranth {
             &a.numbering_id,
         )
         .await
-        .map_err(|e| ErrorData::internal_error(format!("상신 실패: {e}"), None))?;
+        .map_err(map_domain_err_ctx("상신 실패"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -49,7 +49,7 @@ impl Amaranth {
             a.purge,
         )
         .await
-        .map_err(|e| ErrorData::internal_error(format!("상신취소 실패: {e}"), None))?;
+        .map_err(map_domain_err_ctx("상신취소 실패"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -63,7 +63,7 @@ impl Amaranth {
         self.ensure_session().await?;
         let data = modules::approval_submit::delete_temp_approval(&self.client, a.doc_ids.trim())
             .await
-            .map_err(|e| ErrorData::internal_error(format!("임시보관 삭제 실패: {e}"), None))?;
+            .map_err(map_domain_err_ctx("임시보관 삭제 실패"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 }

@@ -16,7 +16,7 @@ impl Amaranth {
         self.ensure_session().await?;
         let data = modules::calendar::list_calendars(&self.client)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -35,7 +35,7 @@ impl Amaranth {
             .map_err(map_domain_err)?;
         let data = modules::calendar::list_events(&self.client, &a.start, &a.end, cal_list)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         let out = modules::calendar::shape_events(&data);
         Ok(CallToolResult::success(vec![ContentBlock::text(out.to_string())]))
     }

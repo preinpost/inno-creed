@@ -5,7 +5,7 @@
 
 use rmcp::{handler::server::wrapper::Parameters, model::{CallToolResult, ContentBlock}, tool, tool_router, ErrorData};
 
-use crate::mcp::Amaranth;
+use crate::mcp::{map_domain_err, Amaranth};
 use crate::mcp::args::approval::*;
 use crate::modules;
 
@@ -28,7 +28,7 @@ impl Amaranth {
     )]
     async fn list_approval_line_schemas(&self) -> Result<CallToolResult, ErrorData> {
         let data = modules::approval_schema::list_schemas()
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -47,7 +47,7 @@ impl Amaranth {
     #[tool(description = "신청 가이드가 수록된 양식 목록(양식명/form_id/alias)을 조회한다.")]
     async fn list_submission_guides(&self) -> Result<CallToolResult, ErrorData> {
         let data = modules::submission_guide::list_guides()
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 }

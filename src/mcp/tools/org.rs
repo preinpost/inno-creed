@@ -5,7 +5,7 @@
 
 use rmcp::{handler::server::wrapper::Parameters, model::{CallToolResult, ContentBlock}, tool, tool_router, ErrorData};
 
-use crate::mcp::Amaranth;
+use crate::mcp::{map_domain_err, Amaranth};
 use crate::mcp::args::org::*;
 use crate::modules;
 
@@ -50,7 +50,7 @@ impl Amaranth {
         self.ensure_session().await?;
         let data = modules::org::find_person(&self.client, &a.query)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -66,7 +66,7 @@ impl Amaranth {
         } else {
             modules::org::dept_members(&self.client, a.dept_id.trim()).await
         }
-        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 }

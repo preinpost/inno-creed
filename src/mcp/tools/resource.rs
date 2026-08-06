@@ -16,7 +16,7 @@ impl Amaranth {
         self.ensure_session().await?;
         let data = modules::resource::list_resources(&self.client)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -51,7 +51,7 @@ impl Amaranth {
             a.include_lunch,
         )
         .await
-        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -65,7 +65,7 @@ impl Amaranth {
         self.ensure_session().await?;
         let data = modules::resource::my_reservations(&self.client, &a.start, &a.end)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 

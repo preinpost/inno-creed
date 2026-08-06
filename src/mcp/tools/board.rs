@@ -5,7 +5,7 @@
 
 use rmcp::{handler::server::wrapper::Parameters, model::{CallToolResult, ContentBlock}, tool, tool_router, ErrorData};
 
-use crate::mcp::Amaranth;
+use crate::mcp::{map_domain_err, Amaranth};
 use crate::mcp::args::board::*;
 use crate::modules;
 
@@ -28,7 +28,7 @@ impl Amaranth {
             &a.end_date,
         )
         .await
-        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -41,7 +41,7 @@ impl Amaranth {
     ) -> Result<CallToolResult, ErrorData> {
         let data = modules::board::read_post(&self.client, &a.art_seq_no)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -52,7 +52,7 @@ impl Amaranth {
     ) -> Result<CallToolResult, ErrorData> {
         let data = modules::board::list_attachments(&self.client, &a.art_seq_no, &a.uid)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -64,7 +64,7 @@ impl Amaranth {
         let data =
             modules::board::download_attachment(&self.client, &a.art_seq_no, &a.uid, a.file_sn, &a.out_path)
                 .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+                .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 }

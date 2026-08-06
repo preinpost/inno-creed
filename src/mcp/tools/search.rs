@@ -5,7 +5,7 @@
 
 use rmcp::{handler::server::wrapper::Parameters, model::{CallToolResult, ContentBlock}, tool, tool_router, ErrorData};
 
-use crate::mcp::Amaranth;
+use crate::mcp::{map_domain_err, Amaranth};
 use crate::mcp::args::search::*;
 use crate::modules;
 
@@ -28,7 +28,7 @@ impl Amaranth {
             &a.to,
         )
         .await
-        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 }

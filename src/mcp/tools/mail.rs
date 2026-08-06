@@ -5,7 +5,7 @@
 
 use rmcp::{handler::server::wrapper::Parameters, model::{CallToolResult, ContentBlock}, tool, tool_router, ErrorData};
 
-use crate::mcp::Amaranth;
+use crate::mcp::{map_domain_err, map_domain_err_ctx, Amaranth};
 use crate::mcp::args::mail::*;
 use crate::modules;
 
@@ -16,7 +16,7 @@ impl Amaranth {
         self.ensure_session().await?;
         let data = modules::mail::list_mailboxes(&self.client)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -25,7 +25,7 @@ impl Amaranth {
         self.ensure_session().await?;
         let data = modules::mail::list_mails(&self.client, modules::mail::INBOX, 1, 20)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -47,7 +47,7 @@ impl Amaranth {
         });
         modules::mail::send_mail(&self.client, &to, &a.subject, &a.html, &a.attachments)
             .await
-            .map_err(|e| ErrorData::internal_error(format!("메일 발송 실패: {e}"), None))?;
+            .map_err(map_domain_err_ctx("메일 발송 실패"))?;
         let msg = serde_json::json!({
             "ok": true,
             "to": to,
@@ -66,7 +66,7 @@ impl Amaranth {
         self.ensure_session().await?;
         modules::mail::delete_mails(&self.client, &a.uids)
             .await
-            .map_err(|e| ErrorData::internal_error(format!("메일 삭제 실패: {e}"), None))?;
+            .map_err(map_domain_err_ctx("메일 삭제 실패"))?;
         let msg = serde_json::json!({
             "ok": true,
             "uids": a.uids,
@@ -85,7 +85,7 @@ impl Amaranth {
     ) -> Result<CallToolResult, ErrorData> {
         let data = modules::mail::read_mail(&self.client, &a.muid)
             .await
-            .map_err(|e| ErrorData::internal_error(format!("메일 조회 실패: {e}"), None))?;
+            .map_err(map_domain_err_ctx("메일 조회 실패"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
@@ -99,7 +99,7 @@ impl Amaranth {
         let data =
             modules::mail::download_attachment(&self.client, &a.muid, &a.file_sn, &a.out_path)
                 .await
-                .map_err(|e| ErrorData::internal_error(format!("첨부 다운로드 실패: {e}"), None))?;
+                .map_err(map_domain_err_ctx("첨부 다운로드 실패"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 }

@@ -20,14 +20,36 @@ pub mod tools;
 /// 모듈 에러 → MCP 에러 매핑. **호출자 잘못(`NotOwner`·`InvalidInput`)만 `invalid_params`**로
 /// 분류한다 — 서버/네트워크 실패가 아니라 잘못된 대상·인자를 준 것이기 때문이다(리팩터 전 동작 보존).
 /// 문자열 매칭이 아니라 타입(`downcast_ref`)으로 판별한다.
+///
+/// ⚠️ **도메인 모듈(`modules::*`)에서 올라온 `anyhow::Error`는 도메인 11개 라우터 전부가
+/// 이 함수(또는 `map_domain_err_ctx`)를 지난다.** 새 도구를 추가할 때 `ErrorData::internal_error`를
+/// 직접 부르면 그 자리만 조용히 분류를 놓친다 — 컴파일러도 스냅샷 테스트도 잡지 못한다.
+/// (도구 층에서 자체 판단한 인자 오류 — JSON 파싱 실패·없는 doc_type 등 — 만 `invalid_params`를 직접 쓴다.)
 pub(crate) fn map_domain_err(e: anyhow::Error) -> ErrorData {
-    if e.downcast_ref::<crate::error::NotOwner>().is_some()
-        || e.downcast_ref::<crate::error::InvalidInput>().is_some()
-    {
+    if is_caller_fault(&e) {
         ErrorData::invalid_params(e.to_string(), None)
     } else {
         ErrorData::internal_error(e.to_string(), None)
     }
+}
+
+/// `map_domain_err`의 접두사 붙는 변형 — 분류 규칙은 같고 메시지만 `"{prefix}: {e}"`가 된다.
+/// `"메일 발송 실패: {e}"`처럼 어느 단계에서 깨졌는지 알려주던 자리를 그대로 두기 위한 것이다.
+pub(crate) fn map_domain_err_ctx(prefix: &'static str) -> impl Fn(anyhow::Error) -> ErrorData {
+    move |e| {
+        let msg = format!("{prefix}: {e}");
+        if is_caller_fault(&e) {
+            ErrorData::invalid_params(msg, None)
+        } else {
+            ErrorData::internal_error(msg, None)
+        }
+    }
+}
+
+/// 서버/네트워크 실패가 아니라 **호출자가 잘못 준 것**인지 판별.
+fn is_caller_fault(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<crate::error::NotOwner>().is_some()
+        || e.downcast_ref::<crate::error::InvalidInput>().is_some()
 }
 
 /// MCP 서버 핸들러. 상태는 `client` 하나뿐이다.
