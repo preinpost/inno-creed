@@ -6,12 +6,59 @@
 //! Firefox `cookies.sqlite`는 전 OS 평문이라 프로필 경로만 OS별로 분기한다.
 
 use anyhow::{bail, Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone)]
 pub struct Creds {
     pub auth_token: String,
     pub sign_key: String,
+}
+
+/// 잠긴 쿠키 DB를 읽기 위한 **호출 고유** 복사본. 경로를 쥐고 있다가 `Drop`에서 지운다.
+///
+/// **이름을 고유화하는 이유**: 예전에는 임시 디렉토리에 브라우저별 **고정 이름 하나**를 썼다.
+/// 취득이 동시에 두 번 일어나면 같은 파일 하나를 두고 `copy`→`open`→`remove_file`이 겹치는데,
+/// `fs::copy`는 대상을 **먼저 truncate**하므로 다른 쪽이 그 순간 열면 잘린 DB를 읽거나,
+/// 한쪽의 `remove_file` 뒤에 열어 "파일 없음"을 만난다. 이름이 겹치지 않으면 이 창이 닫힌다.
+/// (동시 취득이 실제로 일어나는 장면은 관측된 적이 없다 — 코드 구조에서 유도한 방어다.)
+///
+/// **`Drop`으로 지우는 이유**: 고정 이름일 때는 실패 경로에서 남겨도 다음 호출이 덮어써서
+/// 회수됐다. 고유 이름은 그 회수가 없으므로, 지우지 않으면 실패할 때마다 임시 디렉토리에
+/// 파일이 쌓인다. 경합을 없애는 대신 누수를 만들지 않으려면 `Drop`이 필요하다.
+struct TempCopy(PathBuf);
+
+impl TempCopy {
+    /// `src`를 임시 디렉토리의 고유 경로로 복사한다. `tag`는 사람이 알아보기 위한 것(ck/ff).
+    ///
+    /// 고유성은 **pid + 프로세스 내 단조 카운터**로 만든다. 같은 프로세스 안에서는 카운터가,
+    /// 프로세스 사이에서는 pid가 갈라준다.
+    ///
+    /// ⚠️ **복사보다 소유권을 먼저 잡는다.** `fs::copy`는 대상 파일을 만든 뒤 실패할 수 있는데
+    /// (디스크 부족·권한·원본 중도 오류), 복사 성공 후에 `Self`를 만들면 그 부분 파일에는
+    /// `Drop`이 붙지 않아 그대로 남는다. 고유 이름이라 다음 호출이 덮어써 회수해주지도 않는다 —
+    /// 위 주석이 경계한 "실패할 때마다 쌓인다"가 정확히 이 경로다.
+    fn new(src: &Path, tag: &str) -> std::io::Result<Self> {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let me = Self(std::env::temp_dir().join(format!(
+            "inno_creed_{tag}_{}_{}.db",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        )));
+        std::fs::copy(src, &me.0)?;
+        Ok(me)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempCopy {
+    fn drop(&mut self) {
+        // 지워지지 않아도 할 수 있는 게 없다(다음 실행이 다른 이름을 쓴다). 조용히 넘긴다.
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// 크레덴셜 취득 진입점: 수동 입력(env) → Chrome → Firefox 순, 모두 실패면 로그인 안내 에러.
@@ -149,9 +196,9 @@ fn chrome_cookie_db() -> Result<PathBuf> {
 
 fn read_chrome_cookies(db: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>> {
     // 잠금 회피: 복사본을 읽음. (Windows에서 Chrome 실행 중이면 배타 잠금이라 copy 실패 → Chrome 종료 필요.)
-    let tmp = std::env::temp_dir().join("inno_creed_ck.db");
-    std::fs::copy(db, &tmp)?;
-    let conn = rusqlite::Connection::open(&tmp)?;
+    // 복사본 이름은 호출마다 고유하다 — 이유는 `TempCopy` 주석.
+    let tmp = TempCopy::new(db, "ck")?;
+    let conn = rusqlite::Connection::open(tmp.path())?;
     let mut stmt =
         conn.prepare("SELECT name, encrypted_value FROM cookies WHERE host_key='gw.innogrid.com'")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
@@ -159,9 +206,11 @@ fn read_chrome_cookies(db: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>> {
     for r in rows {
         out.push(r?);
     }
+    // ⚠️ `conn`을 `tmp`보다 먼저 닫아야 한다 — Windows는 열린 파일을 지우지 못한다.
+    // 지역변수는 선언 역순으로 drop되므로(`tmp`가 먼저 선언 = 나중에 drop) 순서는 맞지만,
+    // 조기 반환 경로까지 포함해 의도를 분명히 하려고 명시적으로 닫는다.
     drop(stmt);
     drop(conn);
-    let _ = std::fs::remove_file(&tmp);
     Ok(out)
 }
 
@@ -629,10 +678,9 @@ pub fn from_firefox() -> Result<Creds> {
         })?
     };
 
-    // 잠금 회피: 복사본을 읽음.
-    let tmp = std::env::temp_dir().join("inno_creed_ff.db");
-    std::fs::copy(&src, &tmp)?;
-    let conn = rusqlite::Connection::open(&tmp)?;
+    // 잠금 회피: 복사본을 읽음. 이름은 호출마다 고유하다 — 이유는 `TempCopy` 주석.
+    let tmp = TempCopy::new(&src, "ff")?;
+    let conn = rusqlite::Connection::open(tmp.path())?;
     let mut stmt =
         conn.prepare("SELECT name, value FROM moz_cookies WHERE host LIKE '%gw.innogrid.com'")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
@@ -646,9 +694,9 @@ pub fn from_firefox() -> Result<Creds> {
             _ => {}
         }
     }
+    // Chrome 쪽과 같은 이유로 `conn`을 먼저 닫는다(`tmp`는 Drop이 지운다).
     drop(stmt);
     drop(conn);
-    let _ = std::fs::remove_file(&tmp);
 
     Ok(Creds {
         auth_token: auth_token.with_context(|| {
@@ -669,4 +717,107 @@ fn env_nonempty(key: &str) -> Option<String> {
 /// authToken은 `%7C`(=`|`)로 URL 인코딩되어 저장됨.
 fn url_decode(s: &str) -> String {
     s.replace("%7C", "|").replace("%7c", "|")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 쿠키 DB 대역. 내용이 잘렸는지 확인할 수 있게 충분히 크게 만든다.
+    /// 테스트가 **패닉해도** 남지 않도록 `Drop`으로 지운다 — 임시 디렉토리를 어지르지 않는 것이
+    /// 이 파일의 주제이니 테스트도 같은 규율을 지킨다.
+    struct Src(PathBuf);
+
+    impl Src {
+        fn new(name: &str) -> Self {
+            let p = std::env::temp_dir()
+                .join(format!("inno_creed_test_src_{}_{name}", std::process::id()));
+            std::fs::write(&p, vec![b'x'; 256 * 1024]).unwrap();
+            Self(p)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Src {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn temp_copy는_drop되면_파일을_지운다() {
+        let src = Src::new("drop");
+        let path = {
+            let tmp = TempCopy::new(src.path(), "ck").unwrap();
+            let path = tmp.path().to_path_buf();
+            assert!(path.exists(), "복사 직후에는 있어야 한다");
+            path
+        };
+        assert!(!path.exists(), "Drop이 지워야 한다 — 고유 이름은 덮어쓰기로 회수되지 않는다");
+    }
+
+    /// 실패 경로에서도 지워지는지 — `?`로 조기 반환해도 `Drop`은 돈다.
+    #[test]
+    fn temp_copy는_조기반환에도_남지_않는다() {
+        let src = Src::new("early");
+        let leaked = std::cell::RefCell::new(PathBuf::new());
+        let f = || -> Result<()> {
+            let tmp = TempCopy::new(src.path(), "ck")?;
+            *leaked.borrow_mut() = tmp.path().to_path_buf();
+            bail!("중간에 실패한 셈 치자");
+        };
+        assert!(f().is_err());
+        assert!(!leaked.borrow().exists(), "실패해도 임시파일이 남으면 안 된다");
+    }
+
+    /// **경합 방어의 핵심 단언.** 동시에 복사본을 만들면 경로가 전부 달라야 한다.
+    ///
+    /// 브라우저별 고정 이름 하나이던 시절에는 N개가 같은 경로를 가리켰다 —
+    /// `fs::copy`가 대상을 truncate하므로 서로의 복사 한복판을 읽거나, 남의 `remove_file`
+    /// 뒤에 열어 "파일 없음"을 만났다. 경로가 전부 다르면 그 창 자체가 없다.
+    /// (고정 이름으로 되돌리면 `unique.len()`이 1이 되어 이 테스트가 즉시 깨진다.)
+    #[test]
+    fn 동시_복사본은_서로_다른_경로를_쓰고_내용이_온전하다() {
+        const N: usize = 8;
+        let src = std::sync::Arc::new(Src::new("race"));
+        let expected = std::fs::metadata(src.path()).unwrap().len();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(N));
+
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let (src, barrier) = (src.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait(); // 진짜로 동시에 출발시킨다
+                    let tmp = TempCopy::new(src.path(), "ck").expect("복사 실패");
+                    // 남이 truncate한 것을 읽으면 길이가 어긋난다.
+                    let len = std::fs::metadata(tmp.path()).unwrap().len();
+                    (tmp.path().to_path_buf(), len)
+                })
+            })
+            .collect();
+
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let unique: std::collections::HashSet<_> = results.iter().map(|(p, _)| p.clone()).collect();
+        assert_eq!(unique.len(), N, "동시 복사본이 같은 경로를 재사용했다 — 경합 창이 열려 있다");
+        for (p, len) in &results {
+            assert_eq!(*len, expected, "{p:?} 내용이 잘렸다");
+            assert!(!p.exists(), "스레드 종료 시 Drop이 지웠어야 한다");
+        }
+    }
+
+    /// Chrome/Firefox 복사본이 서로 다른 이름 공간을 쓰는지(둘이 겹치면 같은 경합이 돌아온다).
+    #[test]
+    fn 크롬과_파이어폭스_복사본은_이름이_겹치지_않는다() {
+        let src = Src::new("tag");
+        let ck = TempCopy::new(src.path(), "ck").unwrap();
+        let ff = TempCopy::new(src.path(), "ff").unwrap();
+        assert_ne!(ck.path(), ff.path());
+        let name = |t: &TempCopy| t.path().file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name(&ck).contains("_ck_"), "{}", name(&ck));
+        assert!(name(&ff).contains("_ff_"), "{}", name(&ff));
+        // pid가 들어가야 다른 프로세스와도 갈린다.
+        assert!(name(&ck).contains(&std::process::id().to_string()));
+    }
 }
