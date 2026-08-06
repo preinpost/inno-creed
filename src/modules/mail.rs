@@ -34,13 +34,143 @@ pub async fn list_mails(c: &GwClient, mbox_seq: i64, page: i64, page_size: i64) 
     .await
 }
 
-/// 작성폼 초기화 — `mail014A01`. 발송(A04)에 필요한 `sessionKey`/`fileDir`을 확보하기 위해 선행 호출.
+/// 작성폼 초기화 — `mail014A01`. 발송(A04)·임시저장(A14)에 필요한 `sessionKey`/`fileDir`을
+/// 확보하기 위해 선행 호출. 응답에는 재저장 때 되돌려줘야 하는 `mailkey`도 들어 있다.
 pub async fn compose_init(c: &GwClient) -> Result<Value> {
     c.call(
         "/mail/mail014A01",
         &json!({ "mainApiCode": "mail014A01", "mailKind": "me" }),
     )
     .await
+}
+
+/// 발송(`mail014A04`)과 임시저장(`mail014A14`)이 공유하는 작성 폼.
+///
+/// 담기는 값은 **`mail014A01` 응답 스냅샷 + 호출 인자**뿐이다. 크레덴셜 파생값은 담지 않는다
+/// (`fields`가 조립할 때마다 새로 읽는다 — 이유는 그쪽 주석).
+struct ComposeForm {
+    email: String,
+    filedir: String,
+    big_file_day: String,
+    big_file_cnt: String,
+    uid_auth_list: String,
+    session_key: String,
+    external_send_limit: String,
+    inside_domain: String,
+    neobiz_addr: String,
+    neobiz_inted_addr: String,
+    neobiz_org: String,
+    to: String,
+    subject: String,
+    html: String,
+}
+
+impl ComposeForm {
+    /// `init`은 `compose_init`(mail014A01) 응답. 여기서 오는 값들 — sessionKey/filedir/email/
+    /// bigFileDay/externalSendLimit/insideDomainArray/groupMailOption — 은 크레덴셜이 아니라
+    /// **작성폼 세션**에서 온 것이라 401 재취득으로 바뀌지 않는다. 다만 전송 직전에 토큰이 만료되면
+    /// 이 스냅샷도 함께 낡을 수 있는데, 폼 조립은 동기 클로저라 거기서 A01을 다시 부를 수 없다.
+    /// 그 경우 재시도가 실패하고 로그인 안내로 끝난다(다음 호출의 `compose_init`이 새 세션을 받으므로
+    /// 사용자가 다시 시도하면 정상 동작한다).
+    fn new(
+        init: &Value,
+        to: &str,
+        subject: &str,
+        html: &str,
+        uid_auth_list: String,
+        big_file_cnt: String,
+    ) -> Self {
+        let g = |k: &str| init.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let gmo = init.get("groupMailOption");
+        let gm = |k: &str| {
+            gmo.and_then(|o| o.get(k))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        Self {
+            email: g("email"), // 발신 이메일(순수 형식) — from/email 필드에 사용
+            filedir: g("filedir"),
+            big_file_day: g("bigFileDay"),
+            big_file_cnt,
+            uid_auth_list,
+            session_key: g("sessionKey"),
+            external_send_limit: g("externalSendLimit"),
+            inside_domain: match init.get("insideDomainArray") {
+                Some(v) if !v.is_null() => v.to_string(),
+                _ => "[]".to_string(),
+            },
+            neobiz_addr: gm("groupMailAddr"),
+            neobiz_inted_addr: gm("groupMailIntedAddr"),
+            neobiz_org: gm("groupMailOrg"),
+            to: to.to_string(),
+            subject: subject.to_string(),
+            html: html.to_string(),
+        }
+    }
+
+    /// 실측 FormData 전 필드.
+    ///
+    /// ⚠️ **크레덴셜에서 파생되는 값(`authToken`)은 호출할 때마다 여기서 새로 읽는다.**
+    /// 밖에서 스냅샷하면 401 재취득 후 폼을 재조립해도 옛 토큰이 그대로 실려 재시도가 형식만 남는다.
+    fn fields(&self, c: &GwClient) -> Vec<(&'static str, String)> {
+        // body용 authToken: 헤더용(groupSeq|empSeq|secret) 앞에 loginId를 덧붙인 형식.
+        let body_auth = format!("{}|{}", c.email_addr(), c.auth_token());
+        vec![
+            ("from", self.email.clone()),
+            ("fromName", c.emp_name()),
+            ("to", self.to.clone()),
+            ("cc", String::new()),
+            ("bcc", String::new()),
+            ("htmlContents", self.html.clone()),
+            ("email", self.email.clone()),
+            ("fileDir", self.filedir.clone()),
+            ("bigFile", String::new()),
+            ("bigFileDay", self.big_file_day.clone()),
+            ("bigFileCnt", self.big_file_cnt.clone()),
+            ("bigFilePeriod", String::new()),
+            ("mail_kind", "me".into()),
+            ("uidAuthList", self.uid_auth_list.clone()),
+            ("fwFile", String::new()),
+            ("urlList", String::new()),
+            ("fileNameList", String::new()),
+            ("receipt_notific", String::new()),
+            ("securitymailuse", String::new()),
+            ("securitymailpass_enc_web", String::new()),
+            ("immediately", "false".into()),
+            ("toBeDeleted", "false".into()),
+            ("expirationDate", "Invalid date".into()),
+            ("importantmailuse", String::new()),
+            ("eachTrans", String::new()),
+            ("neobizaddr", self.neobiz_addr.clone()),
+            ("neobizIntedAddr", self.neobiz_inted_addr.clone()),
+            ("neobizOrg", self.neobiz_org.clone()),
+            ("muid", "0".into()),
+            ("domainSeq", String::new()),
+            ("mimeHeader", String::new()),
+            ("sessionKey", self.session_key.clone()),
+            ("externalSendLimit", self.external_send_limit.clone()),
+            ("insideDomainArray", self.inside_domain.clone()),
+            ("aiResultJSON", String::new()),
+            ("subject", self.subject.clone()),
+            ("authToken", body_auth),
+        ]
+    }
+
+    fn build(&self, c: &GwClient) -> reqwest::multipart::Form {
+        self.fields(c)
+            .into_iter()
+            .fold(reqwest::multipart::Form::new(), |f, (k, v)| f.text(k, v))
+    }
+}
+
+/// 첨부를 `mail014A06`에 올려 폼의 `uidAuthList`/`bigFileCnt` 짝을 만든다. 없으면 빈 값.
+async fn attachment_fields(c: &GwClient, attachments: &[String]) -> Result<(String, String)> {
+    if attachments.is_empty() {
+        return Ok((String::new(), "0".to_string()));
+    }
+    let uploaded = upload_files(c, attachments).await?;
+    Ok((uploaded, attachments.len().to_string()))
 }
 
 /// 메일 발송 — `mail014A01`(작성폼 초기화) → `mail014A04`(multipart) 2단계.
@@ -55,83 +185,13 @@ pub async fn send_mail(
     attachments: &[String],
 ) -> Result<Value> {
     let init = compose_init(c).await?;
-
     // 첨부: 로컬 파일을 mail014A06(multipart `file[]`)로 업로드 → uidAuthList 조립.
-    let (uid_auth_list, big_file_cnt) = if attachments.is_empty() {
-        ("".to_string(), "0".to_string())
-    } else {
-        let uploaded = upload_files(c, attachments).await?;
-        (uploaded, attachments.len().to_string())
-    };
-    // `init`(mail014A01 응답)에서 오는 값들 — sessionKey/filedir/email/bigFileDay/externalSendLimit/
-    // insideDomainArray/groupMailOption. 크레덴셜이 아니라 **작성폼 세션**에서 온 것이라 재취득으로
-    // 바뀌지 않는다. 다만 발송 직전에 토큰이 만료되면 이 스냅샷도 함께 낡을 수 있는데, 폼 조립은
-    // 동기 클로저라 여기서 A01을 다시 부를 수 없다. 그 경우 재시도가 실패하고 로그인 안내로 끝난다
-    // (다음 호출의 compose_init이 새 세션을 받으므로 사용자가 다시 보내면 정상 발송된다).
-    let g = |k: &str| init.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let gmo = init.get("groupMailOption");
-    let gm = |k: &str| {
-        gmo.and_then(|o| o.get(k))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
-    let email = g("email"); // 발신 이메일(순수 형식) — from/email 필드에 사용
-    let inside = match init.get("insideDomainArray") {
-        Some(v) if !v.is_null() => v.to_string(),
-        _ => "[]".to_string(),
-    };
+    let (uid_auth_list, big_file_cnt) = attachment_fields(c, attachments).await?;
+    let cf = ComposeForm::new(&init, to, subject, html, uid_auth_list, big_file_cnt);
+
     // 폼을 "만드는 방법"으로 넘긴다 — 401 재취득 재시도 때 클라이언트가 재조립해야 하기 때문
     // (`multipart::Form`은 Clone이 아니고 전송이 소비한다). 호출당 최대 2회 평가된다.
-    //
-    // ⚠️ **크레덴셜에서 파생되는 값은 반드시 이 클로저 안에서 읽어야 한다.** 밖에서 스냅샷하면
-    // 재취득 후 재조립해도 옛 토큰이 그대로 실려 재시도가 형식만 남는다.
-    // (`init`에서 온 값들은 크레덴셜 파생이 아니다 — 위 `g` 정의의 주석 참조.)
-    let form = || {
-        // body용 authToken: 헤더용(groupSeq|empSeq|secret) 앞에 loginId를 덧붙인 형식.
-        // 조립할 때마다 새로 읽는다 — 재취득된 토큰이 여기 반영돼야 재시도가 의미를 갖는다.
-        let body_auth = format!("{}|{}", c.email_addr(), c.auth_token());
-        reqwest::multipart::Form::new()
-        .text("from", email.clone())
-        .text("fromName", c.emp_name().to_string())
-        .text("to", to.to_string())
-        .text("cc", "")
-        .text("bcc", "")
-        .text("htmlContents", html.to_string())
-        .text("email", email.clone())
-        .text("fileDir", g("filedir"))
-        .text("bigFile", "")
-        .text("bigFileDay", g("bigFileDay"))
-        .text("bigFileCnt", big_file_cnt.clone())
-        .text("bigFilePeriod", "")
-        .text("mail_kind", "me")
-        .text("uidAuthList", uid_auth_list.clone())
-        .text("fwFile", "")
-        .text("urlList", "")
-        .text("fileNameList", "")
-        .text("receipt_notific", "")
-        .text("securitymailuse", "")
-        .text("securitymailpass_enc_web", "")
-        .text("immediately", "false")
-        .text("toBeDeleted", "false")
-        .text("expirationDate", "Invalid date")
-        .text("importantmailuse", "")
-        .text("eachTrans", "")
-        .text("neobizaddr", gm("groupMailAddr"))
-        .text("neobizIntedAddr", gm("groupMailIntedAddr"))
-        .text("neobizOrg", gm("groupMailOrg"))
-        .text("muid", "0")
-        .text("domainSeq", "")
-        .text("mimeHeader", "")
-        .text("sessionKey", g("sessionKey"))
-        .text("externalSendLimit", g("externalSendLimit"))
-        .text("insideDomainArray", inside.clone())
-        .text("aiResultJSON", "")
-        .text("subject", subject.to_string())
-        .text("authToken", body_auth)
-    };
-
-    let v = c.call_multipart("/mail/mail014A04", form).await?;
+    let v = c.call_multipart("/mail/mail014A04", || cf.build(c)).await?;
     // 발송 응답은 표준 봉투로 감싸짐: {"resultCode":0,"resultData":{"result":true,"muid":..,"resultMessage":"SUCCESS"}}
     let rd = v.get("resultData").unwrap_or(&v);
     let ok = rd.get("result").and_then(|r| r.as_bool()).unwrap_or(false);
@@ -139,6 +199,64 @@ pub async fn send_mail(
         bail!("메일 발송 실패: {v}");
     }
     Ok(rd.clone())
+}
+
+/// 임시저장(A14)이 발송 폼 위에 덧붙이는 전용 필드. 값은 **신규 저장** 기준이다
+/// (재저장은 `autoMUID`/`beforeMUID`/`mailKey`에 직전 저장분 좌표가 들어가는데, 이 도구는 신규만 한다).
+///
+/// ⚠️ `isFirst`는 첫 저장이 **"0"**이다 — 프론트가 `isFirst === true ? "0" : "1"`로 보낸다.
+/// 뒤집힌 것처럼 보이지만 서버가 그 값을 기대하므로 그대로 재현한다.
+const DRAFT_FIELDS: &[(&str, &str)] = &[
+    ("autoMUID", ""),
+    ("beforeMailType", "me"), // compose_init이 mailKind:"me"로 연 폼이다
+    ("beforeMUID", ""),
+    ("mailKey", ""),
+    ("isFirst", "0"),
+    ("draftType", "true"),      // 수동 임시저장(파일 첨부 여부와 무관하게 true)
+    ("autoDraftType", "false"), // 에디터 자동저장(A13)이 아님
+];
+
+/// 메일 임시저장 — `mail014A01`(작성폼 초기화) → `mail014A14`(multipart) 2단계.
+/// **발송하지 않는다** — 임시보관함(DRAFTS)에 저장만 한다.
+/// 폼은 발송(A04)과 동일하고 `DRAFT_FIELDS` 7개만 더 붙는다. 첨부 경로도 발송과 같다.
+/// 반환: `draft_muid`(= 응답 `resultData.autoMUID`, 후속 조회·삭제 키)와
+/// `mail_key`(= A01의 `mailkey`, 재저장 때 `mailKey`로 되돌려줄 값).
+pub async fn save_mail_draft(
+    c: &GwClient,
+    to: &str,
+    subject: &str,
+    html: &str,
+    attachments: &[String],
+) -> Result<Value> {
+    let init = compose_init(c).await?;
+    let (uid_auth_list, big_file_cnt) = attachment_fields(c, attachments).await?;
+    // 프론트는 제목이 비면 "(제목없음)"으로 채워 저장한다.
+    let subject = if subject.trim().is_empty() {
+        "(제목없음)"
+    } else {
+        subject
+    };
+    let cf = ComposeForm::new(&init, to, subject, html, uid_auth_list, big_file_cnt);
+    let form = || {
+        DRAFT_FIELDS
+            .iter()
+            .fold(cf.build(c), |f, (k, v)| f.text(*k, *v))
+    };
+
+    let v = c.call_multipart("/mail/mail014A14", form).await?;
+    // 999 = "로그인 사용자가 변경되어 임시저장을 할 수 없습니다"(프론트 문구). 전송 실패와 구분한다.
+    if v.get("resultCode").and_then(|x| x.as_i64()) == Some(999) {
+        bail!("메일 임시저장 실패: 로그인 사용자가 변경돼 임시저장할 수 없다(resultCode 999) — 브라우저에서 다시 로그인한 뒤 재시도할 것");
+    }
+    let rd = v.get("resultData").unwrap_or(&v);
+    let draft_muid = json_str(rd.get("autoMUID"));
+    if draft_muid.is_empty() {
+        bail!("메일 임시저장 실패(autoMUID 없음): {v}");
+    }
+    Ok(json!({
+        "draft_muid": draft_muid,
+        "mail_key": json_str(init.get("mailkey"))
+    }))
 }
 
 /// 로컬 파일들을 `mail014A06`(multipart `file[]`)로 업로드하고, 발송의 `uidAuthList`
@@ -339,4 +457,123 @@ pub async fn delete_mails(c: &GwClient, uids: &str) -> Result<Value> {
         &json!({ "uids": uids, "mailKey": "", "boxName": "" }),
     )
     .await
+}
+
+/// 발송·임시저장이 공유하는 폼의 **회귀 기준선**. 발송 폼을 `ComposeForm`으로 뽑아내면서
+/// 필드가 빠지거나 값이 달라져도 컴파일러가 잡지 못하기 때문에, 실측 필드 집합을 여기 박아둔다.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_init() -> Value {
+        json!({
+            "email": "me@example.com",
+            "filedir": "/dir/2026",
+            "sessionKey": "SK-1",
+            "bigFileDay": "30",
+            "externalSendLimit": "50",
+            "mailkey": "1785980031409_c7d8f89c",
+            "insideDomainArray": ["example.com"],
+            "groupMailOption": {
+                "groupMailAddr": "g@example.com",
+                "groupMailIntedAddr": "gi@example.com",
+                "groupMailOrg": "조직"
+            }
+        })
+    }
+
+    fn fields_of(cf: &ComposeForm) -> std::collections::HashMap<String, String> {
+        cf.fields(&GwClient::new(None))
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect()
+    }
+
+    #[test]
+    fn 발송_폼은_실측_필드_37개를_그대로_담는다() {
+        let cf = ComposeForm::new(
+            &sample_init(),
+            "홍길동 <hong@example.com>",
+            "제목",
+            "<p>본문</p>",
+            "[]".to_string(),
+            "2".to_string(),
+        );
+        let raw = cf.fields(&GwClient::new(None));
+        let names: Vec<&str> = raw.iter().map(|(k, _)| *k).collect();
+        assert_eq!(
+            names,
+            vec![
+                "from", "fromName", "to", "cc", "bcc", "htmlContents", "email", "fileDir",
+                "bigFile", "bigFileDay", "bigFileCnt", "bigFilePeriod", "mail_kind", "uidAuthList",
+                "fwFile", "urlList", "fileNameList", "receipt_notific", "securitymailuse",
+                "securitymailpass_enc_web", "immediately", "toBeDeleted", "expirationDate",
+                "importantmailuse", "eachTrans", "neobizaddr", "neobizIntedAddr", "neobizOrg",
+                "muid", "domainSeq", "mimeHeader", "sessionKey", "externalSendLimit",
+                "insideDomainArray", "aiResultJSON", "subject", "authToken",
+            ],
+            "발송 FormData 필드 집합이 변했다"
+        );
+
+        let f = fields_of(&cf);
+        assert_eq!(f["from"], "me@example.com");
+        assert_eq!(f["email"], "me@example.com");
+        assert_eq!(f["to"], "홍길동 <hong@example.com>");
+        assert_eq!(f["subject"], "제목");
+        assert_eq!(f["htmlContents"], "<p>본문</p>");
+        assert_eq!(f["fileDir"], "/dir/2026");
+        assert_eq!(f["sessionKey"], "SK-1");
+        assert_eq!(f["bigFileDay"], "30");
+        assert_eq!(f["externalSendLimit"], "50");
+        assert_eq!(f["insideDomainArray"], r#"["example.com"]"#);
+        assert_eq!(f["neobizaddr"], "g@example.com");
+        assert_eq!(f["neobizIntedAddr"], "gi@example.com");
+        assert_eq!(f["neobizOrg"], "조직");
+        assert_eq!(f["uidAuthList"], "[]");
+        assert_eq!(f["bigFileCnt"], "2");
+        assert_eq!(f["mail_kind"], "me");
+        assert_eq!(f["muid"], "0"); // 0 = 신규(답장/전달이 아님)
+        assert_eq!(f["immediately"], "false");
+        assert_eq!(f["expirationDate"], "Invalid date");
+    }
+
+    #[test]
+    fn 도메인배열은_응답에_없으면_빈_배열로_보낸다() {
+        let cf = ComposeForm::new(&json!({}), "to", "s", "", String::new(), "0".to_string());
+        assert_eq!(fields_of(&cf)["insideDomainArray"], "[]");
+    }
+
+    #[test]
+    fn 임시저장은_발송_폼에_전용필드_7개만_더한다() {
+        let base: Vec<&str> = ComposeForm::new(&json!({}), "to", "s", "", String::new(), "0".into())
+            .fields(&GwClient::new(None))
+            .iter()
+            .map(|(k, _)| *k)
+            .collect();
+        let extra: Vec<&str> = DRAFT_FIELDS.iter().map(|(k, _)| *k).collect();
+        assert_eq!(
+            extra,
+            vec![
+                "autoMUID",
+                "beforeMailType",
+                "beforeMUID",
+                "mailKey",
+                "isFirst",
+                "draftType",
+                "autoDraftType"
+            ]
+        );
+        // 발송 폼과 겹치는 이름이 없어야 한다 — 겹치면 같은 필드를 두 번 보내게 된다.
+        assert!(extra.iter().all(|k| !base.contains(k)));
+
+        let v: std::collections::HashMap<&str, &str> = DRAFT_FIELDS.iter().copied().collect();
+        assert_eq!(v["isFirst"], "0", "첫 저장은 '0'이다(프론트 삼항이 뒤집혀 있다)");
+        assert_eq!(v["draftType"], "true");
+        assert_eq!(v["autoDraftType"], "false");
+        assert_eq!(v["beforeMailType"], "me");
+        // 신규 저장이므로 직전 draft 좌표는 전부 빈 값
+        assert!(["autoMUID", "beforeMUID", "mailKey"]
+            .iter()
+            .all(|k| v[k].is_empty()));
+    }
 }

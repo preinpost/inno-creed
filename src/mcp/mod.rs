@@ -149,9 +149,9 @@ mod tests {
         "list_calendars", "list_events", "list_mail_inbox", "list_mailboxes",
         "list_notice_attachments", "list_notices", "list_reservations", "list_resources",
         "my_reservations", "org_chart", "pending_approvals", "read_approval", "read_approval_line",
-        "read_mail", "read_notice", "reserve_resource", "save_approval_line", "search",
-        "send_mail", "submit_approval", "suggest_approval_line", "update_calendar_event",
-        "update_reservation", "whoami",
+        "read_mail", "read_notice", "reserve_resource", "save_approval_line", "save_mail_draft",
+        "search", "send_mail", "submit_approval", "suggest_approval_line",
+        "update_calendar_event", "update_reservation", "whoami",
     ];
 
     #[test]

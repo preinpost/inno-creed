@@ -57,6 +57,7 @@
 | `list_mailboxes` / `list_mail_inbox` | 메일함 목록 / 받은메일 |
 | `read_mail` | 메일 1건 본문(평문)·헤더·첨부목록 — 외부 이미지 자동로드 안 함 |
 | `send_mail` | 메일 발송(첨부 지원, 받는사람 미지정 시 본인에게) |
+| `save_mail_draft` | 임시보관함에 저장만(발송 안 함, 첨부 지원) |
 | `delete_mail` | 메일 삭제(휴지통 이동) |
 | `download_mail_attachment` | 첨부파일 저장(실행 없이 저장만) |
 
@@ -203,7 +204,7 @@ inno-creed (Rust MCP 서버, 헤드리스)
  ├─ client   세션 lazy 취득(10분 TTL 캐시) · 헤더 주입 · POST · 응답 파싱
  ├─ modules  자원 · 일정 · 메일 · 게시판 · 전자결재 · 근태 · 조직
  │           API 래퍼 + 파생 조회 + 소유권 가드 · read-back 검증
- └─ mcp      rmcp stdio 서버 — tools/(도구 46개, 도메인별) · args/(인자 스키마) · 에러 변환
+ └─ mcp      rmcp stdio 서버 — tools/(도구 47개, 도메인별) · args/(인자 스키마) · 에러 변환
 ```
 
 크레덴셜만 브라우저에서 빌려오고, 실행은 전부 순수 HTTP입니다. 서명·세션 규격은 [architecture.md](docs/architecture.md)에 정리돼 있습니다.

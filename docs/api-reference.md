@@ -162,7 +162,8 @@
 | `mail000A01` | 메일함(폴더) 목록 | `list_mailboxes` |
 | `mail003A01` | 메일 목록 조회 | `list_mails` / `list_mail_inbox` |
 | `mail014A01` → `mail014A04` | 메일 발송(2단계, 첨부 지원) | `send_mail` |
-| `mail014A06` | 발송 첨부 업로드(multipart `file[]`) | `send_mail(attachments)` |
+| `mail014A01` → `mail014A14` | 메일 임시저장(2단계, 첨부 지원 — **발송 아님**) | `save_mail_draft` |
+| `mail014A06` | 발송·임시저장 첨부 업로드(multipart `file[]`) | `send_mail`/`save_mail_draft`의 `attachments` |
 | `mail002A01` | 메일 상세 읽기(본문·헤더·첨부목록) | `read_mail` |
 | `mail014A08` → `/ecm/ecm001A03` | 첨부 다운로드(2단계) | `download_mail_attachment` |
 | `mail002A05` | 메일 삭제(휴지통) | `delete_mails` |
@@ -198,6 +199,28 @@
 
 - **응답은 표준 봉투로 감싸짐**: `{"resultCode":0,"resultData":{"result":true,"muid":..,"resultMessage":"SUCCESS"}}` — 성공 판정은 `resultData.result`(최상위 `result` 아님).
 - 본인 앞 발송 실증(받은메일함 도착 확인).
+
+### 메일 임시저장 (mail014A01 → A14) → `save_mail_draft`
+
+**2단계**: `mail014A01`(작성폼 초기화) → `mail014A14`(multipart 임시저장). 발송은 일어나지 않는다.
+
+- **폼은 A04(발송)와 동일**하다 — 위 표의 필드를 그대로 쓰고(코드에서도 같은 빌더를 공유), 아래 7개만 더 붙인다.
+
+  | 추가 필드 | 신규 저장 시 값 | 의미 |
+  |---|---|---|
+  | `autoMUID` | `""` | 재저장 시 직전 draft muid |
+  | `beforeMailType` | `"me"` | A01을 연 `mailKind` |
+  | `beforeMUID` | `""` | 재저장 시 직전 muid |
+  | `mailKey` | `""` | 재저장 시 A01 응답의 `mailkey` |
+  | `isFirst` | `"0"` | ⚠️ **첫 저장이 "0"이다**(프론트가 `isFirst===true ? "0" : "1"`로 보낸다) |
+  | `draftType` | `"true"` | 수동 임시저장(첨부 유무와 무관) |
+  | `autoDraftType` | `"false"` | 에디터 자동저장(`mail014A13`)이 아님 |
+
+- 제목이 비면 `"(제목없음)"`으로 저장한다(프론트 동작 재현).
+- 응답: `resultData.autoMUID` = 저장된 임시보관 메일의 muid → 도구는 `draft_muid`로 반환.
+  `resultCode 999` = "로그인 사용자가 변경되어 임시저장을 할 수 없습니다" → 전송 실패와 구분해 안내한다.
+- 첨부는 발송과 같은 경로(`mail014A06` 업로드 → `uidAuthList`/`bigFileCnt`).
+- **자동 임시저장(`mail014A13`, `draftType=false`/`autoDraftType=true`)은 에디터 전용**이라 MCP에는 구현하지 않았다.
 
 ### 메일 상세 읽기 (mail002A01) → `read_mail`
 

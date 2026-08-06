@@ -6,8 +6,16 @@
 use rmcp::{handler::server::wrapper::Parameters, model::{CallToolResult, ContentBlock}, tool, tool_router, ErrorData};
 
 use crate::mcp::{map_domain_err, map_domain_err_ctx, Amaranth};
+use crate::client::GwClient;
 use crate::mcp::args::mail::*;
 use crate::modules;
+
+/// 받는사람 미지정 시 본인 앞(표시형)으로. 발송·임시저장이 같은 규칙을 쓴다.
+fn recipient_or_self(c: &GwClient, to: &Option<String>) -> String {
+    to.clone().unwrap_or_else(|| {
+        format!("{} <{}@{}>", c.emp_name(), c.email_addr(), c.email_domain())
+    })
+}
 
 #[tool_router(router = mail_router, vis = "pub(crate)")]
 impl Amaranth {
@@ -37,14 +45,7 @@ impl Amaranth {
         Parameters(a): Parameters<SendMailArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
-        let to = a.to.clone().unwrap_or_else(|| {
-            format!(
-                "{} <{}@{}>",
-                self.client.emp_name(),
-                self.client.email_addr(),
-                self.client.email_domain()
-            )
-        });
+        let to = recipient_or_self(&self.client, &a.to);
         modules::mail::send_mail(&self.client, &to, &a.subject, &a.html, &a.attachments)
             .await
             .map_err(map_domain_err_ctx("메일 발송 실패"))?;
@@ -54,6 +55,32 @@ impl Amaranth {
             "subject": a.subject,
             "attachments": a.attachments.len(),
             "note": "발송 성공(result:true). 도착 확인은 list_mail_inbox/보낸메일함 재조회 권장"
+        });
+        Ok(CallToolResult::success(vec![ContentBlock::text(msg.to_string())]))
+    }
+
+    #[tool(
+        description = "메일을 임시보관함(DRAFTS)에 저장한다 — **발송하지 않는다**(수신자에게 아무것도 가지 않는다). 사람이 아마란스 웹에서 확인한 뒤 직접 보내는 흐름용이라, 초안만 만들면 될 때는 send_mail 대신 이 도구를 쓴다. 받는사람 미지정 시 본인. attachments에 로컬 파일 경로를 주면 첨부까지 붙여 저장. 반환 draft_muid = 저장된 임시보관 메일의 muid. ⚠️ 전자결재 임시보관함과는 무관하다(그쪽은 list_approvals(box_name=\"draft\"))."
+    )]
+    async fn save_mail_draft(
+        &self,
+        Parameters(a): Parameters<SaveMailDraftArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let to = recipient_or_self(&self.client, &a.to);
+        let data =
+            modules::mail::save_mail_draft(&self.client, &to, &a.subject, &a.html, &a.attachments)
+                .await
+                .map_err(map_domain_err_ctx("메일 임시저장 실패"))?;
+        let msg = serde_json::json!({
+            "ok": true,
+            "to": to,
+            "subject": a.subject,
+            "attachments": a.attachments.len(),
+            "draft_muid": data.get("draft_muid"),
+            "mail_key": data.get("mail_key"),
+            "sent": false,
+            "note": "임시보관함에 저장만 됨(발송 아님). 확인은 아마란스 메일 > 임시보관함"
         });
         Ok(CallToolResult::success(vec![ContentBlock::text(msg.to_string())]))
     }

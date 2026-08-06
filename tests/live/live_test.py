@@ -341,6 +341,65 @@ def undo_mail(mcp: Mcp, ref: dict, marker: str):
     return True, f"muid={hit['muid']} 휴지통 이동(재조회 확인)"
 
 
+MBOX_KEYS = ("DRAFT", "SENT")  # 이름에 이 낱말이 든 메일함을 찾는다(DRAFTS / Sent)
+
+
+def mailbox_counts(mcp: Mcp) -> dict[str, int]:
+    """메일함 총 통수 — `{"DRAFT": n, "SENT": n}`. `list_mailboxes`(mail000A01) **한 번**으로
+    둘을 함께 읽는다(임시저장 전후로 같은 시점 값을 비교해야 하기 때문).
+    임시보관함 **목록** 조회 도구는 아직 없으므로, 이 카운트가 임시저장의 read-back 근거다.
+    못 읽은 함은 키 자체가 없다 — 호출자는 `.get()` 결과가 None인 경우를 실패로 다룰 것."""
+    got = mcp.call("list_mailboxes")
+    if got[0] == "ERR":
+        return {}
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "mboxSeq" in node and "exists" in node:
+                yield node
+            for v in node.values():
+                yield from walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                yield from walk(v)
+
+    out: dict[str, int] = {}
+    for box in walk(got[1]):
+        name = f"{box.get('fullname', '')} {box.get('name', '')}".upper()
+        for key in MBOX_KEYS:
+            if key in name and key not in out:
+                try:
+                    out[key] = int(str(box["exists"]).strip() or 0)
+                except ValueError:
+                    pass
+    return out
+
+
+def drafts_exists(mcp: Mcp) -> int | None:
+    return mailbox_counts(mcp).get("DRAFT")
+
+
+def undo_mail_draft(mcp: Mcp, ref: dict, marker: str):
+    """임시저장 메일 삭제. 임시보관함 목록 도구가 없어 `read_mail(muid)`로 직접 읽어 마커를 본다 —
+    '우리가 저장한 muid' AND '제목에 마커'가 둘 다 참일 때만 지운다."""
+    rm = mcp.call("read_mail", muid=str(ref["muid"]))
+    if rm[0] == "ERR":
+        return False, (f"draft muid={ref['muid']} 를 읽지 못해 마커 확인 불가 — "
+                       f"임시보관함을 직접 확인할 것: {rm[1]}")
+    if marker not in str(rm[1].get("subject", "")):
+        return False, f"마커 없는 메일이라 건드리지 않음: {rm[1].get('subject')!r}"
+    r = mcp.call("delete_mail", uids=str(ref["muid"]))
+    if r[0] == "ERR":
+        return False, r[1]
+    # read-back — 임시보관함 통수가 저장 전으로 돌아왔는지 본다(성공 응답을 믿지 않는다)
+    now, base = drafts_exists(mcp), ref.get("beforeExists")
+    if now is None or base is None:
+        return False, "삭제는 호출됐으나 임시보관함 통수를 못 읽어 확인 불가 — 수동 확인 필요"
+    if now != base:
+        return False, f"delete_mail 은 성공했다는데 임시보관함이 {base}→{now} 로 남아 있음"
+    return True, f"muid={ref['muid']} 삭제됨(임시보관함 {base}통 복귀 확인)"
+
+
 def undo_approval(mcp: Mcp, ref: dict, marker: str):
     """상신 문서 회수 — 결재취소(30→20) → 상신취소(20→10) → 임시보관삭제(10→소멸).
     ⚠️ 이 3단계는 HP 근태 레코드(appSq)까지 회수한다(2026-08-06 실측, docId 141760)."""
@@ -370,6 +429,7 @@ UNDO = {
     "event": undo_event,
     "approval_line": undo_approval_line,
     "mail": undo_mail,
+    "mail_draft": undo_mail_draft,
     "approval": undo_approval,
 }
 
@@ -794,6 +854,36 @@ def body(mcp: Mcp, fx: dict, marker: str):
             untrack(ml)
     else:
         skip("delete_mail", "send_mail 실패")
+
+    # 메일 임시저장 — 저장만 하고 아무에게도 나가지 않는다. 저장 후 즉시 삭제.
+    base = mailbox_counts(mcp)
+    base_drafts, base_sent = base.get("DRAFT"), base.get("SENT")
+    dsubj = f"{marker} 임시저장 점검 {datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+    def chk_draft(d):
+        muid = str(d.get("draft_muid") or "")
+        after = mailbox_counts(mcp)  # read-back — 저장 응답만 믿지 않는다
+        now_drafts, now_sent = after.get("DRAFT"), after.get("SENT")
+        grew = now_drafts is not None and base_drafts is not None and now_drafts == base_drafts + 1
+        # ⚠️ 이 도구의 핵심 주장은 "발송하지 않는다"다. 보낸메일함이 한 통이라도 늘었으면
+        #    실제로 나간 것이고 되돌릴 수 없다 → 통수가 **정확히 같을 때만** 통과시킨다.
+        #    (읽지 못한 경우도 통과시키지 않는다 — 증명 못 한 무발송은 무발송이 아니다.)
+        not_sent = now_sent is not None and base_sent is not None and now_sent == base_sent
+        return (bool(muid) and d.get("sent") is False and grew and not_sent,
+                f"draft_muid={muid or '없음'} · 임시보관함 {base_drafts}→{now_drafts} · "
+                f"보낸메일함 {base_sent}→{now_sent}{'(불변)' if not_sent else ' ⚠️발송 의심'}")
+
+    sd = run(mcp, "save_mail_draft", chk_draft,
+             subject=dsubj, html="<p>inno-creed 라이브 점검(임시저장). 자동 삭제됩니다.</p>")
+    if sd and sd.get("draft_muid"):
+        dl = track("mail_draft",
+                   {"muid": sd["draft_muid"], "subject": dsubj, "beforeExists": base_drafts},
+                   f"메일 임시보관함에서 제목 '{dsubj}' 삭제")
+        ok, note = undo_mail_draft(mcp, dl["ref"], marker)
+        if ok:
+            untrack(dl)
+        else:
+            R.append(("FAIL", "save_mail_draft(정리)", note))
 
     submit_scenario(mcp, fx, marker)
 

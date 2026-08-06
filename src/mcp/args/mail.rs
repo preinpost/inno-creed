@@ -24,6 +24,22 @@ pub struct SendMailArgs {
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
+pub struct SaveMailDraftArgs {
+    /// 받는사람 (표시형 "이름 <email>" 또는 email). 미지정 시 본인.
+    #[serde(default)]
+    pub to: Option<String>,
+    /// 제목. 비워두면 "(제목없음)"으로 저장된다.
+    pub subject: String,
+    /// 본문 HTML(선택)
+    #[serde(default)]
+    pub html: String,
+    /// 첨부할 로컬 파일 경로 목록(선택, 절대경로). 비우면 첨부 없음.
+    #[serde(default)]
+    pub attachments: Vec<String>,
+}
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
 pub struct DeleteMailArgs {
     /// 삭제할 메일 muid 목록(콤마 구분). list_mail_inbox의 muid 사용.
     #[serde(deserialize_with = "super::flex_string")]
