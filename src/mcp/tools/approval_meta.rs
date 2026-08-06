@@ -33,9 +33,9 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "양식별 '신청 가이드'를 반환한다 — ⭐ **submit_approval 기안 데이터 채우는 법(draftHelp: 고정코드 fixed/채울필드 fill/복사용 실동작 예시 hpApplicationExample·bindDataExample/권장 제목 defaultDocTitle·titleHelp) = CLI --help 격**. 그 외 문서 본문 필수항목(requiredBody)·아마란스 웹 작성 절차(steps)·주의(notes)·결재라인 힌트(approvalLineHint) 포함. submit_approval 호출 전 이 도구로 draftHelp를 조회해 hp_application_json/bind_data_json/doc_title을 구성할 것. 결재라인은 get_approval_line_schema+save_approval_line로 준비. 수록 범위는 근태 4양식(연차36/출장40/외근41/휴일43) — list_submission_guides로 확인."
+        description = "양식별 '신청 가이드'를 반환한다 — ⭐ **submit_approval 기안 데이터 채우는 법(draftHelp: 고정코드 fixed/채울필드 fill/복사용 실동작 예시 hpApplicationExample·bindDataExample/권장 제목 defaultDocTitle·titleHelp) = CLI --help 격**. 그 외 문서 본문 필수항목(requiredBody)·아마란스 웹 작성 절차(steps)·주의(notes)·결재라인 힌트(approvalLineHint) 포함. submit_approval 호출 전 이 도구로 draftHelp를 조회해 hp_application_json/bind_data_json/doc_title을 구성할 것. 결재라인은 get_approval_line_schema+save_approval_line로 준비. 수록 범위는 근태 4양식(연차36/출장40/외근41/휴일43) — list_approval_submission_guides로 확인."
     )]
-    async fn get_submission_guide(
+    async fn get_approval_submission_guide(
         &self,
         Parameters(a): Parameters<GetSubmissionGuideArgs>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -45,7 +45,7 @@ impl Amaranth {
     }
 
     #[tool(description = "신청 가이드가 수록된 양식 목록(양식명/form_id/alias)을 조회한다.")]
-    async fn list_submission_guides(&self) -> Result<CallToolResult, ErrorData> {
+    async fn list_approval_submission_guides(&self) -> Result<CallToolResult, ErrorData> {
         let data = modules::submission_guide::list_guides()
             .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))

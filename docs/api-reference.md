@@ -98,8 +98,8 @@
 |---|---|---|
 | `sc111A02` | 캘린더 목록 | `list_calendars` |
 | `sc111A03` | 일정 이벤트 조회(기간·캘린더) | `list_events` |
-| `sc111A05` | 일정 등록 **및 수정**(공용) | `create_event` / `update_event` |
-| `sc111A06` | 일정 삭제(소프트, 30일 휴지통) | `delete_event` |
+| `sc111A05` | 일정 등록 **및 수정**(공용) | `create_calendar_event` / `update_calendar_event` |
+| `sc111A06` | 일정 삭제(소프트, 30일 휴지통) | `delete_calendar_event` |
 
 - 개인 캘린더(등록 기본 대상)는 `sc111A02` 결과에서 `calType:"E"` + `empSeq==본인` 으로 판별. 날짜 `YYYYMMDDHHmm`.
 - **`calRwGbn` ≠ `insertRwGbn`**(실증): 공용 캘린더는 `calRwGbn:"r"`(캘린더 자체는 읽기전용)이지만 `insertRwGbn:"w"` 라 **일정 등록은 된다**. 등록 가능 판정은 `insertRwGbn` 기준.
@@ -160,7 +160,7 @@
 | API | 용도 | 래퍼 |
 |---|---|---|
 | `mail000A01` | 메일함(폴더) 목록 | `list_mailboxes` |
-| `mail003A01` | 메일 목록 조회 | `list_mails` / `list_inbox` |
+| `mail003A01` | 메일 목록 조회 | `list_mails` / `list_mail_inbox` |
 | `mail014A01` → `mail014A04` | 메일 발송(2단계, 첨부 지원) | `send_mail` |
 | `mail014A06` | 발송 첨부 업로드(multipart `file[]`) | `send_mail(attachments)` |
 | `mail002A01` | 메일 상세 읽기(본문·헤더·첨부목록) | `read_mail` |
@@ -289,7 +289,7 @@ body(JSON): { art_seq_no, menuCode:"UFA", pageCode:"UFA1000", moduleCode:"UF",
 - `art_content`는 인라인 스타일 포함 HTML(수십 KB) → `modules/board.rs`가 태그 제거·엔티티 디코드로 평문화해서 반환.
 - 필드 타입 혼용 주의: `read_cnt`가 목록에선 문자열, 상세에선 정수 → `json_str`로 흡수.
 
-### 첨부 목록 (ecm001A04) → `list_attachments`
+### 첨부 목록 (ecm001A04) → `list_notice_attachments`
 
 ```
 POST /ecm/ecm001A04           # ⚠️ .do 없음, /ecmapi 아님 (번들 상수 ecmapi/*.do는 별개 컴포넌트용)
@@ -301,7 +301,7 @@ body: moduleGbn=BOARD
 → resultData.list[] : { fileId, originalFileName, fileExtsn, fileSize, linkedFilePath(저장경로) }
 ```
 
-### 첨부 다운로드 (ecm001A03) → `download_attachment`
+### 첨부 다운로드 (ecm001A03) → `download_notice_attachment`
 
 ```
 POST /ecm/ecm001A03           # ecm001A04와 동일 패턴, 응답은 바이너리
@@ -312,7 +312,7 @@ body: 위와 동일 + fileSn=<파일 순번(0-base, 목록 배열 인덱스)>
 ```
 
 - **엔드포인트 주의**: 게시판 첨부는 `/ecm/ecm001AXX`(`.do` 없음, `/ecmapi` 없음) 계열. 번들 상수의 `ecmFileDownUrl=/ecm/ecmapi/ecm001A03.do` 등 `.do` 경로는 **다른 파일 컴포넌트용이라 서명 호출 시 404** — 혼동 금지. `ecm001A05`=**삭제**이므로 다운로드로 호출 금지.
-- 다중 첨부: `list_attachments`가 `fileIds`(콤마 구분 uid 전체)로 목록을 받고, `download_attachment`는 `file_sn`(순번)으로 단건 지정.
+- 다중 첨부: `list_notice_attachments`가 `fileIds`(콤마 구분 uid 전체)로 목록을 받고, `download_notice_attachment`는 `file_sn`(순번)으로 단건 지정.
 
 ## 전자결재 — `/eap/*` (읽기 + 쓰기)
 
@@ -480,7 +480,7 @@ GET /eap/sse/eap107A25?docIdList=<csv>     # ⚠️ SSE 스트림(다른 API와 
 | API | 용도 | 메서드 래퍼 |
 |---|---|---|
 | `common/judgeTimeManagement/getTodayComeLeaveInfo` | 오늘 출퇴근 조회 | `get_attendance_today` |
-| `common/judgeTimeManagement/getJudgeTimeManagement` | **출퇴근 punch(쓰기)** | `clock_in`/`clock_out` |
+| `common/judgeTimeManagement/getJudgeTimeManagement` | **출퇴근 punch(쓰기)** | `attendance_clock_in`/`attendance_clock_out` |
 | `openapi/worktime/status/getWorkTimeStatusList` | **기간(월) 근태 현황** | `attendance_month` |
 
 ### 기간 근태 현황 (getWorkTimeStatusList)
@@ -540,7 +540,7 @@ body: a10Domain=https://gw.innogrid.com        # 유일 파라미터
 - 메일 상세 본문·첨부는 구현 완료(read_mail/download_mail_attachment).
 - **메일·결재 검색 구현 완료** — 통합검색 `gw018A02`(위 섹션). 모듈별 전용 검색 API는 존재하지 않는다.
 - 게시판: 읽기(목록/상세/검색/날짜필터/첨부 목록·다운로드) 구현 완료. **미구현** — 쓰기(글/댓글 등록), 특정 게시판별 목록(`ViewBoardArtList`의 "게시판 코드" 라이브 캡처 필요).
-- 근태: punch(`clock_in`/`clock_out`)·오늘 조회·**기간 조회(`attendance_month`)** 구현 완료. **근태 신청은 전자결재 상신 경로에 포함**(`submit_approval`의 HP 연동 5콜 — 위 전자결재 절). 미조사 — 연차 잔여(`/human/hrd0620/0hr00001` 등 경로만 확보), 근태 승인.
+- 근태: punch(`attendance_clock_in`/`attendance_clock_out`)·오늘 조회·**기간 조회(`attendance_month`)** 구현 완료. **근태 신청은 전자결재 상신 경로에 포함**(`submit_approval`의 HP 연동 5콜 — 위 전자결재 절). 미조사 — 연차 잔여(`/human/hrd0620/0hr00001` 등 경로만 확보), 근태 승인.
 - ⚠️ **HP 근태 신청의 하드삭제 API는 존재하지 않는다**(번들 전수 조사). 상신이 실패해 생긴 고아 레코드는 회수 불가 — 위 전자결재 절의 "되돌릴 수 없는 것" 참조.
 - **회의실 정원(capacity) — 아마란스에 개념 자체가 없음(확정, 재조사 불필요)**. 4중 확인: `rs121A01` 응답에 필드 없음 / langPack 10만 문자열에 "수용인원" 0건 / 자원 HOME·예약 다이얼로그 화면에 정원 표시·입력 없음 / **자원 속성 체계(`rs121A28`·`rs121A29`)가 "회의실명"·"법인차량" 같은 분류 태그일 뿐 숫자 속성이 아님**. "N명 들어가는 회의실" 류 질의는 이 시스템으로 답할 수 없다.
 - ⚠️ `rs121A02`~`A04`는 자원 등록·수정(**쓰기**)일 가능성이 있어 미확인으로 둔다. 공용 자원에 부작용이 가므로 맹목 호출 금지.
@@ -566,11 +566,13 @@ body: a10Domain=https://gw.innogrid.com        # 유일 파라미터
 
 | 인자 | 값 | 출처 |
 |---|---|---|
-| `download_attachment.file_sn` | **0-base 인덱스**(정수) | `list_attachments` → `files[].fileSn` |
+| `download_notice_attachment.file_sn` | **0-base 인덱스**(정수) | `list_notice_attachments` → `files[].fileSn` |
 | `download_mail_attachment.file_sn` | **서버 토큰 문자열**(긴 base64류) | `read_mail` → `attachments[].fileSn` |
 
-이름이 같아 순번을 넣었다가 **HTTP 422**를 맞았다. → 두 도구 설명에 서로를 명시적으로 대조해 적었고,
-`list_attachments` 응답에 **`fileSn`(인덱스)을 실어** 호출자가 배열을 직접 세지 않게 했다.
+옛 이름 `download_attachment` 가 `download_mail_attachment` 와 같은 뿌리를 써서 순번을 넣었다가 **HTTP 422**를 맞았다.
+→ 도구 이름에 도메인을 박아(`download_notice_attachment`) 뿌리 충돌 자체를 없앴다. 다만 **인자 이름 `file_sn`은
+여전히 두 도구가 공유**하므로, 두 도구 설명에 서로를 대조해 적고 `list_notice_attachments` 응답에
+**`fileSn`(인덱스)을 실어** 호출자가 배열을 직접 세지 않게 했다.
 
 ### 3. 숫자를 문자열로 흘리지 말 것
 
@@ -582,5 +584,5 @@ body: a10Domain=https://gw.innogrid.com        # 유일 파라미터
 `articles`(게시판) / `Records`(받은메일) / `documents`(결재함) / `lines`(결재라인) / `events`(일정) /
 `reservations`(예약) / `rooms`(빈 회의실) / `files`(첨부) / `branches[].steps`(결재선 제안).
 
-특히 **`list_inbox`만 서버 원본 봉투를 그대로 반환**한다(다른 목록 도구는 정규화돼 있다). 도구 설명에
+특히 **`list_mail_inbox`만 서버 원본 봉투를 그대로 반환**한다(다른 목록 도구는 정규화돼 있다). 도구 설명에
 그 사실과 키를 적어 뒀다. 새 목록 도구는 **정규화하고, 배열 키를 도구 설명에 적는다**.

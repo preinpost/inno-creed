@@ -12,7 +12,7 @@ use crate::sign;
 /// 세션 정보 인메모리 캐시 TTL(10분). 만료 시 `ensure_session()`이 gw050A02로 재조회.
 const SESSION_TTL: Duration = Duration::from_secs(600);
 
-/// 캘린더 목록 인메모리 캐시 TTL(10분). 조회(list_events)·등록(create_event) 양쪽이 같은
+/// 캘린더 목록 인메모리 캐시 TTL(10분). 조회(list_events)·등록(create_calendar_event) 양쪽이 같은
 /// 목록을 쓰므로, 도구 호출마다 sc111A02를 반복하지 않도록 캐시한다. 값 자체는 서버가
 /// 진실의 출처 — TTL 만료 시 자동 재조회하므로 캘린더 추가/삭제도 10분 내 반영된다.
 const CALENDAR_TTL: Duration = Duration::from_secs(600);

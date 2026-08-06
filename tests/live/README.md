@@ -51,7 +51,7 @@ INNO_CREED_LIVE=$(date +%Y%m%d) INNO_CREED_LIVE_SUBMIT=1 python3 tests/live/live
 
 ### ② 금지 도구 물리 차단
 
-`clock_in` · `clock_out` · `delete_temp_approval` 은 `Mcp.call()` 진입부에서 **예외를 던진다.**
+`attendance_clock_in` · `attendance_clock_out` · `delete_temp_approval` 은 `Mcp.call()` 진입부에서 **예외를 던진다.**
 주석으로 "쓰지 마세요"를 적어두는 것과 다르다 — 나중에 누가 실호출 코드를 추가해도 실행되지 않는다.
 `submit_approval`·`cancel_approval` 도 `INNO_CREED_LIVE_SUBMIT=1` 이 없으면 똑같이 차단된다.
 

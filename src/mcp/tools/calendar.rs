@@ -43,7 +43,7 @@ impl Amaranth {
     #[tool(
         description = "일정을 등록한다(등록 후 재조회로 확인). 시각 YYYYMMDDHHmm. calendar 미지정 시 본인 개인 캘린더, 지정 시 그 캘린더(mcalSeq 또는 이름)에 등록 — ⚠️ 공용 캘린더는 다른 사람에게도 보인다."
     )]
-    async fn create_event(
+    async fn create_calendar_event(
         &self,
         Parameters(a): Parameters<CreateEventArgs>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -65,7 +65,7 @@ impl Amaranth {
     #[tool(
         description = "일정의 제목/내용/시간을 수정한다(본인 작성만; 변경분만 지정, 수정 후 재조회 확인). 시각 YYYYMMDDHHmm"
     )]
-    async fn update_event(
+    async fn update_calendar_event(
         &self,
         Parameters(a): Parameters<UpdateEventArgs>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -87,7 +87,7 @@ impl Amaranth {
     #[tool(
         description = "일정을 삭제한다(본인 작성만; 소프트 삭제 30일 휴지통, 삭제 후 재조회 확인)"
     )]
-    async fn delete_event(
+    async fn delete_calendar_event(
         &self,
         Parameters(a): Parameters<DeleteEventArgs>,
     ) -> Result<CallToolResult, ErrorData> {

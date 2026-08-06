@@ -20,7 +20,7 @@ pub fn get_guide(doc_type: &str) -> Result<Value> {
         .ok_or_else(|| anyhow!("번들 가이드에 forms 없음"))?;
 
     let (name, guide) = find_form(forms, doc_type).ok_or_else(|| {
-        anyhow!("'{doc_type}' 신청 가이드 없음. list_submission_guides로 목록 확인")
+        anyhow!("'{doc_type}' 신청 가이드 없음. list_approval_submission_guides로 목록 확인")
     })?;
 
     Ok(json!({

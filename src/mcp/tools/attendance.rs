@@ -53,7 +53,7 @@ impl Amaranth {
     #[tool(
         description = "출근(clock in)을 기록한다(attendFg 1). ⚠️ 실제 근태 punch — 실제 출근 시점에 사용자가 명시 지시할 때만. 이미 출근 기록(comeTm)이 있으면 재기록 안 함(덮어쓰기 방지). punch 후 read-back(comeTm)으로 확인."
     )]
-    async fn clock_in(&self) -> Result<CallToolResult, ErrorData> {
+    async fn attendance_clock_in(&self) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
         let data = modules::attendance::punch_and_verify(&self.client, "1")
             .await
@@ -64,7 +64,7 @@ impl Amaranth {
     #[tool(
         description = "퇴근(clock out)을 기록한다(attendFg 4). ⚠️ 실제 근태 punch — 실제 퇴근 시점에 사용자가 명시 지시할 때만. 이미 퇴근 기록(leaveTm)이 있으면 재기록 안 함. punch 후 read-back(leaveTm)으로 확인."
     )]
-    async fn clock_out(&self) -> Result<CallToolResult, ErrorData> {
+    async fn attendance_clock_out(&self) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
         let data = modules::attendance::punch_and_verify(&self.client, "4")
             .await

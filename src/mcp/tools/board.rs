@@ -46,7 +46,7 @@ impl Amaranth {
     }
 
     #[tool(description = "게시글 첨부파일 목록을 조회한다. 응답 `{files[]}`의 각 항목에 **다운로드에 그대로 쓸 `fileSn`(0-base 인덱스)** 이 들어 있다. art_seq_no+uid(=목록의 attachmentUid) 필요.")]
-    async fn list_attachments(
+    async fn list_notice_attachments(
         &self,
         Parameters(a): Parameters<ListAttachmentsArgs>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -56,8 +56,8 @@ impl Amaranth {
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
-    #[tool(description = "게시글 첨부파일을 다운로드해 out_path에 저장한다. **file_sn 은 list_attachments 결과 `files[].fileSn`(0-base 인덱스)** — ⚠️ 메일 쪽 download_mail_attachment 의 file_sn(서버 토큰 문자열)과 이름만 같고 의미가 다르다.")]
-    async fn download_attachment(
+    #[tool(description = "게시글 첨부파일을 다운로드해 out_path에 저장한다. **file_sn 은 list_notice_attachments 결과 `files[].fileSn`(0-base 인덱스)** — ⚠️ 메일 쪽 download_mail_attachment 의 file_sn(서버 토큰 문자열)과는 의미가 다르다.")]
+    async fn download_notice_attachment(
         &self,
         Parameters(a): Parameters<DownloadAttachmentArgs>,
     ) -> Result<CallToolResult, ErrorData> {

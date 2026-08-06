@@ -31,7 +31,7 @@ pub struct Calendar {
 }
 
 /// 내가 볼 수 있는 캘린더 목록. 클라이언트 캐시(10분 TTL)를 경유하므로 반복 호출해도
-/// `sc111A02`는 TTL당 1회만 나간다. 조회(list_events)와 등록(create_event)이 같은 목록을 쓴다.
+/// `sc111A02`는 TTL당 1회만 나간다. 조회(list_events)와 등록(create_calendar_event)이 같은 목록을 쓴다.
 pub async fn calendars(c: &GwClient) -> Result<Vec<Calendar>> {
     let raw = match c.cached_calendars() {
         Some(list) => list,

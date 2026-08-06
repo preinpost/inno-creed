@@ -116,7 +116,7 @@ impl ServerHandler for Amaranth {
              - 내 예약을 고치거나 취소하려면 `my_reservations`로 seqNum/resIdx를 먼저 얻는다.\n\
              \n\
              주의:\n\
-             - 부작용 있는 도구 — `clock_in`/`clock_out`(실제 근태 기록), `submit_approval`(결재요청 발송), \
+             - 부작용 있는 도구 — `attendance_clock_in`/`attendance_clock_out`(실제 근태 기록), `submit_approval`(결재요청 발송), \
                `send_mail`, `read_notice`(조회수 증가). 사용자가 명시적으로 지시할 때만 호출한다.\n\
              - 회의실 **정원(수용인원) 데이터는 아마란스에 없다**. 'N명 회의실' 조건은 답할 수 없다.\n\
              - 날짜는 YYYYMMDD, 시각은 YYYYMMDDHHmm(입력). 조회 결과의 시각은 ISO로 정규화해 반환한다."
@@ -140,17 +140,18 @@ mod tests {
     /// 도구 목록 스냅샷. 의도적으로 도구를 추가/삭제했다면 이 목록을 함께 고치면 된다
     /// (그때 README·docs 도구표도 같이 갱신할 것).
     const EXPECTED_TOOLS: &[&str] = &[
-        "approval_counts", "attendance_month", "cancel_approval", "cancel_reservation",
-        "clock_in", "clock_out", "create_event", "delete_approval_line", "delete_event",
-        "delete_mail", "delete_temp_approval", "download_attachment", "download_mail_attachment",
-        "find_free_rooms", "find_person", "get_approval_line_schema", "get_attendance_today",
-        "get_submission_guide", "list_approval_line_schemas", "list_approval_lines",
-        "list_approvals", "list_attachments", "list_calendars", "list_events", "list_inbox",
-        "list_mailboxes", "list_notices", "list_reservations", "list_resources",
-        "list_submission_guides", "my_reservations", "org_chart", "pending_approvals",
-        "read_approval", "read_approval_line", "read_mail", "read_notice", "reserve_resource",
-        "save_approval_line", "search", "send_mail", "submit_approval", "suggest_approval_line",
-        "update_event", "update_reservation", "whoami",
+        "approval_counts", "attendance_clock_in", "attendance_clock_out", "attendance_month",
+        "cancel_approval", "cancel_reservation", "create_calendar_event", "delete_approval_line",
+        "delete_calendar_event", "delete_mail", "delete_temp_approval", "download_mail_attachment",
+        "download_notice_attachment", "find_free_rooms", "find_person", "get_approval_line_schema",
+        "get_approval_submission_guide", "get_attendance_today", "list_approval_line_schemas",
+        "list_approval_lines", "list_approval_submission_guides", "list_approvals",
+        "list_calendars", "list_events", "list_mail_inbox", "list_mailboxes",
+        "list_notice_attachments", "list_notices", "list_reservations", "list_resources",
+        "my_reservations", "org_chart", "pending_approvals", "read_approval", "read_approval_line",
+        "read_mail", "read_notice", "reserve_resource", "save_approval_line", "search",
+        "send_mail", "submit_approval", "suggest_approval_line", "update_calendar_event",
+        "update_reservation", "whoami",
     ];
 
     #[test]

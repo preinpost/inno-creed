@@ -63,15 +63,15 @@ pub struct ListAttachmentsArgs {
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct DownloadAttachmentArgs {
-    /// 게시글 번호(art_seq_no). list_attachments와 동일.
+    /// 게시글 번호(art_seq_no). list_notice_attachments와 동일.
     #[serde(deserialize_with = "super::flex_string")]
     #[schemars(schema_with = "super::flex_str_schema")]
     pub art_seq_no: String,
-    /// 게시글 첨부 uid(attachmentUid). list_attachments와 동일.
+    /// 게시글 첨부 uid(attachmentUid). list_notice_attachments와 동일.
     #[serde(deserialize_with = "super::flex_string")]
     #[schemars(schema_with = "super::flex_str_schema")]
     pub uid: String,
-    /// list_attachments 결과 `files[].fileSn`(0-base 인덱스)을 그대로. 기본 0.
+    /// list_notice_attachments 결과 `files[].fileSn`(0-base 인덱스)을 그대로. 기본 0.
     /// ⚠️ 메일의 download_mail_attachment.file_sn(서버 토큰 문자열)과는 다른 값이다.
     #[serde(default)]
     #[serde(deserialize_with = "super::flex_i64")]

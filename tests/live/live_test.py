@@ -57,8 +57,8 @@ CI_MARKERS = (
 # ── ② 절대 호출하지 않는 도구 ────────────────────────────────────────────────
 # 되돌릴 수 없거나, 되돌려도 다른 사람에게 흔적이 남는 것들.
 FORBIDDEN = {
-    "clock_in": "실제 근태 punch — 되돌릴 수 없다",
-    "clock_out": "실제 근태 punch — 되돌릴 수 없다",
+    "attendance_clock_in": "실제 근태 punch — 되돌릴 수 없다",
+    "attendance_clock_out": "실제 근태 punch — 되돌릴 수 없다",
     "delete_temp_approval": "임시보관 문서 삭제 — 사용자의 진짜 초안을 지울 수 있다",
 }
 
@@ -265,7 +265,7 @@ def undo_event(mcp: Mcp, ref: dict, marker: str):
             return True, "이미 없음"
         if marker not in str(row.get("title", "")):
             return False, f"마커 없는 일정이라 건드리지 않음: {row.get('title')!r}"
-    r = mcp.call("delete_event", sch_seq=str(ref["schSeq"]), date=ref["date"])
+    r = mcp.call("delete_calendar_event", sch_seq=str(ref["schSeq"]), date=ref["date"])
     if r[0] == "ERR":
         return False, r[1]
     return bool(r[1].get("ok")), "삭제됨"
@@ -295,7 +295,7 @@ MAIL_SETTLED_SEC = 600   # 이 시간이 지난 항목은 "안 보이면 이미 
 
 
 def _find_mail(mcp: Mcp, subject: str):
-    got = mcp.call("list_inbox")
+    got = mcp.call("list_mail_inbox")
     if got[0] == "ERR":
         return "ERR", got[1]
     return "OK", next((m for m in got[1]["Records"]
@@ -598,7 +598,7 @@ def body(mcp: Mcp, fx: dict, marker: str):
 
     run(mcp, "list_mailboxes", lambda d: (
         isinstance(d, (list, dict)) and len(d) > 0, f"메일함 {len(d)}개 항목"))
-    inbox = run(mcp, "list_inbox", lambda d: (isinstance(d["Records"], list), f"{len(d['Records'])}통"))
+    inbox = run(mcp, "list_mail_inbox", lambda d: (isinstance(d["Records"], list), f"{len(d['Records'])}통"))
     notices = run(mcp, "list_notices", lambda d: (
         len(d["articles"]) > 0, f"{len(d['articles'])}건/전체 {d['totalCnt']}"), page_size=5)
 
@@ -618,8 +618,8 @@ def body(mcp: Mcp, fx: dict, marker: str):
     doc_type = fx["approvalLine"]["docType"]
     run(mcp, "get_approval_line_schema", lambda d: (
         doc_type[:2] in json.dumps(d, ensure_ascii=False), f"{doc_type} 스키마"), doc_type=doc_type)
-    run(mcp, "list_submission_guides", lambda d: (len(json.dumps(d)) > 100, "목록 반환"))
-    run(mcp, "get_submission_guide", lambda d: (
+    run(mcp, "list_approval_submission_guides", lambda d: (len(json.dumps(d)) > 100, "목록 반환"))
+    run(mcp, "get_approval_submission_guide", lambda d: (
         "draftHelp" in json.dumps(d), "draftHelp 포함"), doc_type=doc_type)
 
     def chk_suggest(d):
@@ -670,21 +670,21 @@ def body(mcp: Mcp, fx: dict, marker: str):
         withfile = [a for a in pool if str(a.get("fileCnt", "0")) not in ("0", "")]
         if withfile:
             tgt = withfile[0]
-            al = run(mcp, "list_attachments", lambda d: (
+            al = run(mcp, "list_notice_attachments", lambda d: (
                 len(d["files"]) > 0, f"{tgt['title'][:18]} · {len(d['files'])}개"),
                 art_seq_no=str(tgt["artSeqNo"]), uid=str(tgt["attachmentUid"]))
             if al and al.get("files"):
-                run(mcp, "download_attachment", lambda d: (
+                run(mcp, "download_notice_attachment", lambda d: (
                     d["ok"] and d["bytes"] > 0, f"{d['serverFileName']} {d['bytes']}B"),
                     art_seq_no=str(tgt["artSeqNo"]), uid=str(tgt["attachmentUid"]),
                     file_sn=0, out_path=os.path.join(OUTDIR, "board_att.bin"))
             else:
-                skip("download_attachment", "첨부 목록이 비어 대상 없음")
+                skip("download_notice_attachment", "첨부 목록이 비어 대상 없음")
         else:
-            skip("list_attachments", "첨부 있는 게시글 없음")
-            skip("download_attachment", "첨부 있는 게시글 없음")
+            skip("list_notice_attachments", "첨부 있는 게시글 없음")
+            skip("download_notice_attachment", "첨부 있는 게시글 없음")
     else:
-        for n in ("read_notice", "list_attachments", "download_attachment"):
+        for n in ("read_notice", "list_notice_attachments", "download_notice_attachment"):
             skip(n, "공지 목록 비어 있음")
 
     docs = (ref or {}).get("documents") or []
@@ -708,7 +708,7 @@ def body(mcp: Mcp, fx: dict, marker: str):
     if not past:
         for n in ("reserve_resource", "update_reservation", "cancel_reservation"):
             skip(n, "대상 구간이 빈 과거 평일을 못 찾음 — 남의 예약과 겹칠 수 있어 쓰기 생략")
-        for n in ("create_event", "update_event", "delete_event"):
+        for n in ("create_calendar_event", "update_calendar_event", "delete_calendar_event"):
             skip(n, "과거 날짜 선정 실패")
     else:
         title = f"{marker} 라이브 점검"
@@ -743,24 +743,24 @@ def body(mcp: Mcp, fx: dict, marker: str):
             skip("update_reservation", "등록 실패")
             skip("cancel_reservation", "등록 실패")
 
-        e = run(mcp, "create_event", lambda d: (
+        e = run(mcp, "create_calendar_event", lambda d: (
             d["verified_by_readback"] and "개인캘린더" in d["calendar"],
             f"schSeq={d['schSeq']} {d['calendar']}"),
             title=title, start=past + "1000", end=past + "1100", contents="자동 점검 — 즉시 삭제됨")
         if e:
             ev = track("event", {"schSeq": e["schSeq"], "date": past},
                        f"아마란스 캘린더 {past} '{title}' 삭제")
-            run(mcp, "update_event", lambda d: (
+            run(mcp, "update_calendar_event", lambda d: (
                 str(d["schSeq"]) == str(e["schSeq"]) and d["title"] == title + "(수정)",
                 "schSeq 유지(in-place)"),
                 sch_seq=e["schSeq"], date=past, title=title + "(수정)")
             ok, note = undo_event(mcp, ev["ref"], marker)
-            R.append(("PASS" if ok else "FAIL", "delete_event", note))
+            R.append(("PASS" if ok else "FAIL", "delete_calendar_event", note))
             if ok:
                 untrack(ev)
         else:
-            skip("update_event", "등록 실패")
-            skip("delete_event", "등록 실패")
+            skip("update_calendar_event", "등록 실패")
+            skip("delete_calendar_event", "등록 실패")
 
     # 결재라인 — 생성 후 즉시 삭제. 상신하지 않으므로 아무에게도 통지되지 않는다.
     line_nm = f"{marker} 라이브 점검"
@@ -852,7 +852,7 @@ def submit_scenario(mcp: Mcp, fx: dict, marker: str):
         return
 
     # ③ 페이로드는 번들 가이드의 예시에서 날짜만 갈아끼운다.
-    st, guide = mcp.call("get_submission_guide", doc_type=cfg["docType"])[:2]
+    st, guide = mcp.call("get_approval_submission_guide", doc_type=cfg["docType"])[:2]
     if st == "ERR":
         for n in SUBMIT_TOOLS:
             skip(n, f"제출 가이드 조회 실패: {guide}")

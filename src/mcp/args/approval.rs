@@ -72,7 +72,7 @@ pub struct SuggestApprovalLineArgs {
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct GetSubmissionGuideArgs {
-    /// 양식명 또는 form_id. 예: "외근신청", "외근", "41", "연차휴가신청", "출장신청", "휴일주말근무". list_submission_guides로 목록 확인.
+    /// 양식명 또는 form_id. 예: "외근신청", "외근", "41", "연차휴가신청", "출장신청", "휴일주말근무". list_approval_submission_guides로 목록 확인.
     pub doc_type: String,
 }
 
@@ -122,15 +122,15 @@ pub struct SubmitApprovalArgs {
     #[serde(deserialize_with = "super::flex_i64")]
     #[schemars(schema_with = "super::flex_int_schema")]
     pub form_id: i64,
-    /// 문서 제목. ⭐ 양식별 권장 형식은 `get_submission_guide(form_id).draftHelp.defaultDocTitle`/`titleHelp`(예 연차 `[휴가신청] 00/00 오후반차_홍길동(인사&총무팀)`). 사내 관례이므로 사용자 확인 후 확정할 것.
+    /// 문서 제목. ⭐ 양식별 권장 형식은 `get_approval_submission_guide(form_id).draftHelp.defaultDocTitle`/`titleHelp`(예 연차 `[휴가신청] 00/00 오후반차_홍길동(인사&총무팀)`). 사내 관례이므로 사용자 확인 후 확정할 것.
     pub doc_title: String,
     /// 사용할 개인결재라인 ID(save_approval_line으로 준비). 이 라인의 결재자는 eap110A03가 **양식필수 합의자·수신참조·시행자와 병합**해 돌려주고, 그 병합 결과가 그대로 결재선으로 실린다. 즉 라인에는 **결재(3000)만** 담으면 되고 양식필수 합의자를 또 넣으면 중복될 수 있음.
     #[serde(deserialize_with = "super::flex_i64")]
     #[schemars(schema_with = "super::flex_int_schema")]
     pub line_id: i64,
-    /// HP 근태신청 저장 요청 body JSON(0hr00011 + create 두 콜에 쓰임). **근태 양식 전용** — 이걸 넘기면 상신 전에 HP 신청 레코드 생성 + interlock 등록(GetLinkKey→saveAttendApplicationLinkKey→SetEnageGroup)까지 수행한다. ⭐ **채우는 법·양식별 고정코드·복사용 예시는 `get_submission_guide(form_id).draftHelp.hpApplicationExample`**(예: 출장 linkAtCd"2010"/atCd"2101", 외근 종일 atCd"3101"/linkAtCd"3010"). 신원 필드(coCd/deptCd/empCd/empNm/korNm)는 **submit_approval이 로그인 사용자 값으로 자동 덮어씀** — 예시값 그대로 둬도 됨. 형식: `{"applicationList":[{...,linkAtCd,atCd,atDt,startDt,endDt,startTm,endTm,appDyFg,appDy,appTm,...}],"employeeList":[{...}]}`. 빈 문자열이면 이 단계 전체 생략(= 비근태 양식 경로, 아직 미검증).
+    /// HP 근태신청 저장 요청 body JSON(0hr00011 + create 두 콜에 쓰임). **근태 양식 전용** — 이걸 넘기면 상신 전에 HP 신청 레코드 생성 + interlock 등록(GetLinkKey→saveAttendApplicationLinkKey→SetEnageGroup)까지 수행한다. ⭐ **채우는 법·양식별 고정코드·복사용 예시는 `get_approval_submission_guide(form_id).draftHelp.hpApplicationExample`**(예: 출장 linkAtCd"2010"/atCd"2101", 외근 종일 atCd"3101"/linkAtCd"3010"). 신원 필드(coCd/deptCd/empCd/empNm/korNm)는 **submit_approval이 로그인 사용자 값으로 자동 덮어씀** — 예시값 그대로 둬도 됨. 형식: `{"applicationList":[{...,linkAtCd,atCd,atDt,startDt,endDt,startTm,endTm,appDyFg,appDy,appTm,...}],"employeeList":[{...}]}`. 빈 문자열이면 이 단계 전체 생략(= 비근태 양식 경로, 아직 미검증).
     pub hp_application_json: String,
-    /// 폼 본문 데이터 JSON 텍스트. `{"ITEMS":{...},"TABLE":{"dbTable1":{...},"dbTable2":{...}}}`. ⭐ **양식별 예시는 `get_submission_guide(form_id).draftHelp.bindDataExample`**. 실제 결재문서에 렌더되는 값이 이것(doc_contents_html이 아님). 서버엔 이중인코딩되어 전송됨.
+    /// 폼 본문 데이터 JSON 텍스트. `{"ITEMS":{...},"TABLE":{"dbTable1":{...},"dbTable2":{...}}}`. ⭐ **양식별 예시는 `get_approval_submission_guide(form_id).draftHelp.bindDataExample`**. 실제 결재문서에 렌더되는 값이 이것(doc_contents_html이 아님). 서버엔 이중인코딩되어 전송됨.
     pub bind_data_json: String,
     /// 표시용 본문 HTML(raw). 내부에서 encodeURIComponent로 인코딩해 전송. 근태 양식은 본문이 bindData/HP연동으로 채워지므로 **한 줄 요약 HTML(예 `<div>2026-12-16 종일외근</div>`)로도 상신이 통과**한다(4양식 실증). 브라우저는 양식 표 전체를 조립해 보내므로, 문서 뷰 표시 품질까지 맞추려면 표 HTML이 필요(미검증). 빈 문자열 가능 여부는 미확인.
     pub doc_contents_html: String,

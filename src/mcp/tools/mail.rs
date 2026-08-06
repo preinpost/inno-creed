@@ -21,7 +21,7 @@ impl Amaranth {
     }
 
     #[tool(description = "받은메일함 최근 20통을 조회한다. ⚠️ 응답은 서버 원본 봉투 그대로다 — 메일 배열은 `Records`(다른 목록 도구처럼 정규화돼 있지 않음), 각 항목의 `muid`가 read_mail/delete_mail 키, `attach`(bool)가 첨부 유무.")]
-    async fn list_inbox(&self) -> Result<CallToolResult, ErrorData> {
+    async fn list_mail_inbox(&self) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
         let data = modules::mail::list_mails(&self.client, modules::mail::INBOX, 1, 20)
             .await
@@ -53,12 +53,12 @@ impl Amaranth {
             "to": to,
             "subject": a.subject,
             "attachments": a.attachments.len(),
-            "note": "발송 성공(result:true). 도착 확인은 list_inbox/보낸메일함 재조회 권장"
+            "note": "발송 성공(result:true). 도착 확인은 list_mail_inbox/보낸메일함 재조회 권장"
         });
         Ok(CallToolResult::success(vec![ContentBlock::text(msg.to_string())]))
     }
 
-    #[tool(description = "메일을 삭제한다(휴지통 이동). uids=콤마구분 muid. list_inbox의 muid 사용.")]
+    #[tool(description = "메일을 삭제한다(휴지통 이동). uids=콤마구분 muid. list_mail_inbox의 muid 사용.")]
     async fn delete_mail(
         &self,
         Parameters(a): Parameters<DeleteMailArgs>,
@@ -77,7 +77,7 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "메일 1건의 본문(평문)·헤더·첨부목록을 조회한다. 본문 HTML은 렌더링하지 않고 평문화(외부 이미지 자동로드 안 함, remoteResourceCount로 경고). muid=list_inbox의 muid."
+        description = "메일 1건의 본문(평문)·헤더·첨부목록을 조회한다. 본문 HTML은 렌더링하지 않고 평문화(외부 이미지 자동로드 안 함, remoteResourceCount로 경고). muid=list_mail_inbox의 muid."
     )]
     async fn read_mail(
         &self,

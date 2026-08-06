@@ -47,14 +47,14 @@
 | 도구 | 기능 |
 |---|---|
 | `list_calendars` / `list_events` | 캘린더 목록 / 기간 일정 조회 |
-| `create_event` | 개인 캘린더 일정 등록 |
-| `update_event` | 일정 제목·내용·시간 수정(본인 작성만) |
-| `delete_event` | 일정 삭제(본인 작성만, 소프트 삭제) |
+| `create_calendar_event` | 개인 캘린더 일정 등록 |
+| `update_calendar_event` | 일정 제목·내용·시간 수정(본인 작성만) |
+| `delete_calendar_event` | 일정 삭제(본인 작성만, 소프트 삭제) |
 
 **메일**
 | 도구 | 기능 |
 |---|---|
-| `list_mailboxes` / `list_inbox` | 메일함 목록 / 받은메일 |
+| `list_mailboxes` / `list_mail_inbox` | 메일함 목록 / 받은메일 |
 | `read_mail` | 메일 1건 본문(평문)·헤더·첨부목록 — 외부 이미지 자동로드 안 함 |
 | `send_mail` | 메일 발송(첨부 지원, 받는사람 미지정 시 본인에게) |
 | `delete_mail` | 메일 삭제(휴지통 이동) |
@@ -65,7 +65,7 @@
 |---|---|
 | `list_notices` | 공지/게시글 목록(본문 프리뷰, 검색어·기간 필터) |
 | `read_notice` | 게시글 1건 본문(평문)·댓글 — ⚠️ 조회수 증가 |
-| `list_attachments` / `download_attachment` | 게시글 첨부 목록 / 다운로드 |
+| `list_notice_attachments` / `download_notice_attachment` | 게시글 첨부 목록 / 다운로드 |
 
 **전자결재**
 | 도구 | 기능 |
@@ -81,14 +81,14 @@
 | `save_approval_line` / `delete_approval_line` | 개인결재라인 생성·수정 / 삭제 (상신 아님, 재사용 config) |
 | `suggest_approval_line` | **결재선 후보 제안** — 본인 직책으로 구간 판정 + 직책→사람 해석 (⛔ 확정 아님, 사용자 확인 필수) |
 | `get_approval_line_schema` / `list_approval_line_schemas` | 문서 종류별 결재라인 스키마(직책 기반) 원본 |
-| `get_submission_guide` / `list_submission_guides` | 양식별 신청 가이드(필수항목·절차·주의) |
+| `get_approval_submission_guide` / `list_approval_submission_guides` | 양식별 신청 가이드(필수항목·절차·주의) |
 
 **근태 · 조직 · 나**
 | 도구 | 기능 |
 |---|---|
 | `get_attendance_today` | 오늘 출퇴근 현황(부작용 없음) |
 | `attendance_month` | **기간(월) 근태** — 일자별 출퇴근·근무시간·지각/연차 + 기간 합계 |
-| `clock_in` / `clock_out` | 출근·퇴근 기록 — ⚠️ 실제 근태 punch, 기존 기록은 덮어쓰지 않음 |
+| `attendance_clock_in` / `attendance_clock_out` | 출근·퇴근 기록 — ⚠️ 실제 근태 punch, 기존 기록은 덮어쓰지 않음 |
 | `find_person` | **사람 찾기** — 이름·ID·이메일 → `empSeq`/부서/직책/연락처 |
 | `org_chart` | 부서 트리 / 부서별 사원·직책 |
 | `whoami` | 로그인한 본인 정보(`empSeq`·부서·이메일 + 근태용 `empCd` + 부서명·직책·직급) |
@@ -212,7 +212,7 @@ inno-creed (Rust MCP 서버, 헤드리스)
 
 - **응답 성공 ≠ 실제 반영** — 서버는 권한 밖 대상에 대해 `successTf:true`를 주면서 실제로는 무시(silent no-op)합니다. 그래서 모든 mutation은 직후 **재조회(read-back)로 실제 상태를 확인**하고, 반영되지 않았으면 실패로 처리합니다.
 - **소유권 가드** — 쓰기 도구는 대상의 소유자(예약은 `empSeq`, 일정은 `createSeq`)가 본인일 때만 실행하고, 아니면 명시적 에러를 냅니다. 서버도 남의 데이터 수정을 무시하지만, MCP에서 먼저 걸러 원인을 분명히 알려줍니다. 이 두 규약은 도구 층이 아니라 **각 도메인 모듈의 mutation 함수(`*_and_verify`) 안**에 있어 어떤 호출자도 우회할 수 없습니다.
-- **부작용 있는 도구는 명시** — 근태 punch(`clock_in`/`clock_out`), 상신(`submit_approval`), 게시글 열람(`read_notice`, 조회수 증가)은 실제 기록이 남습니다. 사용자가 명시적으로 지시할 때만 호출하세요.
+- **부작용 있는 도구는 명시** — 근태 punch(`attendance_clock_in`/`attendance_clock_out`), 상신(`submit_approval`), 게시글 열람(`read_notice`, 조회수 증가)은 실제 기록이 남습니다. 사용자가 명시적으로 지시할 때만 호출하세요.
 - **서버 자동 결재선 불신** — 서버가 채워주는 기본 결재선은 위임전결 규정과 일치하지 않습니다. `get_approval_line_schema`로 직책 기반 스키마를 받고, `org_chart`로 담당자를 해석한 뒤 사람이 확인하고 상신하세요.
 
 ## 문서

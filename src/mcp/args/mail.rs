@@ -25,7 +25,7 @@ pub struct SendMailArgs {
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct DeleteMailArgs {
-    /// 삭제할 메일 muid 목록(콤마 구분). list_inbox의 muid 사용.
+    /// 삭제할 메일 muid 목록(콤마 구분). list_mail_inbox의 muid 사용.
     #[serde(deserialize_with = "super::flex_string")]
     #[schemars(schema_with = "super::flex_str_schema")]
     pub uids: String,
@@ -34,7 +34,7 @@ pub struct DeleteMailArgs {
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct ReadMailArgs {
-    /// 메일 muid. list_inbox 결과의 muid 사용.
+    /// 메일 muid. list_mail_inbox 결과의 muid 사용.
     #[serde(deserialize_with = "super::flex_string")]
     #[schemars(schema_with = "super::flex_str_schema")]
     pub muid: String,
@@ -43,7 +43,7 @@ pub struct ReadMailArgs {
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct DownloadMailAttachmentArgs {
-    /// 메일 muid. read_mail/list_inbox의 muid.
+    /// 메일 muid. read_mail/list_mail_inbox의 muid.
     #[serde(deserialize_with = "super::flex_string")]
     #[schemars(schema_with = "super::flex_str_schema")]
     pub muid: String,
