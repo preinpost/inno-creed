@@ -162,6 +162,15 @@ cargo build --release   # → target/release/inno-creed (Windows는 inno-creed.e
 
 **Rust 1.96+** (edition 2024, 번들 `libsqlite3-sys`가 최신 toolchain 요구)와 **C 컴파일러**(rusqlite 번들 SQLite 컴파일용)가 필요합니다.
 
+**커밋 전에는 다음 두 명령을 돌립니다.** CI가 없어 사람이 놓치면 그대로 쌓입니다.
+
+```sh
+cargo clippy --lib -- -D warnings
+cargo test --lib
+```
+
+현재 기준선은 **clippy 경고 0건 · 테스트 전건 통과**입니다. 여기서 늘어나면 그 변경이 원인입니다.
+
 ### MCP 등록
 
 Claude Code:
