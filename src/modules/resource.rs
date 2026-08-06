@@ -257,9 +257,26 @@ fn hhmm(min: i64) -> String {
     format!("{:02}:{:02}", min / 60, min % 60)
 }
 
+/// 아마란스 화면에 실제로 찍히는 문구 = `[예약자명] 자원명`.
+///
+/// ⚠️ **예약명(`reqText`)이 아니다.** 자원 HOME 타임라인은 예약명을 아예 표시하지 않고 이 문자열만
+/// 보여준다(2026-08-06 웹 실측 — 타 사용자 예약 12건 전부 같은 형식). 그래서 "예약명을 '회의'로 넣었는데
+/// 화면엔 '[이재학] 회의실 B'로 나온다 = 잘못 들어갔다"는 오해가 생긴다. 두 값을 같이 반환해 구분시킨다.
+///
+/// 목록 API(`rs121A05`)는 이 값을 `resTitleDisplay`로 주지만 **상세(`rs121A10`)에는 없어서**
+/// 등록·수정 응답에서는 같은 규칙으로 조립한다.
+fn display_title(emp_name: &str, res_name: &str) -> String {
+    format!("[{emp_name}] {res_name}")
+}
+
 /// 예약 1건을 조회용 슬림 형태로. 원본은 74필드에 회의 안건 전문(`descText`)까지 실려 온다.
 pub fn slim_reservation(r: &Value) -> Value {
     let s = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    // 서버가 준 값을 우선하고, 없을 때만 조립한다(표시 규칙은 서버 소유).
+    let display = match s("resTitleDisplay") {
+        t if !t.is_empty() => t,
+        _ => display_title(&s("empName"), &s("resName")),
+    };
     json!({
         "resSeq": s("resSeq"),
         "resName": s("resName"),
@@ -268,6 +285,7 @@ pub fn slim_reservation(r: &Value) -> Value {
         "start": iso(&s("resStartDate")),
         "end": iso(&s("resEndDate")),
         "title": s("reqText"),
+        "displayTitle": display,
         "owner": s("empName"),
         "ownerEmpSeq": s("empSeq"),
         "attendees": s("resUserName"),
@@ -316,12 +334,14 @@ fn lunch_warning(start: &str, end: &str) -> Option<String> {
 /// 종일·다일 예약(예: 반년짜리 공용좌석)은 해당일 전체 점유로 처리한다.
 /// **점심시간(13:00~14:00)도 예약과 똑같이 점유로 처리**해 빈 구간에 들어가지 않게 한다
 /// (예: 12:00~15:00이 비어도 2시간 요청은 12:00~13:00·14:00~15:00으로 쪼개져 후보에서 빠진다).
+/// `include_lunch=true`면 이 제외를 끄고 점심시간도 후보에 넣는다(점심 회의를 잡아야 할 때).
 pub async fn find_free_slots(
     c: &GwClient,
     date: &str,
     duration_min: i64,
     window: &str,
     group: &str,
+    include_lunch: bool,
 ) -> Result<Value> {
     let (win_start, win_end) = parse_window(if window.trim().is_empty() {
         "0900-1800"
@@ -363,9 +383,9 @@ pub async fn find_free_slots(
                 (z > a).then_some((a, z))
             })
             .collect();
-        // 점심시간을 예약과 동일한 점유로 취급(창 안쪽으로 클립).
+        // 점심시간을 예약과 동일한 점유로 취급(창 안쪽으로 클립). include_lunch면 건너뛴다.
         let lunch = (LUNCH.0.max(win_start), LUNCH.1.min(win_end));
-        if lunch.1 > lunch.0 {
+        if !include_lunch && lunch.1 > lunch.0 {
             busy.push(lunch);
         }
         busy.sort();
@@ -418,9 +438,12 @@ pub async fn find_free_slots(
         "roomsChecked": rooms.len(),
         "roomsWithSlot": out.len(),
         "lunchBreak": LUNCH_LABEL,
-        "note": format!(
-            "점심시간({LUNCH_LABEL})은 빈 구간에서 제외했습니다. 점심시간에 잡아야 한다면 reserve_resource로 시각을 직접 지정하세요."
-        ),
+        "lunchExcluded": !include_lunch,
+        "note": if include_lunch {
+            format!("include_lunch=true — 점심시간({LUNCH_LABEL})도 후보에 포함했습니다.")
+        } else {
+            format!("점심시간({LUNCH_LABEL})은 빈 구간에서 제외했습니다. 점심시간에도 찾으려면 include_lunch=true.")
+        },
         "rooms": out
     }))
 }
@@ -564,7 +587,8 @@ pub async fn reserve_and_verify(
     let detail = get_reservation(c, res_seq, seq_num, &res_idx)
         .await
         .map_err(|e| anyhow!("등록 후 재조회 실패: {e}"))?;
-    let stored = detail.get("reqText").and_then(|v| v.as_str()).unwrap_or("");
+    let d = |k: &str| detail.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let stored = d("reqText");
     let reflected = stored == req_text;
 
     // ⚠️ `reqText`는 **요청값이 아니라 재조회로 읽은 실제 저장값**을 싣는다. 요청값을 그대로
@@ -576,6 +600,7 @@ pub async fn reserve_and_verify(
         "resIdx": res_idx,
         "resSeq": res_seq,
         "reqText": stored,
+        "displayTitle": display_title(d("empName"), d("resName")),
         "period": format!("{start}~{end}"),
         "verified_by_readback": reflected
     });
@@ -630,6 +655,7 @@ pub async fn update_and_verify(
         "prev_seqNum": seq_num,
         "reissued": new_seq != seq_num,
         "reqText": ag("reqText"),
+        "displayTitle": display_title(&ag("empName"), &ag("resName")),
         "period": format!("{}~{}", ag("startDate"), ag("endDate")),
         "verified_by_readback": reflected
     });
@@ -816,6 +842,30 @@ mod tests {
 
         // empSeq 필드 자체가 없으면 ""와 비교 → 불일치 → 거부
         assert!(check_owner(&json!({}), "3166", "취소").is_err());
+    }
+
+    /// 화면 표시명은 **예약명과 별개**다. 서버가 준 값이 있으면 그걸 쓰고, 없으면 같은 규칙으로 조립한다.
+    /// (목록 `rs121A05`에는 `resTitleDisplay`가 있지만 상세 `rs121A10`에는 없다 — 2026-08-06 실측.)
+    #[test]
+    fn slim_reservation은_예약명과_화면표시명을_구분해_담는다() {
+        let raw = json!({
+            "resName": "회의실 B", "empName": "이재학", "reqText": "회의",
+            "resTitleDisplay": "[이재학] 회의실 B"
+        });
+        let v = slim_reservation(&raw);
+        assert_eq!(v["title"], "회의", "title은 예약명(reqText)");
+        assert_eq!(v["displayTitle"], "[이재학] 회의실 B", "화면에 찍히는 문구");
+
+        // 서버가 안 줬을 때만 조립
+        let mut raw2 = raw.clone();
+        raw2["resTitleDisplay"] = json!("");
+        assert_eq!(slim_reservation(&raw2)["displayTitle"], "[이재학] 회의실 B");
+    }
+
+    #[test]
+    fn display_title은_예약자와_자원명을_대괄호로_묶는다() {
+        assert_eq!(display_title("이재학", "회의실 B"), "[이재학] 회의실 B");
+        assert_eq!(display_title("", ""), "[] ");
     }
 
     /// 점심시간 겹침 판정. 경계(13:00 종료·14:00 시작)는 **겹치지 않는 것**이 핵심 —

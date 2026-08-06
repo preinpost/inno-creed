@@ -87,6 +87,10 @@ pub struct FindFreeRoomsArgs {
     /// 건물/자원종류: ""(전체) | "본사" | "구로" | attrSeq 숫자
     #[serde(default)]
     pub group: String,
+    /// 점심시간(13:00~14:00)도 후보에 넣을지. 기본 false(제외).
+    /// 사용자가 점심시간에 회의를 잡겠다고 했을 때만 true로 준다.
+    #[serde(default)]
+    pub include_lunch: bool,
 }
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
