@@ -8,3 +8,4 @@
 /tests/live/fixtures.json
 /tests/live/leaks.json
 /tests/live/out/
+__pycache__/

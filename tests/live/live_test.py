@@ -33,6 +33,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import date, datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -58,10 +59,21 @@ CI_MARKERS = (
 FORBIDDEN = {
     "clock_in": "실제 근태 punch — 되돌릴 수 없다",
     "clock_out": "실제 근태 punch — 되돌릴 수 없다",
-    "submit_approval": "실제 결재 상신 — 결재선의 사람들에게 알림이 간다",
-    "cancel_approval": "상신 문서 회수 — 상신을 안 하므로 대상이 없다",
     "delete_temp_approval": "임시보관 문서 삭제 — 사용자의 진짜 초안을 지울 수 있다",
 }
+
+# 상신 시나리오는 별도 opt-in(`INNO_CREED_LIVE_SUBMIT=1`)일 때만 열린다.
+# 되돌리기 자체는 완전하다 — 실측(2026-08-06, docId 141760): submit → appSq 33147 생성 →
+# cancel(purge) 3단계 → **HP 근태 레코드까지 회수**(59건 → 59건), read_approval 2156.
+# 그래도 기본에서 빼는 이유는 잔여물이 아니라 **사람**이다 — 결재선의 3명에게 매 실행 알림이 간다.
+SUBMIT_TOOLS = {
+    "submit_approval": "실제 결재 상신 — 결재선의 사람들에게 알림이 간다(INNO_CREED_LIVE_SUBMIT=1 필요)",
+    "cancel_approval": "상신 문서 회수 — 상신 시나리오와 짝이다(INNO_CREED_LIVE_SUBMIT=1 필요)",
+}
+
+
+def submit_enabled() -> bool:
+    return os.environ.get("INNO_CREED_LIVE_SUBMIT") == "1"
 
 
 def die(msg: str, code: int = 2):
@@ -168,9 +180,12 @@ class Mcp:
 
     def call(self, name, **args):
         """(상태, 값[, 길이]) — 상태는 'OK' | 'ERR'."""
-        if name in FORBIDDEN:
+        blocked = dict(FORBIDDEN)
+        if not submit_enabled():
+            blocked.update(SUBMIT_TOOLS)
+        if name in blocked:
             # ② 물리 차단. 이 예외는 잡지 않는다 — 테스트를 즉시 죽이는 것이 의도다.
-            raise AssertionError(f"금지 도구 호출 시도: {name} ({FORBIDDEN[name]})")
+            raise AssertionError(f"금지 도구 호출 시도: {name} ({blocked[name]})")
         if name == "send_mail" and args.get("to"):
             raise AssertionError("send_mail 은 본인 앞으로만 보낸다 — to 를 지정할 수 없다")
         self.called.add(name)
@@ -274,18 +289,80 @@ def undo_approval_line(mcp: Mcp, ref: dict, marker: str):
     return gone, "삭제됨(재조회 확인)" if gone else "삭제 호출은 됐으나 아직 목록에 남음"
 
 
-def undo_mail(mcp: Mcp, ref: dict, marker: str):
+MAIL_POLL_TRIES = 6      # 발송 직후 배달 대기 — 5초 × 6 = 최대 30초
+MAIL_POLL_INTERVAL = 5
+MAIL_SETTLED_SEC = 600   # 이 시간이 지난 항목은 "안 보이면 이미 정리된 것"으로 본다
+
+
+def _find_mail(mcp: Mcp, subject: str):
     got = mcp.call("list_inbox")
     if got[0] == "ERR":
-        return False, got[1]
-    hit = next((m for m in got[1]["Records"]
-                if ref["subject"] in str(m.get("subject", ""))), None)
+        return "ERR", got[1]
+    return "OK", next((m for m in got[1]["Records"]
+                       if subject in str(m.get("subject", ""))), None)
+
+
+def undo_mail(mcp: Mcp, ref: dict, marker: str):
+    """⚠️ 발송 직후에는 서버가 아직 배달하지 않아 받은메일함에서 안 보일 수 있다.
+    '안 보임 = 정리 완료'로 낙관하면 잠시 후 도착한 메일이 그대로 남는다 → 기다렸다 다시 본다."""
+    try:
+        age = (datetime.now() - datetime.strptime(ref["sentAt"], "%Y-%m-%d %H:%M:%S")).total_seconds()
+    except Exception:
+        age = MAIL_SETTLED_SEC + 1  # sentAt 이 없거나 깨졌으면 오래된 항목으로 취급
+    settled = age > MAIL_SETTLED_SEC
+    tries = 1 if settled else MAIL_POLL_TRIES
+
+    hit = None
+    for i in range(tries):
+        st, hit = _find_mail(mcp, ref["subject"])
+        if st == "ERR":
+            return False, hit
+        if hit:
+            break
+        if i < tries - 1:
+            time.sleep(MAIL_POLL_INTERVAL)
+
     if hit is None:
-        return True, "받은메일함에 없음(이미 정리됐거나 아직 도착 전)"
+        if settled:
+            return True, "받은메일함에 없음(오래된 항목 — 이미 정리된 것으로 본다)"
+        return False, (f"발송 후 {MAIL_POLL_TRIES * MAIL_POLL_INTERVAL}초를 기다려도 받은메일함에 "
+                       "나타나지 않음 — 늦게 도착할 수 있으니 수동 확인 필요")
+
     if marker not in str(hit.get("subject", "")):
         return False, "마커 없는 메일이라 건드리지 않음"
     r = mcp.call("delete_mail", uids=str(hit["muid"]))
-    return (r[0] != "ERR"), f"muid={hit['muid']} 휴지통 이동" if r[0] != "ERR" else r[1]
+    if r[0] == "ERR":
+        return False, r[1]
+    st, still = _find_mail(mcp, ref["subject"])  # read-back — successTf 를 믿지 않는다
+    if st == "ERR":
+        return False, still
+    if still is not None:
+        return False, f"delete_mail 은 성공했다는데 muid={hit['muid']} 가 받은메일함에 아직 있음"
+    return True, f"muid={hit['muid']} 휴지통 이동(재조회 확인)"
+
+
+def undo_approval(mcp: Mcp, ref: dict, marker: str):
+    """상신 문서 회수 — 결재취소(30→20) → 상신취소(20→10) → 임시보관삭제(10→소멸).
+    ⚠️ 이 3단계는 HP 근태 레코드(appSq)까지 회수한다(2026-08-06 실측, docId 141760)."""
+    doc_id, form_id = str(ref["docId"]), str(ref["formId"])
+    got = mcp.call("list_approvals", box_name="sent", page_size=50)
+    if got[0] != "ERR":
+        row = next((d for d in got[1].get("documents", [])
+                    if str(d.get("docId")) == doc_id), None)
+        if row is not None and marker not in str(row.get("title", "")):
+            return False, f"마커 없는 문서라 건드리지 않음: {row.get('title')!r}"
+    r = mcp.call("cancel_approval", doc_id=doc_id, form_id=form_id, purge=True)
+    if r[0] == "ERR":
+        return False, r[1]
+    # read-back — 삭제된 문서는 eap111A04가 2156으로 거절한다(그게 정상 종착지다).
+    chk = mcp.call("read_approval", doc_id=doc_id, form_id=form_id)
+    if chk[0] == "ERR" and "2156" in str(chk[1]):
+        return True, f"삭제 확인(2156) · steps={r[1].get('steps')}"
+    after = mcp.call("list_approvals", box_name="sent", page_size=50)
+    if after[0] != "ERR" and not any(str(d.get("docId")) == doc_id
+                                     for d in after[1].get("documents", [])):
+        return True, f"상신함에서 사라짐 · steps={r[1].get('steps')}"
+    return False, "취소는 실행됐으나 삭제가 확인되지 않음"
 
 
 UNDO = {
@@ -293,6 +370,7 @@ UNDO = {
     "event": undo_event,
     "approval_line": undo_approval_line,
     "mail": undo_mail,
+    "approval": undo_approval,
 }
 
 
@@ -343,6 +421,53 @@ def past_weekday(days_back: int) -> date:
     while d.weekday() >= 5:  # 토/일이면 앞의 평일로
         d -= timedelta(days=1)
     return d
+
+
+PROBE = os.path.join(ROOT, "target", "release", "probe")
+
+
+def hp_records() -> dict | None:
+    """HP 근태신청 레코드(appSq → atDt). MCP 도구로 노출돼 있지 않아 probe 바이너리로 읽는다.
+    상신이 **실패**하면 create가 만든 HP 레코드만 남고 취소할 eap 문서가 없어 **지울 방법이 없다**
+    (하드삭제 API 부재 — 07 §10.5). 그래서 상신 전후로 이걸 찍어 고아 발생을 감지한다."""
+    if not os.path.exists(PROBE):
+        return None
+    body = json.dumps({"approStateList": ["0", "1", "2", "3", "4", "5"], "linkAtCdList": [],
+                       "startDate": "20260101", "endDate": "20301231",
+                       "calendarViewType": "DEFAULT"})
+    try:
+        out = subprocess.run([PROBE, "/human/attendapplication/at00001", body],
+                             capture_output=True, text=True, timeout=60)
+        rows = json.loads(out.stdout)["response"].get("resultData") or []
+    except Exception:
+        return None
+    return {int(r["appSq"]): str(r.get("atDt", "")) for r in rows if r.get("appSq") is not None}
+
+
+def _probe_a03(form_id, line_id) -> dict | None:
+    """상신하지 않고 **병합된 결재선**을 미리 본다(eap110A03는 읽기 콜, docID=0)."""
+    if not os.path.exists(PROBE):
+        return None
+    body = json.dumps({"docID": 0, "formID": str(form_id),
+                       "approkey": "ERP_00000000-0000-0000-0000-000000000000",
+                       "appLineId": str(line_id), "draftTp": "", "reDraft": "", "docType": "",
+                       "doc_auth": 0, "pageCode": "UBAP001"})
+    try:
+        out = subprocess.run([PROBE, "/eap/eap110A03", body],
+                             capture_output=True, text=True, timeout=60)
+        rm = (json.loads(out.stdout)["response"].get("resultData") or {}).get("resultMap") or {}
+    except Exception:
+        return None
+
+    def names(key):
+        v = rm.get(key) or []
+        if isinstance(v, dict):
+            v = [v]
+        return [str(x.get("user_nm") or x.get("emp_nm") or x.get("user_id")) for x in v]
+
+    return {"approvers": names("kyuljaeResult"), "refer": names("m_Refer"),
+            "oper": names("m_Oper"),
+            "formDTp": ((rm.get("form_info") or {}).get("form_d_tp") or "")}
 
 
 def _minutes(iso_ts: str) -> int | None:
@@ -654,11 +779,15 @@ def body(mcp: Mcp, fx: dict, marker: str):
         skip("delete_approval_line", "생성 실패")
 
     # 메일 — 수신자는 본인 고정(Mcp.call 이 to 지정을 차단한다)
-    subj = f"{marker} 라이브 점검 {datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    sent_at = datetime.now()
+    subj = f"{marker} 라이브 점검 {sent_at.strftime('%Y%m%d-%H%M%S')}"
     sm = run(mcp, "send_mail", lambda d: (len(json.dumps(d)) > 10, "본인 앞 발송"),
              subject=subj, html="<p>inno-creed 라이브 점검. 자동 삭제됩니다.</p>")
     if sm is not None:
-        ml = track("mail", {"subject": subj}, f"메일함에서 제목 '{subj}' 삭제")
+        # sentAt 은 배달 대기를 얼마나 참을지 정하는 근거 — undo_mail 참조
+        ml = track("mail",
+                   {"subject": subj, "sentAt": sent_at.strftime("%Y-%m-%d %H:%M:%S")},
+                   f"메일함에서 제목 '{subj}' 삭제")
         ok, note = undo_mail(mcp, ml["ref"], marker)
         R.append(("PASS" if ok else "FAIL", "delete_mail", note))
         if ok:
@@ -666,8 +795,110 @@ def body(mcp: Mcp, fx: dict, marker: str):
     else:
         skip("delete_mail", "send_mail 실패")
 
+    submit_scenario(mcp, fx, marker)
+
     for n, why in FORBIDDEN.items():
         skip(n, f"금지 — {why}")
+
+
+def submit_scenario(mcp: Mcp, fx: dict, marker: str):
+    """상신 → 즉시 회수. opt-in 전용.
+
+    되돌리기는 완전하다(HP 근태 레코드까지 회수됨 — 2026-08-06 실측). 남는 위험은 **상신 실패**뿐이다:
+    `create`는 성공했는데 `eap110A06`이 실패하면 취소할 eap 문서가 없어 HP 레코드가 고아로 남고,
+    하드삭제 API가 없어 지울 수 없다. 그래서 전후로 `hp_records()`를 찍어 고아를 감지한다."""
+    cfg = fx.get("submit")
+    if not cfg:
+        for n in SUBMIT_TOOLS:
+            skip(n, "fixtures.json 에 submit 설정 없음")
+        return
+    if not submit_enabled():
+        for n, why in SUBMIT_TOOLS.items():
+            skip(n, f"opt-in 없음 — {why}")
+        return
+
+    # ① 사전 확인 — 상신하지 않고 병합 결재선을 본다. 예상과 다르면 상신하지 않는다.
+    #    (회사가 양식 규칙을 바꿔 결재자·수신참조가 늘면 여기서 멈춘다.)
+    pre = _probe_a03(cfg["formId"], cfg["lineId"])
+    if pre is None:
+        for n in SUBMIT_TOOLS:
+            skip(n, "probe 바이너리 없음 — `cargo build --release --bin probe` 후 재시도")
+        return
+    want = cfg.get("expectedApprovers") or []
+    if pre["approvers"] != want or len(pre["refer"]) != cfg.get("expectedRefer", 0) \
+            or len(pre["oper"]) != cfg.get("expectedOper", 0):
+        R.append(("FAIL", "submit_approval(결재선 사전확인)",
+                  f"병합 결재선이 예상과 다름 — 상신하지 않음. "
+                  f"결재={pre['approvers']} 참조={pre['refer']} 시행={pre['oper']} (예상 결재={want})"))
+        skip("cancel_approval", "사전확인 불일치로 상신 생략")
+        return
+    R.append(("PASS", "submit_approval(결재선 사전확인)",
+              f"결재 {len(pre['approvers'])}명 {pre['approvers']} · "
+              f"참조 {len(pre['refer'])}건 {pre['refer']} · 시행 {len(pre['oper'])}건 {pre['oper']} · "
+              f"{pre['formDTp']}"))
+
+    # ② 아직 안 쓴 미래 평일을 고른다(중복근태 모달·기존 신청과 겹치지 않게).
+    before = hp_records()
+    used = set((before or {}).values())
+    d, target = date.today() + timedelta(days=int(cfg.get("daysAhead", 90))), None
+    for _ in range(60):
+        if d.weekday() < 5 and d.strftime("%Y%m%d") not in used:
+            target = d.strftime("%Y%m%d")
+            break
+        d += timedelta(days=1)
+    if not target:
+        for n in SUBMIT_TOOLS:
+            skip(n, "미사용 미래 평일을 못 찾음")
+        return
+
+    # ③ 페이로드는 번들 가이드의 예시에서 날짜만 갈아끼운다.
+    st, guide = mcp.call("get_submission_guide", doc_type=cfg["docType"])[:2]
+    if st == "ERR":
+        for n in SUBMIT_TOOLS:
+            skip(n, f"제출 가이드 조회 실패: {guide}")
+        return
+    dh = guide["guide"]["draftHelp"]
+    hp, bd = json.loads(json.dumps(dh["hpApplicationExample"])), json.loads(json.dumps(dh["bindDataExample"]))
+    note = f"{marker} 자동 점검 — 즉시 취소"
+    for a in hp.get("applicationList", []):
+        a.update(atDt=target, startDt=target, endDt=target, appRmkDc=note)
+    try:
+        iso = f"{target[:4]}-{target[4:6]}-{target[6:]}"
+        it = bd["TABLE"]["dbTable1"]["group"][0]["group"][0]["items"]
+        it.update(startDt=iso, endDt=iso, appRmkDc=note)
+        if "taskDc" in it:
+            it["taskDc"] = note
+    except (KeyError, IndexError, TypeError):
+        pass  # 양식마다 bindData 모양이 다르다 — 날짜 치환이 안 되면 예시 그대로 보낸다
+
+    title = f"{marker} {cfg['docType']} {target} (즉시취소)"
+    entry = None
+    s = run(mcp, "submit_approval", lambda d: (int(d.get("docId", 0)) > 0,
+                                               f"docId={d['docId']} 결재선 {d.get('lineCount')}명 · {target}"),
+            form_id=cfg["formId"], doc_title=title, line_id=cfg["lineId"],
+            hp_application_json=json.dumps(hp, ensure_ascii=False),
+            bind_data_json=json.dumps(bd, ensure_ascii=False),
+            doc_contents_html=f"<div>{target} — {note}</div>", numbering_id="")
+    if s and s.get("docId"):
+        entry = track("approval", {"docId": s["docId"], "formId": cfg["formId"]},
+                      f"아마란스 전자결재에서 docId {s['docId']} 결재취소→상신취소→임시보관삭제")
+        ok, msg = undo_approval(mcp, entry["ref"], marker)
+        R.append(("PASS" if ok else "FAIL", "cancel_approval", msg))
+        if ok:
+            untrack(entry)
+    else:
+        skip("cancel_approval", "상신 실패 — 취소할 문서 없음")
+
+    # ④ 고아 감지 — 상신이 실패했든 성공했든, 남은 HP 레코드가 있으면 지울 수 없다.
+    after = hp_records()
+    if before is not None and after is not None:
+        orphan = {sq: dt for sq, dt in after.items() if sq not in before}
+        if orphan:
+            R.append(("FAIL", "HP근태레코드_고아",
+                      f"⚠️ 취소로 회수되지 않은 HP 신청 {orphan} — **하드삭제 API가 없어 자동 정리 불가**. "
+                      "아마란스 개인근태신청현황에서 직접 확인할 것"))
+        else:
+            R.append(("PASS", "HP근태레코드_고아", f"신규 고아 0건(전 {len(before)} → 후 {len(after)})"))
 
 
 if __name__ == "__main__":
