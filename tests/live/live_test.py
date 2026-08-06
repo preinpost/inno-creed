@@ -186,9 +186,12 @@ class Mcp:
         if name in blocked:
             # ② 물리 차단. 이 예외는 잡지 않는다 — 테스트를 즉시 죽이는 것이 의도다.
             raise AssertionError(f"금지 도구 호출 시도: {name} ({blocked[name]})")
-        if name in ("send_mail", "send_mail_from_draft") and args.get("to"):
+        if name in ("send_mail", "send_mail_from_draft", "save_mail_draft") and args.get("to"):
             # send_mail_from_draft 는 to 를 안 주면 **초안에 저장된 수신자**로 나간다.
             # 점검이 만드는 초안은 수신자가 본인이므로, to 를 막으면 남에게 갈 경로가 없다.
+            # ⚠️ `save_mail_draft` 도 막는 이유: 발송 목적지를 정하는 것은 **초안에 저장된 수신자**다.
+            #    여기를 열어두면 남 앞으로 저장된 초안이 만들어지고, 그걸 발송하는 쪽은 `to` 를
+            #    주지 않으므로 위 차단을 그대로 통과한다 — 차단이 한 칸 뒤에 있으면 소용이 없다.
             raise AssertionError(f"{name} 은 본인 앞으로만 보낸다 — to 를 지정할 수 없다")
         self.called.add(name)
         m = self._rpc("tools/call", {"name": name, "arguments": args})
@@ -340,7 +343,61 @@ def undo_mail(mcp: Mcp, ref: dict, marker: str):
         return False, still
     if still is not None:
         return False, f"delete_mail 은 성공했다는데 muid={hit['muid']} 가 받은메일함에 아직 있음"
-    return True, f"muid={hit['muid']} 휴지통 이동(재조회 확인)"
+    ok_sent, note_sent = _undo_sent_copy(mcp, ref, marker, settled)
+    if not ok_sent:
+        return False, f"받은메일함은 정리했으나 {note_sent}"
+    return True, f"muid={hit['muid']} 휴지통 이동(재조회 확인) · {note_sent}"
+
+
+def _sent_search_query(subject: str, marker: str) -> str:
+    """`search` 가 실제로 맞출 수 있는 질의로 줄인다.
+
+    ⚠️ **제목 전문으로는 못 찾는다**(실측). `[live-test]` 같은 대괄호 토큰과 `20260806-165517`
+    같은 숫자·하이픈 토큰이 들어가면 결과가 0건이 된다 — 인덱싱 지연이 아니라 질의 형태 문제다
+    (같은 메일이 `"첨부승계 점검"` 으로는 발송 직후에도 즉시 잡힌다).
+    그래서 **마커와 숫자가 든 토큰을 걷어낸 낱말들**로 질의하고, 정확한 대조는 결과 쪽에서 한다."""
+    words = [w for w in subject.replace(marker, " ").split()
+             if not any(c.isdigit() for c in w)]
+    return " ".join(words) or subject
+
+
+def _undo_sent_copy(mcp: Mcp, ref: dict, marker: str, settled: bool):
+    """본인 앞으로 보낸 메일은 **받은메일함과 보낸메일함 양쪽에** 남는다. 지금까지 이 정리가 없어
+    보낸 사본이 매 실행 한 통씩 쌓였다(실측: 하루치 13통).
+
+    ⚠️ 보낸메일함을 **목록으로 주는 도구가 없다**(`list_mail_inbox`/`list_mail_drafts` 뿐).
+    그래서 `search`(scope=mail)로 찾는다 — 결과에 `box`/`muid`/`title` 이 실려 온다.
+    삭제 조건은 다른 undo 와 같다: **우리가 만든 제목과 정확히 같고, 마커가 붙어 있고, SENT 함**일 때만.
+
+    ⚠️ **"검색 결과 0건 = 이미 정리됨" 으로 낙관하지 않는다.** 질의가 안 맞아 0건일 수도 있어서,
+    그 둘을 구분할 수 없으면 실패로 보고 대장에 남긴다(오래된 항목만 예외로 둔다)."""
+    subject = ref["subject"]
+    got = mcp.call("search", query=_sent_search_query(subject, marker), scope="mail", limit=30)
+    if got[0] == "ERR":
+        return False, f"보낸 사본을 찾지 못함(search 실패): {got[1]}"
+    rows = [it for grp in (got[1].get("results") or []) for it in (grp.get("items") or [])]
+    mine = [it for it in rows
+            if str(it.get("box", "")).upper() == "SENT"
+            and str(it.get("title", "")) == subject
+            and marker in str(it.get("title", ""))]
+    if not mine:
+        if rows:
+            return True, "보낸 사본 없음(검색은 되는데 그 제목이 없다 = 이미 정리됨)"
+        if settled:
+            return True, "보낸 사본 없음(오래된 항목 — 이미 정리된 것으로 본다)"
+        return False, ("보낸 사본을 확인하지 못했다 — search 가 0건을 줬는데 질의가 안 맞은 것인지 "
+                       f"정말 없는 것인지 구분할 수 없다(제목 {subject!r}). 보낸메일함을 직접 확인할 것")
+    uids = ",".join(str(it["muid"]) for it in mine)
+    r = mcp.call("delete_mail", uids=uids)
+    if r[0] == "ERR":
+        return False, f"보낸 사본 삭제 실패(uids={uids}): {r[1]}"
+    chk = mcp.call("search", query=_sent_search_query(subject, marker), scope="mail", limit=30)  # read-back
+    if chk[0] == "OK":
+        left = [it for grp in (chk[1].get("results") or []) for it in (grp.get("items") or [])
+                if str(it.get("box", "")).upper() == "SENT" and str(it.get("title", "")) == subject]
+        if left:
+            return False, f"보낸 사본이 아직 남아 있음: {[it['muid'] for it in left]}"
+    return True, f"보낸 사본 {len(mine)}건 정리"
 
 
 MBOX_KEYS = ("DRAFT", "SENT")  # 이름에 이 낱말이 든 메일함을 찾는다(DRAFTS / Sent)
@@ -912,6 +969,7 @@ def body(mcp: Mcp, fx: dict, marker: str):
         skip("list_mail_drafts", "save_mail_draft 실패 — 조회할 draft가 없음")
 
     draft_send_scenario(mcp, marker)
+    draft_attachment_scenario(mcp, marker)
 
     submit_scenario(mcp, fx, marker)
 
@@ -981,6 +1039,130 @@ def draft_send_scenario(mcp: Mcp, marker: str):
     R.append(("PASS" if ok else "FAIL", "send_mail_from_draft(정리)", note))
     if ok:
         untrack(ml)
+
+
+def draft_attachment_scenario(mcp: Mcp, marker: str):
+    """첨부 2개짜리 초안을 발송하고 **받은 메일에서 첨부를 되받아** 대조한다.
+
+    왜 따로 두나 — `send_mail_from_draft` 의 **첨부 승계 경로**(초안이 이미 서버에 들고 있는 첨부를
+    `mail014A08` 로 발송용 토큰으로 바꿔 `uidAuthList`/`bigFileCnt`/`fwFile` 을 만드는 길)는
+    첨부 없는 초안으로는 **한 줄도 실행되지 않는다.** 브라우저 캡처로 형태만 알아낸 경로라
+    실서버 왕복이 없으면 "구현했다"가 증명되지 않는다.
+
+    **개수만 보면 빈 파일이 붙어도 통과한다** — 그래서 다운로드해 내용까지 대조한다.
+    거부 경로(파일명 콤마·동명 파일·대용량)는 단위 테스트가 덮으므로 여기서 만들지 않는다.
+
+    수신자는 본인이다(`save_mail_draft` 에 `to` 를 주지 않으며, `Mcp.call` 이 그 인자 자체를 막는다).
+    """
+    import shutil
+    import tempfile
+
+    # ① 첨부 원본 — 저장소 밖(OS 임시 경로)에 만든다. 이름은 평범하게(콤마·중복 없이).
+    tmpdir = tempfile.mkdtemp(prefix="inno_creed_live_att_")
+    want: dict[str, bytes] = {}
+    for tag in ("a", "b"):
+        name = f"creed-live-{tag}.txt"
+        body_bytes = f"{marker} attachment {tag}\n승계 확인용 본문 {tag}\n".encode()
+        with open(os.path.join(tmpdir, name), "wb") as fh:
+            fh.write(body_bytes)
+        want[name] = body_bytes
+    paths = [os.path.join(tmpdir, n) for n in want]
+
+    try:
+        before = mailbox_counts(mcp)
+        base_drafts, base_sent = before.get("DRAFT"), before.get("SENT")
+        sent_at = datetime.now()
+        subj = f"{marker} 첨부승계 점검 {sent_at.strftime('%Y%m%d-%H%M%S')}"
+
+        sd = mcp.call("save_mail_draft", subject=subj,
+                      html="<p>inno-creed 라이브 점검(첨부 승계). 자동 삭제됩니다.</p>",
+                      attachments=paths)
+        if sd[0] == "ERR" or not (sd[1] or {}).get("draft_muid"):
+            R.append(("FAIL", "send_mail_from_draft(첨부2)",
+                      f"첨부 초안을 만들지 못함: {sd[1] if sd[0] == 'ERR' else 'draft_muid 없음'}"))
+            return
+        muid = str(sd[1]["draft_muid"])
+        dl = track("mail_draft", {"muid": muid, "subject": subj, "beforeExists": base_drafts},
+                   f"메일 임시보관함에서 제목 '{subj}' 삭제")
+
+        # ② 발송 — 응답이 첨부 2개를 승계했다고 말하는지까지 본다(0이면 조용히 빠뜨린 것이다).
+        st = mcp.call("send_mail_from_draft", draft_muid=muid)
+        if st[0] == "ERR":
+            R.append(("FAIL", "send_mail_from_draft(첨부2)", st[1]))
+            ok, note = undo_mail_draft(mcp, dl["ref"], marker)
+            if ok:
+                untrack(dl)
+            else:
+                R.append(("FAIL", "send_mail_from_draft(첨부2·정리)", note))
+            return
+        d = st[1]
+        after = mailbox_counts(mcp)
+        now_sent = after.get("SENT")
+        sent_ok = d.get("sent") is True and str(d.get("draft_muid")) == muid
+        att_ok = d.get("attachments") == len(want)
+        grew = now_sent is not None and base_sent is not None and now_sent == base_sent + 1
+        R.append(("PASS" if (sent_ok and att_ok and grew) else "FAIL", "send_mail_from_draft(첨부2)",
+                  f"첨부 {d.get('attachments')}개 승계 · 보낸메일함 {base_sent}→{now_sent}"
+                  f"{'' if grew else ' ⚠️발송 미확인'}{'' if att_ok else ' ⚠️첨부 수 불일치'}"))
+        untrack(dl)  # 발송 성공 = 서버가 초안을 지웠다(`draft_deleted` 는 위 시나리오가 검증한다)
+        ml = track("mail", {"subject": subj, "sentAt": sent_at.strftime("%Y-%m-%d %H:%M:%S")},
+                   f"메일함에서 제목 '{subj}' 삭제")
+
+        # ③ **진짜 검증** — 배달된 메일을 열어 첨부가 실제로 붙어 왔는지 본다.
+        hit = None
+        for i in range(MAIL_POLL_TRIES):
+            _, hit = _find_mail(mcp, subj)
+            if hit:
+                break
+            if i < MAIL_POLL_TRIES - 1:
+                time.sleep(MAIL_POLL_INTERVAL)
+        if not hit:
+            R.append(("FAIL", "첨부승계_수신확인",
+                      f"발송 후 {MAIL_POLL_TRIES * MAIL_POLL_INTERVAL}초를 기다려도 도착하지 않음"))
+        else:
+            rm = mcp.call("read_mail", muid=str(hit["muid"]))
+            if rm[0] == "ERR":
+                R.append(("FAIL", "첨부승계_수신확인", rm[1]))
+            else:
+                got = rm[1].get("attachments") or []
+                names = sorted(str(a.get("fileName")) for a in got)
+                names_ok = names == sorted(want)
+                R.append(("PASS" if names_ok else "FAIL", "첨부승계_수신확인",
+                          f"첨부 {len(got)}개 {names}"
+                          f"{'' if names_ok else f' ⚠️올린 것과 다름 {sorted(want)}'}"))
+                # ④ 내용까지 대조 — 개수·이름만 보면 **빈 파일이 붙어도 통과**한다.
+                mismatched = []
+                for a in got:
+                    name = str(a.get("fileName"))
+                    out = os.path.join(OUTDIR, f"att_{name}")
+                    dr = mcp.call("download_mail_attachment", muid=str(hit["muid"]),
+                                  file_sn=str(a.get("fileSn")), out_path=out)
+                    if dr[0] == "ERR":
+                        mismatched.append(f"{name}: 다운로드 실패 {dr[1]}")
+                        continue
+                    try:
+                        blob = open(out, "rb").read()
+                    except OSError as e:
+                        mismatched.append(f"{name}: 저장본을 못 읽음 {e}")
+                        continue
+                    expect = want.get(name)
+                    if expect is None:
+                        mismatched.append(f"{name}: 우리가 올린 파일이 아님")
+                    elif blob != expect:
+                        # 바이트가 달라도 마커가 살아 있으면 "붙긴 왔다" — 둘을 구분해 적는다.
+                        kind = "마커는 있음(인코딩 차이?)" if marker.encode() in blob else "내용 불일치"
+                        mismatched.append(f"{name}: {kind} {len(blob)}B(원본 {len(expect)}B)")
+                    os.path.exists(out) and os.remove(out)
+                R.append(("PASS" if not mismatched else "FAIL", "첨부승계_내용대조",
+                          "올린 내용과 바이트까지 일치" if not mismatched else " / ".join(mismatched)))
+
+        # ⑤ 정리 — 기존 패턴 그대로("우리가 만든 id" AND "마커 있음")
+        ok, note = undo_mail(mcp, ml["ref"], marker)
+        R.append(("PASS" if ok else "FAIL", "send_mail_from_draft(첨부2·정리)", note))
+        if ok:
+            untrack(ml)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def submit_scenario(mcp: Mcp, fx: dict, marker: str):
