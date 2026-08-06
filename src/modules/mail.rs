@@ -366,13 +366,18 @@ pub async fn save_mail_draft(
 ///
 /// 이 한 콜이 초안 발송에 필요한 것을 전부 준다(2026-08-06 브라우저 캡처):
 /// `mailkey`(발송 뒤 원본 삭제용) · 새 `sessionKey`/`filedir` · `mailInfo.mime.header`(폼의 `mimeHeader`) ·
-/// `mailInfo.mime.body.html`(본문) · `decodeMime.subject`(제목) · `decodeMime.to`(수신자) ·
-/// `mailInfo.mime.fileList`(첨부).
+/// `mailInfo.mime.body.html`(본문) · `mailInfo.decodeMime.subject`(제목) ·
+/// `mailInfo.decodeMime.to`(수신자) · `mailInfo.mime.fileList`(첨부).
 /// 덕분에 MCP가 호출마다 독립이어도 `mailkey`를 인자로 들고 다닐 필요가 없다.
 ///
-/// ⚠️ **경로를 줄여 적지 말 것** — 본문·첨부는 `mailInfo` 바로 밑이 아니라 `mailInfo.mime` 밑이다.
-/// 코드가 `mailInfo.body.html`/`mailInfo.fileList`도 보는 것은 응답 모양이 다를 때를 대비한
-/// **fallback**이지 정본이 아니다.
+/// ⚠️ **경로를 줄여 적지 말 것.** 쓸모 있는 값은 전부 `mailInfo` 아래에 있다 —
+/// 본문·첨부·헤더는 `mailInfo.mime` 밑, 디코드된 제목·수신자는 `mailInfo.decodeMime` 밑이다.
+/// **최상위에는 `decodeMime`이 없다**(있다고 보고 `/decodeMime/subject`를 읽던 코드가 라이브에서
+/// 제목을 못 찾아 발송이 막혔다). `save_mail_draft`가 만든 초안과 브라우저가 만든 초안 **양쪽을
+/// 실측해 같은 모양임을 확인**했다.
+///
+/// ⚠️ 최상위 `paramTo`는 **우리가 보낸 요청 파라미터의 메아리**다. `draft_init_body`가 `mailTo`를
+/// 늘 `"(Unknown)"`으로 보내므로 이 자리도 늘 `"(Unknown)"`이다 — 수신자 출처로 쓸 수 없다.
 ///
 /// `mailTo`/`viewFlag`/`fromFlag`/`readType`/`domainSeq`는 브라우저가 보내는 값을 그대로 재현한 것이다
 /// — 무엇이 필수인지는 실측하지 않았으므로 빼지 말 것.
@@ -553,28 +558,25 @@ fn plan_draft_send(
 ) -> Result<DraftSendPlan> {
     let mail_info = init.get("mailInfo").cloned().unwrap_or(Value::Null);
 
-    // 첨부 목록은 `mailInfo.mime.fileList`에 있다(실측: 첨부 없는 초안이 `[]`).
+    // 첨부 목록의 정본은 `mailInfo.mime.fileList` **하나**다(API 초안·브라우저 초안 양쪽 실측:
+    // 첨부 없으면 `[]`). 대안 자리를 덧대지 않는다 — 어느 쪽이 정본인지 흐려지면 다음 사람이
+    // 엉뚱한 자리를 승격시킨다.
     // **키가 아예 없으면 "첨부 없음"이 아니라 "판정 불가"로 본다** — 응답 모양이 예상과 다른 채로
     // 진행하면 첨부를 조용히 빠뜨린 메일이 나가는데, 그건 되돌릴 수 없다.
-    let file_list = mail_info
-        .pointer("/mime/fileList")
-        .or_else(|| mail_info.get("fileList"));
-    let Some(files) = file_list.and_then(|v| v.as_array()) else {
+    let Some(files) = mail_info.pointer("/mime/fileList").and_then(|v| v.as_array()) else {
         bail!(
             "초안(draft_muid={draft_muid})의 첨부 목록(mailInfo.mime.fileList)을 응답에서 찾지 못해 \
              첨부 유무를 판정할 수 없다 — 첨부를 빠뜨린 채 보낼 위험이 있어 발송하지 않는다"
         );
     };
 
-    // 제목은 서버가 디코드해준 값(`decodeMime.subject`)을 쓴다 — mime 헤더 쪽 subject는
+    // 제목은 서버가 디코드해준 값(`mailInfo.decodeMime.subject`)을 쓴다 — mime 헤더 쪽 subject는
     // `=?UTF-8?B?...?=` 인코딩 상태라 그대로 쓰면 안 된다.
-    let subject = json_str(init.pointer("/decodeMime/subject"));
+    // ⚠️ **`mailInfo` 아래다.** 최상위 `decodeMime`은 존재하지 않는다(실측) — 거기서 읽던 코드가
+    // 라이브에서 제목을 못 찾아 발송이 막혔다.
+    let subject = json_str(init.pointer("/mailInfo/decodeMime/subject"));
+    // 본문 정본도 하나다 — `mailInfo.mime.body.html`(양쪽 초안 실측).
     let html = json_str(mail_info.pointer("/mime/body/html"));
-    let html = if html.is_empty() {
-        json_str(mail_info.pointer("/body/html"))
-    } else {
-        html
-    };
     // ⚠️ **본문·제목도 첨부와 같은 기준이다 — 판정 불가는 중단이다.**
     // 두 경로 어디에도 본문이 없으면 `html`이 빈 문자열인 채로 A04가 나가고, 내용이 텅 빈 메일이
     // 수신자에게 도착한다(회수 불가). 재저장(2회차 이상) 초안의 응답 모양은 실측하지 않았으므로
@@ -588,7 +590,7 @@ fn plan_draft_send(
     }
     if subject.trim().is_empty() {
         bail!(
-            "초안(draft_muid={draft_muid})의 제목(decodeMime.subject)이 비어 있거나 응답에서 \
+            "초안(draft_muid={draft_muid})의 제목(mailInfo.decodeMime.subject)이 비어 있거나 응답에서 \
              찾지 못했다 — 제목 없는 메일이 나가는 것을 막기 위해 발송하지 않는다. \
              임시보관함에서 그 초안을 확인할 것"
         );
@@ -647,42 +649,35 @@ fn unescape_entities(s: &str) -> String {
 
 /// 초안에 저장된 수신자를 폼에 실을 형태로 꺼낸다. 없으면 빈 문자열(호출부가 거절한다).
 ///
-/// ⚠️ **`mime.header.to`를 쓰지 않는다.** 수신자가 채워진 초안을 열어 실측해 보니 그 값은
-/// 표시명이 `=?UTF-8?B?...?=`로 MIME 인코딩된 데다 `<`/`>`가 `&lt;`/`&gt;`로 HTML 이스케이프돼
-/// 온다 — 그대로 실으면 표시명이 깨지고 주소 파싱도 깨질 수 있다. 브라우저가 실제로 A04에 싣는
-/// 값은 `decodeMime.to`(서버가 디코드해준 표시형)를 HTML 언이스케이프한 것이라 그쪽을 쓴다.
+/// **정본은 `mailInfo.decodeMime.to` 하나다**(API 초안·브라우저 초안 양쪽 실측). 수신자가 없는
+/// 초안에는 이 키가 아예 없고, 있으면 서버가 디코드해준 표시형이 들어 있다.
 ///
-/// **수신자가 여럿이어도 안전하다** — 이 함수도 브라우저도 `decodeMime.to` **문자열을 통째로**
-/// 싣는다. 우리가 주소를 쪼개거나 다시 잇지 않으므로 구분자가 무엇이든 브라우저가 보내는 것과
-/// 같은 값이 나간다(구분자 자체는 여전히 미실측이지만 그 값을 해석할 일이 없다).
+/// ⚠️ **`mime.header.to`를 쓰지 않는다.** 같은 초안에서 그 값은 표시명이 `=?UTF-8?B?...?=`로
+/// MIME 인코딩된 데다 `<`/`>`가 `&lt;`/`&gt;`로 HTML 이스케이프돼 온다 — 그대로 실으면 표시명이
+/// 깨지고 주소 파싱도 깨질 수 있다. 브라우저가 A04에 싣는 값은 디코드된 표시형이다.
 ///
-/// ⚠️ **변환이 주소를 먹었는지 검사한다** — `decodeMime.to`가 늘 이스케이프돼 온다는 근거는
-/// 관측 1건뿐이다. 값이 있는데 `@`가 없으면 조용히 통과시키지 않고 거부한다.
+/// ⚠️ **최상위 `paramTo`를 대안으로 두지 않는다.** 그 자리는 우리가 보낸 `mailTo` 요청 파라미터를
+/// 되돌려줄 뿐이고, `draft_init_body`가 그것을 늘 `"(Unknown)"`으로 보내므로 **어떤 초안에서도
+/// 주소가 나올 수 없다**(실측: 수신자가 채워진 초안에서도 `"(Unknown)"`). 대안 자리를 쌓으면
+/// 어느 것이 정본인지 흐려질 뿐이다.
+///
+/// **수신자가 여럿이어도 안전하다** — 이 함수도 브라우저도 그 **문자열을 통째로** 싣는다.
+/// 우리가 주소를 쪼개거나 다시 잇지 않으므로 구분자가 무엇이든 브라우저가 보내는 것과 같은 값이
+/// 나간다(구분자 자체는 여전히 미실측이지만 그 값을 해석할 일이 없다).
+///
+/// ⚠️ **변환이 주소를 먹었는지 검사한다** — 값이 있는데 `@`가 없으면 조용히 통과시키지 않고 거부한다.
 fn draft_recipient(init: &Value, draft_muid: &str) -> Result<String> {
-    let decoded = unescape_entities(&json_str(init.pointer("/decodeMime/to")));
-    if !decoded.trim().is_empty() {
-        if !decoded.contains('@') {
-            bail!(
-                "초안(draft_muid={draft_muid})의 수신자(decodeMime.to)가 주소로 보이지 않는다('{decoded}') \
-                 — 엉뚱한 곳으로 보내지 않도록 발송하지 않는다. to 인자로 수신자를 지정할 것"
-            );
-        }
-        return Ok(decoded);
+    let decoded = unescape_entities(&json_str(init.pointer("/mailInfo/decodeMime/to")));
+    if decoded.trim().is_empty() {
+        return Ok(String::new()); // 수신자 없는 초안 — 호출부가 `to` 인자를 요구한다
     }
-    // `decodeMime.to`가 비면 `paramTo`(주소만)를 본다 — 표시명은 잃지만 주소는 맞다.
-    // ⚠️ 단 수신자 없는 초안은 이 자리가 `(Unknown)`으로 올 수 있다(실측: 그런 초안의 URL이
-    // `mailTo=(Unknown)`이었다). 그건 주소가 아니므로 "수신자 없음"으로 본다.
-    let p = json_str(init.get("paramTo"));
-    if p.trim() == "(Unknown)" || p.trim().is_empty() {
-        return Ok(String::new());
-    }
-    if !p.contains('@') {
+    if !decoded.contains('@') {
         bail!(
-            "초안(draft_muid={draft_muid})의 수신자(paramTo)가 주소로 보이지 않는다('{p}') \
+            "초안(draft_muid={draft_muid})의 수신자(mailInfo.decodeMime.to)가 주소로 보이지 않는다('{decoded}') \
              — 엉뚱한 곳으로 보내지 않도록 발송하지 않는다. to 인자로 수신자를 지정할 것"
         );
     }
-    Ok(p)
+    Ok(decoded)
 }
 
 /// 초안에 **참조(cc/bcc)가 걸려 있으면 발송을 거부**한다.
@@ -690,9 +685,11 @@ fn draft_recipient(init: &Value, draft_muid: &str) -> Result<String> {
 /// 발송 폼은 `cc`/`bcc`를 항상 빈 값으로 보낸다 — 초안에 참조가 있어도 읽지 않는다. 그대로
 /// 보내면 참조 수신자가 조용히 빠진 채 나가고 회수할 수 없다(빈 본문·첨부 누락과 같은 부류다).
 ///
-/// 참조가 실려 오는 자리는 수신자(`to`)와 같은 세 곳으로 본다 — `mailInfo.mime.header` ·
-/// `decodeMime` · 최상위 `param*`. **하나도 읽을 수 없으면 "참조 없음"이 아니라 판정 불가**로
-/// 보고 중단한다(실측: 참조 없는 초안도 `mailInfo.mime.header.cc`를 빈 문자열로 들고 온다).
+/// 참조가 실려 올 수 있는 자리는 둘이다 — `mailInfo.mime.header`(원본 헤더)와
+/// `mailInfo.decodeMime`(서버가 디코드해준 값). **하나도 읽을 수 없으면 "참조 없음"이 아니라
+/// 판정 불가**로 보고 중단한다(실측: 참조 없는 초안도 `mailInfo.mime.header.cc`를 빈 문자열로
+/// 들고 오므로 정상 초안은 늘 판정 가능하다).
+/// 최상위 `paramCc`/`paramBcc`는 **응답에 존재하지 않아**(양쪽 초안 실측) 보지 않는다.
 ///
 /// ⚠️ **`bcc`는 관측된 응답 어디에도 키가 없었다** — 원래 메시지 헤더에 남지 않는 필드다.
 /// 실려 오기만 하면 cc와 같은 기준으로 막지만, "bcc가 있는데 응답에 실리지 않는" 경우는
@@ -700,8 +697,8 @@ fn draft_recipient(init: &Value, draft_muid: &str) -> Result<String> {
 fn refuse_if_carbon_copy(init: &Value, draft_muid: &str) -> Result<()> {
     let mut readable = false;
     for (kind, paths) in [
-        ("cc", ["/mailInfo/mime/header/cc", "/decodeMime/cc", "/paramCc"]),
-        ("bcc", ["/mailInfo/mime/header/bcc", "/decodeMime/bcc", "/paramBcc"]),
+        ("cc", ["/mailInfo/mime/header/cc", "/mailInfo/decodeMime/cc"]),
+        ("bcc", ["/mailInfo/mime/header/bcc", "/mailInfo/decodeMime/bcc"]),
     ] {
         for p in paths {
             let Some(v) = init.pointer(p) else { continue };
@@ -1349,7 +1346,13 @@ mod tests {
         assert_ne!(b["mailKind"], "me");
     }
 
-    /// 초안 열기(draft 모드 `mail014A01`) 응답의 실측 모양. 발송 판정에 쓰이는 자리만 담았다.
+    /// 초안 열기(draft 모드 `mail014A01`) 응답의 **실측 모양**. 발송 판정에 쓰이는 자리만 담았다.
+    ///
+    /// ⚠️ **`decodeMime`은 `mailInfo` 아래다.** 이 픽스처가 그것을 최상위에 두고 있었던 탓에
+    /// 단위 테스트는 전부 통과하면서 **라이브에서 제목을 못 찾아 발송이 막혔다.** 픽스처가 틀리면
+    /// 테스트는 코드가 아니라 그 오해를 지킨다 — 그래서 실측한 응답 모양을 그대로 옮겨 적는다.
+    /// (`save_mail_draft`가 만든 초안과 브라우저가 만든 초안이 **같은 모양**임을 확인했다.)
+    /// 최상위 `paramTo`가 `"(Unknown)"`인 것도 실측 그대로다 — 우리가 보낸 `mailTo`의 메아리다.
     fn sample_draft_init() -> Value {
         json!({
             "email": "me@example.com",
@@ -1357,15 +1360,56 @@ mod tests {
             "filedir": "/dir/2026",
             "sessionKey": "SK-D",
             "mailkey": "1785993246615_x.eml",
-            "paramTo": "hong@example.com",
-            "mailInfo": { "mime": {
-                "header": { "mime-version": "1.0", "to": "=?UTF-8?B?7ZmN?= &lt;hong@example.com&gt;",
-                            "cc": "", "subject": "=?UTF-8?B?...?=" },
-                "body": { "html": "<p>본문</p>", "plain": "본문" },
-                "fileList": []
-            }},
-            "decodeMime": { "subject": "제목", "to": "홍길동 &lt;hong@example.com&gt;" }
+            "paramTo": "(Unknown)",
+            "mailInfo": {
+                "muid": 13542607,
+                "mboxName": "DRAFTS",
+                "mime": {
+                    "header": { "mime-version": "1.0", "to": "=?UTF-8?B?7ZmN?= &lt;hong@example.com&gt;",
+                                "cc": "", "subject": "=?UTF-8?B?...?=" },
+                    "body": { "html": "<p>본문</p>", "plain": "본문" },
+                    "fileList": []
+                },
+                "decodeMime": { "subject": "제목", "to": "홍길동 &lt;hong@example.com&gt;" }
+            }
         })
+    }
+
+    /// ⭐ **라이브에서 터진 그 회귀.** 최상위 `decodeMime`은 실재하지 않으므로, 거기에만 값이 있는
+    /// 응답은 "제목을 못 찾았다"로 **거부돼야 한다**. 만약 코드가 다시 최상위를 보게 되면 이
+    /// 테스트가 통과해버리므로, 반대로 **정본(`mailInfo.decodeMime`)만 있는 응답이 성공**하는 것도
+    /// 함께 못박는다. 둘을 같이 걸어야 "어느 자리가 정본인지"가 테스트로 고정된다.
+    #[test]
+    fn 최상위_decode_mime은_정본이_아니다() {
+        // 정본 자리에만 값이 있는 응답 = 실측 모양 → 성공
+        let ok = plan_draft_send(DraftExists, &sample_draft_init(), "1", "").unwrap();
+        assert_eq!(ok.subject, "제목");
+        assert_eq!(ok.to, "홍길동 <hong@example.com>");
+
+        // 값을 최상위로 옮긴 응답 = 실재하지 않는 모양 → 제목을 못 찾아 거부
+        let mut top = sample_draft_init();
+        let dm = top["mailInfo"].as_object_mut().unwrap().remove("decodeMime").unwrap();
+        top["decodeMime"] = dm;
+        let Err(e) = plan_draft_send(DraftExists, &top, "1", "") else {
+            panic!("최상위 decodeMime을 정본으로 읽고 있다 — 라이브에서 막힌 그 경로다");
+        };
+        assert!(format!("{e:#}").contains("제목"), "{e:#}");
+
+        // 수신자도 같은 자리에서 온다 — 정본에서 빼면 '수신자 없음'으로 떨어진다.
+        let mut no_to = sample_draft_init();
+        no_to["mailInfo"]["decodeMime"].as_object_mut().unwrap().remove("to");
+        let Err(e) = plan_draft_send(DraftExists, &no_to, "1", "") else {
+            panic!("수신자 없는 초안을 그대로 보내려 한다");
+        };
+        assert!(format!("{e:#}").contains("수신자"), "{e:#}");
+    }
+
+    /// 최상위 `paramTo`는 **수신자 출처가 아니다** — 우리가 보낸 `mailTo`의 메아리라 어떤 초안에서도
+    /// `"(Unknown)"`이다. 대안 자리로 되살리면 이 테스트가 깨진다.
+    #[test]
+    fn param_to는_수신자_출처가_아니다() {
+        let init = json!({ "paramTo": "hong@example.com" });
+        assert_eq!(draft_recipient(&init, "1").unwrap(), "", "paramTo를 수신자로 읽고 있다");
     }
 
     /// 실재 확인 — 목록에 없으면 발송하지 않는다. 반환값이 `plan_draft_send`의 입력이라
@@ -1413,7 +1457,7 @@ mod tests {
         assert!(plan_draft_send(DraftExists, &blank_body, "1", "").is_err(), "공백뿐인 본문");
 
         let mut no_subject = sample_draft_init();
-        no_subject["decodeMime"]["subject"] = json!("");
+        no_subject["mailInfo"]["decodeMime"]["subject"] = json!("");
         assert!(plan_draft_send(DraftExists, &no_subject, "1", "").is_err(), "빈 제목");
 
         let mut with_cc = sample_draft_init();
@@ -1425,8 +1469,7 @@ mod tests {
         assert!(plan_draft_send(DraftExists, &no_cc_key, "1", "").is_err(), "참조 판정 불가");
 
         let mut no_to = sample_draft_init();
-        no_to["decodeMime"].as_object_mut().unwrap().remove("to");
-        no_to["paramTo"] = json!("(Unknown)");
+        no_to["mailInfo"]["decodeMime"].as_object_mut().unwrap().remove("to");
         assert!(plan_draft_send(DraftExists, &no_to, "1", "").is_err(), "수신자 없음");
     }
 
@@ -1470,11 +1513,11 @@ mod tests {
         // 참조 없는 초안은 통과한다(cc 키가 빈 값으로 읽힌다).
         assert!(refuse_if_carbon_copy(&init_without_cc(), "1").is_ok());
 
-        // cc가 실려 오는 세 자리 어디에서든 값이 있으면 거부.
+        // cc가 실려 올 수 있는 두 자리 어디에서든 값이 있으면 거부.
         for init in [
             json!({ "mailInfo": { "mime": { "header": { "cc": "누군가 <x@y.z>" } } } }),
-            json!({ "mailInfo": { "mime": { "header": { "cc": "" } } }, "decodeMime": { "cc": "누군가 &lt;x@y.z&gt;" } }),
-            json!({ "mailInfo": { "mime": { "header": { "cc": "" } } }, "paramCc": "x@y.z" }),
+            json!({ "mailInfo": { "mime": { "header": { "cc": "" } },
+                                  "decodeMime": { "cc": "누군가 &lt;x@y.z&gt;" } } }),
         ] {
             assert!(refuse_if_carbon_copy(&init, "1").is_err(), "cc가 있으면 막아야 한다: {init}");
         }
@@ -1482,10 +1525,17 @@ mod tests {
         // bcc도 같은 기준이다 — 실려 오기만 하면 막는다.
         for init in [
             json!({ "mailInfo": { "mime": { "header": { "cc": "", "bcc": "x@y.z" } } } }),
-            json!({ "mailInfo": { "mime": { "header": { "cc": "" } } }, "paramBcc": "x@y.z" }),
+            json!({ "mailInfo": { "mime": { "header": { "cc": "" } },
+                                  "decodeMime": { "bcc": "x@y.z" } } }),
         ] {
             assert!(refuse_if_carbon_copy(&init, "1").is_err(), "bcc가 있으면 막아야 한다: {init}");
         }
+
+        // ⚠️ 최상위 `decodeMime`·`paramCc`는 **응답에 없는 자리**다. 거기 값이 있어도 참조가 있다는
+        // 뜻이 아니므로 정본(`mailInfo.mime.header.cc`)이 비어 있으면 그대로 통과해야 한다.
+        assert!(refuse_if_carbon_copy(
+            &json!({ "mailInfo": { "mime": { "header": { "cc": "" } } },
+                     "decodeMime": { "cc": "누군가" }, "paramCc": "x@y.z" }), "1").is_ok());
 
         // 참조를 **어디에서도 읽지 못하면** "참조 없음"이 아니라 판정 불가 → 중단.
         assert!(refuse_if_carbon_copy(&json!({}), "1").is_err());
@@ -1510,9 +1560,11 @@ mod tests {
     #[test]
     fn 초안_수신자는_엔티티만_풀고_주소를_보존한다() {
         let init = json!({
-            "mailInfo": { "mime": { "header": { "to": "=?UTF-8?B?7J207J6s7ZWZ?= &lt;a@b.c&gt;" } } },
-            "decodeMime": { "to": "홍길동 &lt;a@b.c&gt;" },
-            "paramTo": "a@b.c"
+            "mailInfo": {
+                "mime": { "header": { "to": "=?UTF-8?B?7J207J6s7ZWZ?= &lt;a@b.c&gt;" } },
+                "decodeMime": { "to": "홍길동 &lt;a@b.c&gt;" }
+            },
+            "paramTo": "(Unknown)"
         });
         assert_eq!(
             draft_recipient(&init, "1").unwrap(),
@@ -1523,29 +1575,26 @@ mod tests {
         // ⛔ **본문 렌더러(html_to_text)를 쓰면 안 되는 이유** — 서버가 이미 언이스케이프된 값을
         // 주면 그쪽은 `<a@b.c>`를 태그로 보고 통째로 버려 `"홍길동 "`만 남는다(공백이라 빈 값
         // 검사도 통과한다). 여기서 그 입력을 못박는다.
-        let plain = json!({ "decodeMime": { "to": "홍길동 <a@b.c>" } });
+        let plain = json!({ "mailInfo": { "decodeMime": { "to": "홍길동 <a@b.c>" } } });
         assert_eq!(draft_recipient(&plain, "1").unwrap(), "홍길동 <a@b.c>");
 
         // 로컬파트가 블록태그로 시작하는 주소(`<p.kim@x.co>`)는 html_to_text에서 **개행으로
         // 치환**된다 — 그 손실도 일어나면 안 된다.
         for addr in ["p.kim@x.co", "br.lee@x.co", "div.han@x.co", "td.oh@x.co", "h1.no@x.co"] {
-            let v = json!({ "decodeMime": { "to": format!("아무개 <{addr}>") } });
+            let v = json!({ "mailInfo": { "decodeMime": { "to": format!("아무개 <{addr}>") } } });
             assert_eq!(draft_recipient(&v, "1").unwrap(), format!("아무개 <{addr}>"));
         }
 
         // 여러 명이어도 **문자열을 통째로** 옮긴다 — 쪼개거나 다시 잇지 않는다(구분자 무관).
-        let many = json!({ "decodeMime": { "to": "가 &lt;a@x.y&gt;, 나 &lt;b@x.y&gt;" } });
+        let many = json!({ "mailInfo": { "decodeMime": { "to": "가 &lt;a@x.y&gt;, 나 &lt;b@x.y&gt;" } } });
         assert_eq!(draft_recipient(&many, "1").unwrap(), "가 <a@x.y>, 나 <b@x.y>");
 
-        // decodeMime.to가 비면 paramTo(주소만)로 떨어진다.
-        assert_eq!(draft_recipient(&json!({ "paramTo": "a@b.c" }), "1").unwrap(), "a@b.c");
-        // ⚠️ 수신자 없는 초안의 `(Unknown)`은 주소가 아니다 — 그대로 실어 보내면 안 된다.
-        assert_eq!(draft_recipient(&json!({ "paramTo": "(Unknown)" }), "1").unwrap(), "");
+        // 수신자 없는 초안은 이 키가 아예 없다 — 빈 값으로 떨어지고 호출부가 `to`를 요구한다.
+        assert_eq!(draft_recipient(&json!({ "mailInfo": { "decodeMime": {} } }), "1").unwrap(), "");
         assert_eq!(draft_recipient(&json!({}), "1").unwrap(), "");
 
         // 값이 있는데 주소로 보이지 않으면(변환이 주소를 먹었을 때) 조용히 통과시키지 않는다.
-        assert!(draft_recipient(&json!({ "decodeMime": { "to": "홍길동 " } }), "1").is_err());
-        assert!(draft_recipient(&json!({ "paramTo": "홍길동" }), "1").is_err());
+        assert!(draft_recipient(&json!({ "mailInfo": { "decodeMime": { "to": "홍길동 " } } }), "1").is_err());
     }
 
     /// 엔티티 언이스케이프는 `&amp;`를 마지막에 푼다 — `&amp;lt;`가 `<`로 접히면 안 된다.

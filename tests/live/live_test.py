@@ -945,19 +945,23 @@ def draft_send_scenario(mcp: Mcp, marker: str):
     dl = track("mail_draft", {"muid": muid, "subject": subj, "beforeExists": base_drafts},
                f"메일 임시보관함에서 제목 '{subj}' 삭제")
 
-    def chk_send(d, _muid=muid, _bd=base_drafts, _bs=base_sent):
+    def chk_send(d, _muid=muid, _bd=base_drafts, _bs=base_sent, _subj=subj):
         after = mailbox_counts(mcp)  # read-back — 발송 응답만 믿지 않는다
         now_drafts, now_sent = after.get("DRAFT"), after.get("SENT")
         sent_ok = d.get("sent") is True and str(d.get("draft_muid")) == _muid
+        # 초안에 저장한 제목이 **그대로** 나갔는가. 도구가 응답에서 제목을 엉뚱한 자리에서 읽으면
+        # 빈 제목으로 나가거나(내용이 어긋난 발송) 가드에 걸린다 — 실제로 후자가 한 번 터졌다.
+        subj_ok = d.get("subject") == _subj
         # 초안이 임시보관함에서 빠졌는가. 통수가 원래대로 돌아와야 한다(저장으로 +1 됐던 것이 상환).
         gone = (d.get("draft_deleted") is True and now_drafts is not None
                 and _bd is not None and now_drafts == _bd)
         # 실제로 나갔는가 — 보낸메일함이 정확히 1 늘어야 한다.
         grew = now_sent is not None and _bs is not None and now_sent == _bs + 1
-        return (sent_ok and gone and grew,
+        subj_note = "" if subj_ok else " ⚠️제목이 초안과 다름: %r" % (d.get("subject"),)
+        return (sent_ok and subj_ok and gone and grew,
                 f"muid={_muid} · 임시보관함 {_bd}→{now_drafts}"
                 f"{'(원본 삭제 확인)' if gone else ' ⚠️원본 잔존'} · "
-                f"보낸메일함 {_bs}→{now_sent}{'' if grew else ' ⚠️발송 미확인'}")
+                f"보낸메일함 {_bs}→{now_sent}{'' if grew else ' ⚠️발송 미확인'}{subj_note}")
 
     got = run(mcp, "send_mail_from_draft", chk_send, draft_muid=muid)
     if got is None:
