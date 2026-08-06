@@ -329,6 +329,44 @@ fn lunch_warning(start: &str, end: &str) -> Option<String> {
     })
 }
 
+/// 점유 구간 목록 → `duration_min` 이상인 빈 구간 목록(자정 기준 분).
+/// `busy`는 정렬돼 있지 않아도 되고, 탐색 창(`win_start`~`win_end`) 바깥은 클립해 버린다
+/// (다일 예약 센티넬이 그대로 들어와도 여기서 창 크기로 잘린다).
+/// 네트워크에 의존하지 않는 계산 전부 — `find_free_slots`는 조회 결과를 이 함수에 넘기기만 한다.
+fn free_slots(
+    busy: &[(i64, i64)],
+    win_start: i64,
+    win_end: i64,
+    duration_min: i64,
+) -> Vec<(i64, i64)> {
+    let mut clipped: Vec<(i64, i64)> = busy
+        .iter()
+        .filter_map(|&(a, z)| {
+            let (a, z) = (a.max(win_start), z.min(win_end));
+            (z > a).then_some((a, z))
+        })
+        .collect();
+    clipped.sort();
+
+    // 겹침 병합 후 빈 구간 산출
+    let mut merged: Vec<(i64, i64)> = Vec::new();
+    for (a, z) in clipped {
+        match merged.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(z),
+            _ => merged.push((a, z)),
+        }
+    }
+    let mut free: Vec<(i64, i64)> = Vec::new();
+    let mut cursor = win_start;
+    for (a, z) in merged.iter().chain(std::iter::once(&(win_end, win_end))) {
+        if a - cursor >= duration_min {
+            free.push((cursor, *a));
+        }
+        cursor = cursor.max(*z);
+    }
+    free
+}
+
 /// 빈 시간 찾기. `date`=YYYYMMDD, `duration_min`=필요 시간(분), `window`=탐색 구간(HHmm-HHmm),
 /// `group`=""|"본사"|"구로". 자원별로 예약을 빼고 `duration_min` 이상인 구간만 남긴다.
 /// 종일·다일 예약(예: 반년짜리 공용좌석)은 해당일 전체 점유로 처리한다.
@@ -371,43 +409,27 @@ pub async fn find_free_slots(
     let mut out: Vec<Value> = Vec::new();
     for room in &rooms {
         let seq = room.get("resSeq").and_then(|v| v.as_str()).unwrap_or("");
-        // 이 방의 점유 구간(창 안쪽으로 클립)
+        // 이 방의 점유 구간
         let mut busy: Vec<(i64, i64)> = rows
             .iter()
             .filter(|b| b.get("resSeq").and_then(|v| v.as_str()) == Some(seq))
             .filter_map(|b| {
                 let st = b.get("resStartDate").and_then(|v| v.as_str())?;
                 let en = b.get("resEndDate").and_then(|v| v.as_str())?;
-                let a = minutes_of(st, date)?.max(win_start);
-                let z = minutes_of(en, date)?.min(win_end);
-                (z > a).then_some((a, z))
+                Some((minutes_of(st, date)?, minutes_of(en, date)?))
             })
             .collect();
-        // 점심시간을 예약과 동일한 점유로 취급(창 안쪽으로 클립). include_lunch면 건너뛴다.
-        let lunch = (LUNCH.0.max(win_start), LUNCH.1.min(win_end));
-        if !include_lunch && lunch.1 > lunch.0 {
-            busy.push(lunch);
+        // 점심시간을 예약과 동일한 점유로 취급. include_lunch면 건너뛴다.
+        if !include_lunch {
+            busy.push(LUNCH);
         }
-        busy.sort();
 
-        // 겹침 병합 후 빈 구간 산출
-        let mut merged: Vec<(i64, i64)> = Vec::new();
-        for (a, z) in busy {
-            match merged.last_mut() {
-                Some(last) if a <= last.1 => last.1 = last.1.max(z),
-                _ => merged.push((a, z)),
-            }
-        }
-        let mut free: Vec<Value> = Vec::new();
-        let mut cursor = win_start;
-        for (a, z) in merged.iter().chain(std::iter::once(&(win_end, win_end))) {
-            if a - cursor >= duration_min {
-                free.push(json!({
-                    "from": hhmm(cursor), "to": hhmm(*a), "minutes": a - cursor
-                }));
-            }
-            cursor = cursor.max(*z);
-        }
+        let free: Vec<Value> = free_slots(&busy, win_start, win_end, duration_min)
+            .into_iter()
+            .map(|(from, to)| {
+                json!({ "from": hhmm(from), "to": hhmm(to), "minutes": to - from })
+            })
+            .collect();
         if !free.is_empty() {
             out.push(json!({
                 "resSeq": seq,
@@ -768,6 +790,54 @@ mod tests {
         assert!(parse_window("0900").is_err());      // 구분자 없음
         assert!(parse_window("900-1200").is_err());  // HHmm 4자리 아님
         assert!(parse_window("").is_err());
+    }
+
+    /// 예약이 하나도 없으면 탐색 창 전체가 하나의 빈 구간이다.
+    #[test]
+    fn free_slots는_예약이_없으면_창_전체를_준다() {
+        assert_eq!(free_slots(&[], 540, 1080, 30), vec![(540, 1080)]);
+    }
+
+    /// 겹치는 두 예약은 한 덩어리로 병합돼야 한다 — 안 그러면 그 사이에 0분짜리 빈 구간이 생긴다.
+    #[test]
+    fn free_slots는_겹치는_구간을_병합한다() {
+        let busy = [(600, 700), (650, 800)];
+        assert_eq!(free_slots(&busy, 540, 1080, 30), vec![(540, 600), (800, 1080)]);
+    }
+
+    /// 끝과 시작이 맞닿은(틈 0) 예약도 병합 — 사이에 빈 구간을 만들지 않는다.
+    #[test]
+    fn free_slots는_맞닿는_구간을_병합한다() {
+        let busy = [(600, 700), (700, 800)];
+        assert_eq!(free_slots(&busy, 540, 1080, 30), vec![(540, 600), (800, 1080)]);
+        // 입력 순서가 뒤집혀도 같아야 한다(내부에서 정렬한다).
+        let reversed = [(700, 800), (600, 700)];
+        assert_eq!(free_slots(&reversed, 540, 1080, 30), free_slots(&busy, 540, 1080, 30));
+    }
+
+    /// 창을 넘겨 덮는 예약(다일 예약 센티넬 포함)은 창 전체 점유 → 후보 없음.
+    #[test]
+    fn free_slots는_창이_다_차면_빈_구간이_없다() {
+        assert!(free_slots(&[(500, 1200)], 540, 1080, 30).is_empty());
+        assert!(free_slots(&[(i64::MIN / 4, i64::MAX / 4)], 540, 1080, 30).is_empty());
+    }
+
+    /// 창 밖 예약은 판정에서 빠진다 — 창을 침범하지 않으면 없는 것과 같다.
+    #[test]
+    fn free_slots는_창_밖_예약을_무시한다() {
+        let busy = [(0, 300), (1200, 1300)];
+        assert_eq!(free_slots(&busy, 540, 1080, 30), vec![(540, 1080)]);
+    }
+
+    /// `duration_min`보다 짧은 틈은 후보가 아니다.
+    #[test]
+    fn free_slots는_요청_시간보다_짧은_틈을_버린다() {
+        let busy = [(600, 700), (720, 800)]; // 700~720 = 20분
+        assert_eq!(free_slots(&busy, 540, 1080, 30), vec![(540, 600), (800, 1080)]);
+        assert_eq!(
+            free_slots(&busy, 540, 1080, 20),
+            vec![(540, 600), (700, 720), (800, 1080)]
+        );
     }
 
     #[test]
