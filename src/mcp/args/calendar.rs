@@ -10,8 +10,12 @@ use serde::Deserialize;
 #[schemars(crate = "rmcp::schemars")]
 pub struct ListEventsArgs {
     /// 시작일 YYYYMMDD
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub start: String,
     /// 종료일 YYYYMMDD
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub end: String,
 }
 
@@ -21,8 +25,12 @@ pub struct CreateEventArgs {
     /// 일정 제목
     pub title: String,
     /// 시작 시각 YYYYMMDDHHmm (예: 202608071100)
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub start: String,
     /// 종료 시각 YYYYMMDDHHmm
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub end: String,
     /// 메모/내용(선택)
     #[serde(default)]
@@ -33,6 +41,8 @@ pub struct CreateEventArgs {
     /// 등록할 캘린더 — mcalSeq 또는 캘린더 이름(부분 일치). 미지정 시 본인 개인 캘린더.
     /// 공용 캘린더에 등록하려면 list_calendars로 확인 후 지정. ⚠️ 공용은 다른 사람에게도 보인다.
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string_opt")]
+    #[schemars(schema_with = "super::flex_str_opt_schema")]
     pub calendar: Option<String>,
 }
 
@@ -40,8 +50,12 @@ pub struct CreateEventArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct UpdateEventArgs {
     /// 일정 ID (schSeq). list_events로 확인.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub sch_seq: String,
     /// 대상 일정이 걸친 날짜 YYYYMMDD (원본 조회·소유권 확인용)
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub date: String,
     /// 새 제목 (미지정 시 기존 유지)
     #[serde(default)]
@@ -51,9 +65,13 @@ pub struct UpdateEventArgs {
     pub contents: Option<String>,
     /// 새 시작 YYYYMMDDHHmm (미지정 시 기존 유지)
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string_opt")]
+    #[schemars(schema_with = "super::flex_str_opt_schema")]
     pub start: Option<String>,
     /// 새 종료 YYYYMMDDHHmm (미지정 시 기존 유지)
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string_opt")]
+    #[schemars(schema_with = "super::flex_str_opt_schema")]
     pub end: Option<String>,
 }
 
@@ -61,7 +79,11 @@ pub struct UpdateEventArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct DeleteEventArgs {
     /// 일정 ID (schSeq). list_events로 확인.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub sch_seq: String,
     /// 대상 일정이 걸친 날짜 YYYYMMDD (원본 조회·소유권 확인용)
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub date: String,
 }

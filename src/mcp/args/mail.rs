@@ -26,6 +26,8 @@ pub struct SendMailArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct DeleteMailArgs {
     /// 삭제할 메일 muid 목록(콤마 구분). list_inbox의 muid 사용.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub uids: String,
 }
 
@@ -33,6 +35,8 @@ pub struct DeleteMailArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct ReadMailArgs {
     /// 메일 muid. list_inbox 결과의 muid 사용.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub muid: String,
 }
 
@@ -40,8 +44,13 @@ pub struct ReadMailArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct DownloadMailAttachmentArgs {
     /// 메일 muid. read_mail/list_inbox의 muid.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub muid: String,
-    /// 첨부 fileSn. read_mail attachments[].fileSn 사용.
+    /// read_mail 응답 `attachments[].fileSn` 의 토큰 문자열을 **그대로** 붙여넣는다.
+    /// ⚠️ 순번(0,1,2)이 아니다 — 숫자를 주면 서버가 422로 거절한다.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub file_sn: String,
     /// 저장 경로(절대경로 권장). 예: /tmp/attach.png
     pub out_path: String,

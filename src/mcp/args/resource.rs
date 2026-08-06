@@ -10,12 +10,18 @@ use serde::Deserialize;
 #[schemars(crate = "rmcp::schemars")]
 pub struct ReserveArgs {
     /// 자원(회의실) ID. list_resources로 확인.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub res_seq: String,
     /// 예약명
     pub req_text: String,
     /// 시작 시각 YYYYMMDDHHmm (예: 202608011000)
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub start: String,
     /// 종료 시각 YYYYMMDDHHmm
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub end: String,
     /// 내용(선택)
     #[serde(default)]
@@ -26,11 +32,17 @@ pub struct ReserveArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct CancelArgs {
     /// 자원(회의실) ID
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub res_seq: String,
     /// 예약 ID (seqNum)
+    #[serde(deserialize_with = "super::flex_i64")]
+    #[schemars(schema_with = "super::flex_int_schema")]
     pub seq_num: i64,
     /// 예약 인덱스 (기본 "1")
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string_opt")]
+    #[schemars(schema_with = "super::flex_str_opt_schema")]
     pub res_idx: Option<String>,
 }
 
@@ -38,20 +50,30 @@ pub struct CancelArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct UpdateArgs {
     /// 자원(회의실) ID
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub res_seq: String,
     /// 예약 ID (seqNum)
+    #[serde(deserialize_with = "super::flex_i64")]
+    #[schemars(schema_with = "super::flex_int_schema")]
     pub seq_num: i64,
     /// 예약 인덱스 (기본 "1")
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string_opt")]
+    #[schemars(schema_with = "super::flex_str_opt_schema")]
     pub res_idx: Option<String>,
     /// 새 예약명 (미지정 시 기존 유지)
     #[serde(default)]
     pub req_text: Option<String>,
     /// 새 시작 YYYYMMDDHHmm (미지정 시 기존 유지)
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string_opt")]
+    #[schemars(schema_with = "super::flex_str_opt_schema")]
     pub start: Option<String>,
     /// 새 종료 YYYYMMDDHHmm (미지정 시 기존 유지)
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string_opt")]
+    #[schemars(schema_with = "super::flex_str_opt_schema")]
     pub end: Option<String>,
     /// 새 내용 (미지정 시 기존 유지)
     #[serde(default)]
@@ -62,8 +84,12 @@ pub struct UpdateArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct ListReservationsArgs {
     /// 시작일 YYYYMMDD
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub start: String,
     /// 종료일 YYYYMMDD
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub end: String,
     /// 조회할 자원 ID 목록(비우면 전체 회의실)
     #[serde(default)]
@@ -77,8 +103,12 @@ pub struct ListReservationsArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct FindFreeRoomsArgs {
     /// 날짜 YYYYMMDD
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub date: String,
     /// 필요한 시간(분). 예: 2시간=120
+    #[serde(deserialize_with = "super::flex_i64")]
+    #[schemars(schema_with = "super::flex_int_schema")]
     pub duration_min: i64,
     /// 탐색 구간 HHmm-HHmm (기본 "0900-1800"). 오전만이면 "0900-1200".
     /// 구간을 넓게 줘도 **점심시간 13:00~14:00은 항상 빠진다**.
@@ -97,7 +127,11 @@ pub struct FindFreeRoomsArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct MyReservationsArgs {
     /// 시작일 YYYYMMDD
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub start: String,
     /// 종료일 YYYYMMDD
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub end: String,
 }

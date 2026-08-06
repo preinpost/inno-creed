@@ -20,7 +20,7 @@ impl Amaranth {
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
-    #[tool(description = "받은메일함 최근 20통을 조회한다")]
+    #[tool(description = "받은메일함 최근 20통을 조회한다. ⚠️ 응답은 서버 원본 봉투 그대로다 — 메일 배열은 `Records`(다른 목록 도구처럼 정규화돼 있지 않음), 각 항목의 `muid`가 read_mail/delete_mail 키, `attach`(bool)가 첨부 유무.")]
     async fn list_inbox(&self) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
         let data = modules::mail::list_mails(&self.client, modules::mail::INBOX, 1, 20)
@@ -90,7 +90,7 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "메일 첨부파일을 다운로드해 out_path에 저장한다(실행하지 않고 저장만). muid+file_sn(read_mail attachments[].fileSn)."
+        description = "메일 첨부파일을 다운로드해 out_path에 저장한다(실행하지 않고 저장만). **file_sn 은 순번이 아니라 read_mail 응답 `attachments[].fileSn` 의 긴 토큰 문자열을 그대로** 넣는다 — 숫자(0,1)를 넣으면 서버가 422로 거절한다."
     )]
     async fn download_mail_attachment(
         &self,

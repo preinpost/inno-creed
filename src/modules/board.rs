@@ -69,7 +69,8 @@ pub async fn list_notices(
                         "dept": s(a, "dept_name"),
                         "writeDate": s(a, "write_date"),
                         "readCnt": s(a, "read_cnt"),
-                        "fileCnt": s(a, "file_cnt"),
+                        // ⚠️ 숫자로 낸다 — 문자열이면 "0"이 truthy라 "첨부 있음" 판정이 조용히 틀린다(실측 사고).
+                        "fileCnt": file_cnt(a),
                         "attachmentUid": s(a, "uid"),
                         "isNew": s(a, "is_new_yn") == "Y",
                         "read": s(a, "art_read_yn") == "Y",
@@ -81,6 +82,12 @@ pub async fn list_notices(
         .unwrap_or_default();
 
     Ok(json!({ "totalCnt": data.get("totalCnt").cloned().unwrap_or(Value::Null), "articles": articles }))
+}
+
+/// 첨부 개수 — **숫자**로 통일. 서버는 `file_cnt`를 문자열("0"/"3")로도 정수로도 준다.
+/// 그대로 흘리면 호출자가 `"0"`을 참으로 읽어 첨부 없는 글을 첨부 있는 글로 취급한다.
+fn file_cnt(v: &Value) -> Value {
+    json!(json_str(v.get("file_cnt")).trim().parse::<i64>().unwrap_or(0))
 }
 
 /// 게시글 상세 — `ViewPost`. 본문(HTML→텍스트)·댓글 포함.
@@ -132,7 +139,7 @@ pub async fn read_post(c: &GwClient, art_seq_no: &str) -> Result<Value> {
         "dept": s(art, "dept_name"),
         "writeDate": s(art, "write_date"),
         "readCnt": s(art, "read_cnt"),
-        "fileCnt": s(art, "file_cnt"),
+        "fileCnt": file_cnt(art),
         "attachmentUid": s(art, "uid"),
         "content": collapse_ws(&html_to_text(&s(art, "art_content"))),
         "comments": comments
@@ -174,8 +181,12 @@ pub async fn list_attachments(c: &GwClient, art_seq_no: &str, uid: &str) -> Resu
         .unwrap_or_default();
     let files: Vec<Value> = list
         .iter()
-        .map(|f| {
+        .enumerate()
+        .map(|(i, f)| {
             json!({
+                // ⚠️ download_attachment 의 file_sn 이 곧 이 값이다. 호출자가 배열을 직접 세지 않게
+                // 인덱스를 실어 보낸다(세다가 틀리면 엉뚱한 파일을 받는다).
+                "fileSn": i,
                 "fileId": json_str(f.get("fileId").or_else(|| f.get("fileUID"))),
                 "fileName": json_str(f.get("originalFileName").or_else(|| f.get("fileName"))),
                 "fileExt": json_str(f.get("fileExtsn").or_else(|| f.get("fileExt"))),

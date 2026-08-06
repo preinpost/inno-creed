@@ -207,6 +207,60 @@ pub async fn list_events(c: &GwClient, start: &str, end: &str, cal_list: Vec<Val
     .await
 }
 
+/// `YYYYMMDDHHMM` → `YYYY-MM-DDTHH:MM`. 형식이 어긋나면 원본을 그대로 돌려준다.
+fn to_iso(s: &str) -> String {
+    if s.len() != 12 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return s.to_string();
+    }
+    format!("{}-{}-{}T{}:{}", &s[0..4], &s[4..6], &s[6..8], &s[8..10], &s[10..12])
+}
+
+/// `sc111A03` 원본 응답 → 도구가 반환할 정제본.
+///
+/// ⚠️ **`delYn`을 `mine`으로 바꿔 내보내는 이유** — 원본 이름은 "삭제 여부"로 읽히지만
+/// 실제로는 정반대다. 아마란스 프론트(`ScheduleApi.js:1912` `editable = r.delYn === 'Y'`)는
+/// 이 값으로 **드래그 수정과 삭제 버튼**을 함께 열어주는 쓰기권한 플래그로 쓴다. 삭제된 일정은
+/// 애초에 목록 응답에서 빠진다(실측). 실측 상관도 명확하다 — 5~8월 3,219건 중 `Y` 19건은
+/// **전부** 본인이 참석자/작성자인 일정이고, `N` 3,200건은 **한 건도** 아니다.
+/// `editable`로 이름 붙이지 않은 건 `check_author`가 작성자 본인에게만 수정·삭제를 허용해서,
+/// 참석자일 뿐인 `Y` 일정과 어긋나기 때문이다.
+pub fn shape_events(raw: &Value) -> Value {
+    let list = raw.get("resultList").and_then(|v| v.as_array());
+    let events: Vec<Value> = list
+        .map(|arr| arr.iter().map(shape_event).collect())
+        .unwrap_or_default();
+    json!({ "count": events.len(), "events": events })
+}
+
+fn shape_event(e: &Value) -> Value {
+    let s = |k: &str| e.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let mut o = serde_json::Map::new();
+    let mut put = |k: &str, v: Value| {
+        o.insert(k.to_string(), v);
+    };
+    put("schSeq", json!(s("schSeq")));
+    put("title", json!(s("schTitle")));
+    put("start", json!(to_iso(s("startDate"))));
+    put("end", json!(to_iso(s("endDate"))));
+    put("allday", json!(s("alldayYn") == "Y"));
+    put("calendar", json!(format!("{}({})", s("calTitle"), s("mcalSeq"))));
+    put("mine", json!(s("delYn") == "Y"));
+    put("createName", json!(s("createName")));
+    put("createSeq", json!(s("createSeq")));
+    // 값이 있을 때만 — 빈 필드로 응답을 불리지 않는다.
+    for (out, src) in [("place", "schPlace"), ("contents", "contents"), ("attendees", "schUserList")] {
+        if !s(src).is_empty() {
+            put(out, json!(s(src)));
+        }
+    }
+    if let Some(n) = e.get("partCount").and_then(|v| v.as_i64()) {
+        if n > 0 {
+            put("partCount", json!(n));
+        }
+    }
+    Value::Object(o)
+}
+
 /// 일정 등록/수정 — `sc111A05`. `sch_seq` 빈문자열이면 신규(insert), 채우면 수정(update).
 /// 반환 `resultData.schSeq`(=schmSeq)가 생성/수정된 일정 ID.
 #[allow(clippy::too_many_arguments)]
@@ -598,6 +652,47 @@ mod tests {
     }
 
     /// 자원의 `check_owner`와 **필드명(createSeq)·호칭(작성자)이 다르다**는 점이 요지.
+    #[test]
+    fn shape_events는_delYn을_mine으로_바꾸고_시각을_ISO로_돌린다() {
+        let raw = json!({"resultList": [
+            {"schSeq":"90270","schTitle":"시너지 미팅","startDate":"202608061400","endDate":"202608061500",
+             "alldayYn":"N","calTitle":"이노그리드","mcalSeq":"230","delYn":"Y","createName":"정선미",
+             "createSeq":"3081","partCount":9,"schPlace":"","contents":"","schUserList":"이연지,정선미",
+             "empPicFileId":"https://…","placeMapData":"{}","stickerSeq":""},
+            {"schSeq":"89599","schTitle":"석식","startDate":"202608061800","endDate":"202608061900",
+             "alldayYn":"Y","calTitle":"이노그리드","mcalSeq":"230","delYn":"N","createName":"권경민",
+             "createSeq":"2096","partCount":0},
+        ]});
+        let out = shape_events(&raw);
+        assert_eq!(out["count"], 2);
+        let a = &out["events"][0];
+        assert_eq!(a["mine"], true);
+        assert_eq!(a["start"], "2026-08-06T14:00");
+        assert_eq!(a["allday"], false);
+        assert_eq!(a["calendar"], "이노그리드(230)");
+        assert_eq!(a["attendees"], "이연지,정선미");
+        assert_eq!(a["partCount"], 9);
+        // 원본 이름과 노이즈 필드는 새어나가지 않는다.
+        for k in ["delYn", "schTitle", "startDate", "empPicFileId", "placeMapData", "stickerSeq"] {
+            assert!(a.get(k).is_none(), "{k} 가 응답에 남아 있다");
+        }
+        let b = &out["events"][1];
+        assert_eq!(b["mine"], false);
+        assert_eq!(b["allday"], true);
+        // 빈 값·0은 키 자체를 넣지 않는다.
+        for k in ["place", "contents", "attendees", "partCount"] {
+            assert!(b.get(k).is_none(), "{k} 가 빈 값으로 들어갔다");
+        }
+    }
+
+    #[test]
+    fn to_iso는_형식이_어긋나면_원본을_돌려준다() {
+        assert_eq!(to_iso("202608061400"), "2026-08-06T14:00");
+        assert_eq!(to_iso("20260806"), "20260806");
+        assert_eq!(to_iso(""), "");
+        assert_eq!(to_iso("20260806140x"), "20260806140x");
+    }
+
     #[test]
     fn check_author는_타인과_필드누락을_거부한다() {
         let mine = json!({ "createSeq": "3166", "schTitle": "내 일정" });

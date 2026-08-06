@@ -11,12 +11,18 @@ use serde::Deserialize;
 pub struct AttendanceMonthArgs {
     /// 조회 월 YYYYMM (예: "202608"). start/end를 주면 그쪽이 우선.
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub month: String,
     /// 시작일 YYYYMMDD(선택)
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub start: String,
     /// 종료일 YYYYMMDD(선택)
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub end: String,
 }
 
@@ -25,5 +31,7 @@ pub struct AttendanceMonthArgs {
 pub struct AttendanceTodayArgs {
     /// 조회할 날짜 YYYYMMDD(선택, 비우면 오늘 KST).
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub work_dt: String,
 }

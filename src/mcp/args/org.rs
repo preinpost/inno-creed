@@ -18,8 +18,12 @@ pub struct FindPersonArgs {
 pub struct OrgChartArgs {
     /// 부서 ID(deptId). 지정하면 그 부서의 **사원+직책 목록**(gw102A02). 비우면 부서 트리.
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub dept_id: String,
     /// 트리 조회 시 시작 노드(deptId). 비우면 전사 트리(전체 펼침). 특정 deptId면 그 하위 서브트리. dept_id가 지정되면 무시됨.
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub parent_seq: String,
 }

@@ -12,9 +12,13 @@ use super::{one, twenty};
 pub struct ListNoticesArgs {
     /// 페이지 번호(기본 1)
     #[serde(default = "one")]
+    #[serde(deserialize_with = "super::flex_i64")]
+    #[schemars(schema_with = "super::flex_int_schema")]
     pub page: i64,
     /// 페이지 크기(기본 20)
     #[serde(default = "twenty")]
+    #[serde(deserialize_with = "super::flex_i64")]
+    #[schemars(schema_with = "super::flex_int_schema")]
     pub page_size: i64,
     /// 검색어(선택). field로 대상 지정.
     #[serde(default)]
@@ -24,9 +28,13 @@ pub struct ListNoticesArgs {
     pub field: String,
     /// 등록일 시작(선택, YYYY-MM-DD)
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub start_date: String,
     /// 등록일 종료(선택, YYYY-MM-DD)
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub end_date: String,
 }
 
@@ -34,6 +42,8 @@ pub struct ListNoticesArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct ReadNoticeArgs {
     /// 게시글 ID(artSeqNo). list_notices 결과의 artSeqNo 사용.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub art_seq_no: String,
 }
 
@@ -41,8 +51,12 @@ pub struct ReadNoticeArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct ListAttachmentsArgs {
     /// 게시글 번호(art_seq_no). list_notices/read_notice 결과의 artSeqNo 사용.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub art_seq_no: String,
     /// 게시글 첨부 uid(attachmentUid). list_notices/read_notice 결과의 attachmentUid 사용.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub uid: String,
 }
 
@@ -50,11 +64,18 @@ pub struct ListAttachmentsArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct DownloadAttachmentArgs {
     /// 게시글 번호(art_seq_no). list_attachments와 동일.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub art_seq_no: String,
     /// 게시글 첨부 uid(attachmentUid). list_attachments와 동일.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub uid: String,
-    /// 파일 순번(0-base). list_attachments 결과 배열의 인덱스. 기본 0.
+    /// list_attachments 결과 `files[].fileSn`(0-base 인덱스)을 그대로. 기본 0.
+    /// ⚠️ 메일의 download_mail_attachment.file_sn(서버 토큰 문자열)과는 다른 값이다.
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_i64")]
+    #[schemars(schema_with = "super::flex_int_schema")]
     pub file_sn: i64,
     /// 저장 경로(절대경로 권장). 예: /tmp/notice.pdf
     pub out_path: String,

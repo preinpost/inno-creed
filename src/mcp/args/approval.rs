@@ -23,9 +23,13 @@ pub struct ListApprovalsArgs {
     pub box_name: String,
     /// 페이지 번호(기본 1)
     #[serde(default = "one")]
+    #[serde(deserialize_with = "super::flex_i64")]
+    #[schemars(schema_with = "super::flex_int_schema")]
     pub page: i64,
     /// 페이지 크기(기본 30)
     #[serde(default = "thirty")]
+    #[serde(deserialize_with = "super::flex_i64")]
+    #[schemars(schema_with = "super::flex_int_schema")]
     pub page_size: i64,
     /// 기간 시작(선택, YYYY-MM-DD). 빈값이면 서버 기본 최근 3개월.
     #[serde(default)]
@@ -39,8 +43,12 @@ pub struct ListApprovalsArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct ReadApprovalArgs {
     /// 문서 ID(docId). list_approvals 결과의 docId.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub doc_id: String,
     /// 양식 ID(formId). list_approvals 결과의 formId.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub form_id: String,
 }
 
@@ -72,6 +80,8 @@ pub struct GetSubmissionGuideArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct ReadApprovalLineArgs {
     /// 라인 ID(lineId). list_approval_lines 결과의 lineId 사용.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub line_id: String,
 }
 
@@ -80,15 +90,21 @@ pub struct ReadApprovalLineArgs {
 pub struct SaveApprovalLineArgs {
     /// 라인 ID. 0이면 신규 생성, 기존 lineId면 수정. 기본 0.
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_i64")]
+    #[schemars(schema_with = "super::flex_int_schema")]
     pub line_id: i64,
     /// 라인 이름(예: "외근-표준").
     pub line_nm: String,
     /// 양식 ID(formId). 예: 41(외근)/36(연차). get_approval_line_schema/list_approvals의 formId.
+    #[serde(deserialize_with = "super::flex_i64")]
+    #[schemars(schema_with = "super::flex_int_schema")]
     pub form_id: i64,
     /// 결재자 객체 배열의 JSON 문자열. ⚠️ **배열 순서 = 결재 순서**. read_approval_line 결과의 members 객체를 원하는 순서로 담을 것(user_id/co_id/duty_cd/dept_id/grade_cd/grade_nm/act_id 등 필드 포함). act_id 3000=결재/4000=합의. 순서 필드(doc_line_seq/doc_line_m_seq/line_seq)는 자동 주입됨. org_chart로 새 인물을 만들 땐 user_id=empSeq, co_id="1000"이고 grade_cd(직급코드)만 org에 없어 표시용으로 추정치를 넣어도 됨(라우팅 무관).
     pub detail_line_json: String,
     /// 프로세스 ID(기본 "1000" 기본프로세스).
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub proc_id: String,
 }
 
@@ -103,10 +119,14 @@ pub struct DeleteApprovalLineArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct SubmitApprovalArgs {
     /// 양식 ID(formId). 41(외근)/36(연차) 등.
+    #[serde(deserialize_with = "super::flex_i64")]
+    #[schemars(schema_with = "super::flex_int_schema")]
     pub form_id: i64,
     /// 문서 제목. ⭐ 양식별 권장 형식은 `get_submission_guide(form_id).draftHelp.defaultDocTitle`/`titleHelp`(예 연차 `[휴가신청] 00/00 오후반차_홍길동(인사&총무팀)`). 사내 관례이므로 사용자 확인 후 확정할 것.
     pub doc_title: String,
     /// 사용할 개인결재라인 ID(save_approval_line으로 준비). 이 라인의 결재자는 eap110A03가 **양식필수 합의자·수신참조·시행자와 병합**해 돌려주고, 그 병합 결과가 그대로 결재선으로 실린다. 즉 라인에는 **결재(3000)만** 담으면 되고 양식필수 합의자를 또 넣으면 중복될 수 있음.
+    #[serde(deserialize_with = "super::flex_i64")]
+    #[schemars(schema_with = "super::flex_int_schema")]
     pub line_id: i64,
     /// HP 근태신청 저장 요청 body JSON(0hr00011 + create 두 콜에 쓰임). **근태 양식 전용** — 이걸 넘기면 상신 전에 HP 신청 레코드 생성 + interlock 등록(GetLinkKey→saveAttendApplicationLinkKey→SetEnageGroup)까지 수행한다. ⭐ **채우는 법·양식별 고정코드·복사용 예시는 `get_submission_guide(form_id).draftHelp.hpApplicationExample`**(예: 출장 linkAtCd"2010"/atCd"2101", 외근 종일 atCd"3101"/linkAtCd"3010"). 신원 필드(coCd/deptCd/empCd/empNm/korNm)는 **submit_approval이 로그인 사용자 값으로 자동 덮어씀** — 예시값 그대로 둬도 됨. 형식: `{"applicationList":[{...,linkAtCd,atCd,atDt,startDt,endDt,startTm,endTm,appDyFg,appDy,appTm,...}],"employeeList":[{...}]}`. 빈 문자열이면 이 단계 전체 생략(= 비근태 양식 경로, 아직 미검증).
     pub hp_application_json: String,
@@ -116,6 +136,8 @@ pub struct SubmitApprovalArgs {
     pub doc_contents_html: String,
     /// 채번 규칙 ID. 빈 문자열이면 "1001"(기본 채번)이 자동 적용된다 — 보통 그대로 두면 됨.
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub numbering_id: String,
 }
 
@@ -123,9 +145,13 @@ pub struct SubmitApprovalArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct CancelApprovalArgs {
     /// 취소할 문서의 docId(list_approvals/read_approval의 docId).
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub doc_id: String,
     /// form_id(list_approvals의 formId). doc_sts=30(결재 진행중) 문서의 결재취소(eap110A54)에 필요. 상신 직후(20) 문서만 취소할 땐 생략 가능.
     #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub form_id: String,
     /// true면 결재취소→상신취소 후 임시보관 문서까지 완전 삭제(eap110A19). false(기본)면 임시보관에 남긴다.
     #[serde(default)]
@@ -136,5 +162,7 @@ pub struct CancelApprovalArgs {
 #[schemars(crate = "rmcp::schemars")]
 pub struct DeleteTempApprovalArgs {
     /// 삭제할 임시보관 문서 docId. 여러 건은 콤마구분(예 "140764,140716"). list_approvals(box_name:"draft")의 docId.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
     pub doc_ids: String,
 }

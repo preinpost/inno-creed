@@ -20,7 +20,11 @@ impl Amaranth {
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
-    #[tool(description = "기간 내 일정을 조회한다(전체 캘린더). 날짜 YYYYMMDD")]
+    #[tool(
+        description = "기간 내 일정을 조회한다(전체 캘린더). 날짜 YYYYMMDD. \
+                       `mine:true`는 **본인이 참석자/작성자인 일정** — 취소·삭제와 무관하다(삭제된 일정은 애초에 목록에 없다). \
+                       '내 일정'을 물으면 이 플래그로 거른다."
+    )]
     async fn list_events(
         &self,
         Parameters(a): Parameters<ListEventsArgs>,
@@ -32,7 +36,8 @@ impl Amaranth {
         let data = modules::calendar::list_events(&self.client, &a.start, &a.end, cal_list)
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+        let out = modules::calendar::shape_events(&data);
+        Ok(CallToolResult::success(vec![ContentBlock::text(out.to_string())]))
     }
 
     #[tool(
