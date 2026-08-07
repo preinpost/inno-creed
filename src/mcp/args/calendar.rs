@@ -44,6 +44,22 @@ pub struct CreateEventArgs {
     #[serde(deserialize_with = "super::flex_string_opt")]
     #[schemars(schema_with = "super::flex_str_opt_schema")]
     pub calendar: Option<String>,
+    /// 비밀메모(선택) — **작성자 본인만 볼 수 있다**. 참여자에게도 보이지 않는다.
+    /// ⚠️ 일정이 삭제되거나 본인이 참여자에서 빠지면 사라진다.
+    /// ⚠️ 조회 응답에 이 필드가 없어 **반영 여부를 확인할 수 없다**(응답의 secretMemo.verified=false).
+    #[serde(default)]
+    pub secret_memo: Option<String>,
+    /// 참여자(선택) — 본인 외 참석자. 이름 또는 empSeq 목록.
+    /// 본인은 항상 주최자로 포함되므로 넣지 않아도 된다.
+    /// 이름이 명부에 없거나 동명이인이면 **등록하지 않고 실패**한다 — find_person으로 empSeq를 확인해 지정할 것.
+    /// ⚠️ 참여자로 지정된 사람의 아마란스 일정에 이 일정이 나타난다(메일 발송은 하지 않는다).
+    #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string_vec_opt")]
+    #[schemars(schema_with = "super::flex_str_vec_opt_schema")]
+    pub participants: Option<Vec<String>>,
+    /// 화상회의 사용 여부 "Y"/"N" (기본 "N").
+    #[serde(default)]
+    pub video: Option<String>,
 }
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]

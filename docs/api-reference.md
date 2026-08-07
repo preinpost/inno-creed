@@ -111,6 +111,64 @@
 - `schSeq`/`schmSeq` **빈 문자열이면 신규(insert)**. 전체 필드(schTitle/startDate/endDate/mcalSeq/schPartEmpList 등) 포함.
 - 응답: `{"schSeq":"89328","schmSeq":"89328"}`.
 
+#### 참여자 `schPartEmpList` (실측 확정)
+
+```json
+[{"compSeq":"1000","deptSeq":"<그 사람 부서>","orgType":"E","orgSeq":"<empSeq>",
+  "empSeq":"<empSeq>","empName":"<이름>","partType":"M","mcalSeq":""}]
+```
+
+- **`partType`: `M`=주최자(등록자) · `W`=참석자.** 상위 `inviterPartType:"M"`과 짝을 이룬다.
+- `orgType:"E"`=개인이고 `orgSeq`==`empSeq`. **부서 단위 지정(`"D"` 추정)은 미실측** — 도구는 개인만 받는다.
+- `deptSeq`는 각자의 부서를 넣는다. 실측에서 참여자 3명이 모두 같은 팀이라 *"각자 부서"* 와
+  *"등록자 부서"* 를 **가르지 못했다** — 명부가 주는 각자의 부서를 택했고, 서버가 이 값을 어디에
+  쓰는지는 미확인.
+- ⚠️ **`schUserList`는 참여자가 아니라 공개범위다**(아래). 이름이 비슷해 혼동하기 쉽다.
+
+#### 공개범위 `schUserList` (실측 확정 — `gbnCode` 아님)
+
+```json
+[{"compSeq":"1000","deptSeq":"2993","orgType":"E","orgSeq":"3132","empSeq":"3132","userType":"60"}]
+```
+
+- 공개범위 대상을 지정하면 **`schUserList`에 실린다.** `gbnCode`는 `"E"` 그대로였다 —
+  한때 `gbnCode`를 공개구분 코드로 본 가설이 있었으나 **실측으로 기각**됐다(`gbnCode`의 정체는 불명).
+- 참여자 항목과 달리 **`empName`이 없고** `userType:"60"`이 붙는다. 다른 `userType` 값은 미실측.
+- ⚠️ **조회 응답의 `schUserList`는 모양이 다르다** — `"이연지,정선미"` 같은 쉼표 구분 문자열이다.
+  같은 키가 방향(요청/응답)에 따라 다른 뜻일 수 있다(`delYn`과 같은 함정).
+  **조회 쪽이 참여자인지 공개범위인지는 아직 확정되지 않았다** — 그래서 등록 read-back은
+  `attendees`가 아니라 **`partCount`로 판정**한다.
+
+#### 비밀메모 `myMemo`
+
+- 작성자 본인만 본다. 일정이 삭제되거나 본인이 참여자에서 빠지면 사라진다.
+- ⚠️ **조회 응답(`sc111A03`)에 이 필드가 없다 → read-back 불가.**
+  도구는 `secretMemo.verified:false`로 "보냈으나 확인 못 했다"를 드러낸다(조용한 성공 금지).
+
+#### 화상회의 `videoYn`
+
+- `"Y"`/`"N"`. 켜도 **추가 키가 생기지 않는다**(`videoTimeZone`은 토글과 무관하게 항상 `"Asia/Seoul"`).
+- 조회 응답에 `videoYn`이 있어 read-back 가능. 응답으로 회의 URL이 오는지는 미관측.
+
+#### 그 밖의 확장 필드 (자리만 있고 도구 미노출)
+
+| 키 | 항목 | 상태 |
+|---|---|---|
+| `schAlarmList` | 알림 | 스키마·코드값 확정(아래). read-back 재료 없음 |
+| `resList` | 자원예약 | 스키마 확정. **실제 `rs121*` 예약을 만드는지 미확인**(이중예약 위험) |
+| `uidList` | 첨부 | `ecm001A01` 업로드 응답의 `resultData.list[].fileId`. multipart 필드명 미실측 |
+| `placeMapData` | 장소 | 미실측(시스템에 장소 데이터 없음) |
+| `otherLinkList` | 유관업무 | 미실측 — KISS(`prj004A09`) 프로젝트가 **0건**이라 지정 불가 |
+| `repeatType` | 반복 | 없음`10` · 매일`20` · 매년`80` 확정. **매주·매월 미확정** |
+
+알림 `schAlarmList` 항목: `{"alarmTimeDiv":"45","text":"30분 전","alarmAmPm":"","alarmDate":"","alarmTime":"","alarmRealDate":"","sendType":"20"}`
+— `alarmTimeDiv`: `10`정시 · `30`10분 · `40`15분 · `45`30분 · `50`1시간 · `60`1일 · `80`1주일. `sendType:"20"`=알림.
+⚠️ **`alarm_yn`은 알림 유무와 무관하게 늘 `"Y"`** 다 — 알림 여부는 `schAlarmList` 길이가 정한다.
+
+> 반복 상한은 **`sc111A51`**(`companyInfo` 없는 얇은 API)이 계산해 준다:
+> `{startDate,endDate,repeatType,repeatByDay,repeatEndDay}` → `{minDate,maxDate,checkRepeatEndDay,checkRepeatEndDayCount,beyond_yn}`.
+> **일정을 만들지 않으므로** 남은 `repeatType` 코드를 부작용 없이 훑는 데 쓸 수 있다.
+
 ### ⚠️ 수정 (sc111A05, itemList diff) — 등록과 payload 구조가 완전히 다름
 
 **같은 API(sc111A05)지만 수정은 전혀 다른 형태**다. `schSeq` 채우고 전체 필드를 보내면 **신규 INSERT로 처리됨**(함정). 수정은 반드시:
@@ -144,6 +202,23 @@
 
 - 시간 변경 객체 필드명은 **`allDay`/`lunar`**(등록 body의 `alldayYn`/`lunarYn`과 다름).
 - 폼이 변경 여부와 무관하게 **항상 포함**하는 item: `videoYn`, `schParticipants`(add/update/removeSchPartEmpList), `mailSend`.
+
+> #### 이 "항상 주입"이 원본을 덮는가 — 실측 판정 (2026-08-07)
+>
+> 참여자 3명·화상회의 켜진 일정의 **제목만** 수정해 재조회했다.
+>
+> | 항목 | 결과 |
+> |---|---|
+> | 참여자 `updateSchPartEmpList` | ✅ **덮지 않는다.** `partCount`가 3으로 유지됐다(`schSeq 90577`). 이 item은 "이 목록으로 교체"가 아니라 **"이 사람들의 속성만 갱신"**이다 — 제거는 `removeSchPartEmpList`가 따로 맡는다 |
+> | 화상회의 `videoYn` | ❌ **덮는다.** 수정 전 `videoYn:"Y"` → 수정 후 꺼짐(`schSeq 90578`). **결함이었고 v1.2.1에서 고쳤다** |
+>
+> 고친 방식: `always_present_items`가 `videoYn`에 **원본 값을 되돌려 넣는다**(상수 `"N"` 금지).
+> item과 상위 body 양쪽을 같은 값으로 맞춘다 — 어느 쪽이 서버에 먹는지 가르지 않았기 때문이다.
+> `update_event_and_verify`도 수정 후 `videoYn`이 유지됐는지 확인하고, 어긋나면 응답에
+> `videoLost`를 실어 드러낸다.
+>
+> ⚠️ 이 위험은 **MCP로 만든 일정에만 해당하는 것이 아니었다** — 아마란스 웹에서 화상회의를 켜
+> 만든 일정을 MCP로 수정할 때도 똑같이 꺼졌다.
 - **전체 item key 목록**(프론트 번들 chunk 20 실측 — 향후 확장 근거): `schCalendar`(캘린더 이동) · `schTitle` · `schDate` · `schAlarm` · `schContents` · `schMyMemo`(비밀메모) · `schParticipants` · `schDisclosure`(공개범위) · `schAddress` · `schPlace`(장소) · `schReservation`(자원예약) · `schAttachFile`(첨부) · `schRelatedWork`(유관업무) · `videoYn` · `mailSend`.
 
 ### 삭제 (sc111A06)

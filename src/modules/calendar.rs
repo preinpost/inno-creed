@@ -258,11 +258,71 @@ fn shape_event(e: &Value) -> Value {
     {
         put("partCount", json!(n));
     }
+    // 화상회의는 켜져 있을 때만 싣는다. 등록에서 지정할 수 있는 값이라 조회에서도 보여야
+    // 사용자가 반영을 확인할 수 있다(수정이 이 값을 건드리는지 판별하는 근거이기도 하다).
+    if s("videoYn") == "Y" {
+        put("video", json!(true));
+    }
     Value::Object(o)
+}
+
+/// 일정 참여자 1명. `schPartEmpList` 항목 하나로 나간다.
+///
+/// ⚠️ `dept_seq`는 **그 사람의 부서**를 넣는다. 실측 캡처에서는 참여자 3명의 `deptSeq`가 모두 같았는데
+/// (셋 다 같은 팀이었다) 그것이 "각자의 부서"인지 "등록자의 부서"인지 **가르지 못했다**.
+/// 명부가 각자의 부서를 주므로 그쪽을 택했다 — 서버가 이 값을 어디에 쓰는지는 미확인.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Participant {
+    pub emp_seq: String,
+    pub dept_seq: String,
+    pub name: String,
+}
+
+/// 등록 시 확장 필드. 전부 선택이고 **기본값은 확장 이전 동작과 같다**(빈 메모 · 본인만 · 화상회의 없음).
+#[derive(Default, Debug)]
+pub struct EventExtras {
+    /// 비밀메모(`myMemo`). 작성자 본인만 보며, 일정이 삭제되거나 참여자에서 빠지면 사라진다.
+    pub my_memo: String,
+    /// 본인 외 참여자. 본인은 항상 주최자로 들어가므로 여기 넣지 않아도 된다.
+    pub participants: Vec<Participant>,
+    /// 화상회의 사용 여부.
+    pub video: bool,
+}
+
+/// 주최자(본인) + 참석자 → `schPartEmpList`.
+///
+/// `partType`은 실측으로 갈렸다 — **`M`=주최자(등록자) · `W`=참석자**.
+/// 본인이 참석자 목록에 또 들어와도 **중복되지 않는다**(주최자 자리를 유지한다).
+fn build_part_emp_list(comp_seq: &str, host: &Participant, guests: &[Participant]) -> Vec<Value> {
+    let item = |p: &Participant, part_type: &str| {
+        json!({
+            "compSeq": comp_seq,
+            "deptSeq": p.dept_seq,
+            "orgType": "E",
+            "orgSeq": p.emp_seq,
+            "empSeq": p.emp_seq,
+            "empName": p.name,
+            "partType": part_type,
+            "mcalSeq": ""
+        })
+    };
+    let mut out = vec![item(host, "M")];
+    let mut seen = vec![host.emp_seq.clone()];
+    for g in guests {
+        if seen.contains(&g.emp_seq) {
+            continue;
+        }
+        seen.push(g.emp_seq.clone());
+        out.push(item(g, "W"));
+    }
+    out
 }
 
 /// 일정 등록/수정 — `sc111A05`. `sch_seq` 빈문자열이면 신규(insert), 채우면 수정(update).
 /// 반환 `resultData.schSeq`(=schmSeq)가 생성/수정된 일정 ID.
+///
+/// ⚠️ **`mailSend`는 `"N"` 고정이다.** 폼 실측값은 `"Y"`지만, 그러면 참여자에게 실제 메일이 나간다
+/// — 참여자를 지정할 수 있게 된 이상 이 값은 설정이 아니라 **외부로 나가는 행위의 스위치**다.
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_event(
     c: &GwClient,
@@ -274,8 +334,14 @@ pub async fn upsert_event(
     end: &str,
     contents: &str,
     allday: &str,
+    extras: &EventExtras,
 ) -> Result<Value> {
     let emp = c.emp_seq();
+    let host = Participant {
+        emp_seq: emp.clone(),
+        dept_seq: c.dept_seq(),
+        name: c.emp_name(),
+    };
     c.call(
         "/schres/sc111A05",
         &json!({
@@ -296,20 +362,11 @@ pub async fn upsert_event(
             "alarm_yn": "Y",
             "schAlarmList": [],
             "contents": contents,
-            "myMemo": "",
+            "myMemo": extras.my_memo,
             "alldayYn": allday,
             "lunarYn": "N",
             "inviterPartType": "M",
-            "schPartEmpList": [{
-                "compSeq": c.comp_seq(),
-                "deptSeq": c.dept_seq(),
-                "orgType": "E",
-                "orgSeq": emp,
-                "empSeq": emp,
-                "empName": c.emp_name(),
-                "partType": "M",
-                "mcalSeq": ""
-            }],
+            "schPartEmpList": build_part_emp_list(&c.comp_seq(), &host, &extras.participants),
             "schUserList": [],
             "addressUserList": [],
             "resList": [],
@@ -319,7 +376,7 @@ pub async fn upsert_event(
             "otherLinkList": [],
             "groupSeq": c.group_seq(),
             "empSeq": emp,
-            "videoYn": "N",
+            "videoYn": if extras.video { "Y" } else { "N" },
             "videoTimeZone": "Asia/Seoul",
             "mailSend": "N",
             "langCode": "kr"
@@ -367,6 +424,50 @@ fn build_update_items(
     items
 }
 
+/// 원본 `videoYn`을 수정 payload에 넣을 값으로 정규화. 값이 없으면 `"N"`.
+fn normalize_video_yn(orig: &str) -> &str {
+    if orig.is_empty() { "N" } else { orig }
+}
+
+/// 수정 시 **변경 여부와 무관하게 항상 주입되는** item 3개. 폼이 그렇게 보내기 때문이다
+/// (`docs/api-reference.md` — "폼이 항상 포함하는 item").
+///
+/// ⚠️ **`videoYn`에 상수 `"N"`을 넣으면 안 된다.** 그랬더니 제목만 고쳐도 화상회의가 꺼지는 것을
+/// 실측했다(2026-08-07, `schSeq 90578`: 수정 전 `videoYn:"Y"` → 수정 후 꺼짐). 폼은 화면의
+/// **현재 값**을 담아 보내는데 우리는 상수를 보내고 있었다. 원본 값을 되돌려 넣어야 한다.
+///
+/// 참여자(`updateSchPartEmpList`)에 본인만 담는 것은 **문제가 아니다** — 실측에서 참여자 3명짜리
+/// 일정의 제목만 고쳐도 `partCount`가 3으로 유지됐다(`schSeq 90577`). 이 item은 "이 목록으로 교체"가
+/// 아니라 "이 사람들의 속성만 갱신"이다(제거는 `removeSchPartEmpList`가 따로 맡는다).
+fn always_present_items(
+    comp_seq: &str,
+    dept_seq: &str,
+    emp_seq: &str,
+    emp_name: &str,
+    mcal_seq: &str,
+    video_yn: &str,
+) -> Vec<Value> {
+    vec![
+        json!({ "item": "videoYn", "videoYn": video_yn }),
+        json!({
+            "item": "schParticipants",
+            "addSchPartEmpList": [],
+            "updateSchPartEmpList": [{
+                "compSeq": comp_seq,
+                "deptSeq": dept_seq,
+                "orgType": "E",
+                "orgSeq": emp_seq,
+                "empSeq": emp_seq,
+                "empName": emp_name,
+                "partType": "M",
+                "mcalSeq": mcal_seq
+            }],
+            "removeSchPartEmpList": []
+        }),
+        json!({ "item": "mailSend", "mailSend": "N" }),
+    ]
+}
+
 /// 일정 수정 — `sc111A05` + `rangeCode:"UO"` + `itemList`(변경분 diff). schSeq 유지(in-place, 재발급 없음).
 /// `items`=변경 항목 배열. item 형식(실측): schTitle `{schTitle}`, schContents `{contents}`,
 /// schDate `{schDate:{startDate,endDate,allDay,lunar,lunarDate}}`. videoYn/schParticipants/mailSend는
@@ -376,27 +477,13 @@ pub async fn update_event_items(
     sch_seq: &str,
     mcal_seq: &str,
     items: Vec<Value>,
+    orig_video_yn: &str,
 ) -> Result<Value> {
     let emp = c.emp_seq();
-    let mut item_list = vec![
-        json!({ "item": "videoYn", "videoYn": "N" }),
-        json!({
-            "item": "schParticipants",
-            "addSchPartEmpList": [],
-            "updateSchPartEmpList": [{
-                "compSeq": c.comp_seq(),
-                "deptSeq": c.dept_seq(),
-                "orgType": "E",
-                "orgSeq": emp,
-                "empSeq": emp,
-                "empName": c.emp_name(),
-                "partType": "M",
-                "mcalSeq": mcal_seq
-            }],
-            "removeSchPartEmpList": []
-        }),
-        json!({ "item": "mailSend", "mailSend": "N" }),
-    ];
+    let video_yn = normalize_video_yn(orig_video_yn);
+    let mut item_list = always_present_items(
+        &c.comp_seq(), &c.dept_seq(), &emp, &c.emp_name(), mcal_seq, video_yn,
+    );
     item_list.extend(items);
     c.call(
         "/schres/sc111A05",
@@ -414,7 +501,9 @@ pub async fn update_event_items(
             "repeatEndDay": "",
             "repeatType": "10",
             "alarm_yn": "N",
-            "videoYn": "N",
+            // item과 같은 값으로 맞춘다 — 둘 중 어느 쪽이 서버에 먹는지 가르지 않았으므로
+            // 한쪽만 고치면 결과가 갈릴 수 있다.
+            "videoYn": video_yn,
             "videoTimeZone": "Asia/Seoul",
             "mailSend": "N",
             "langCode": "kr"
@@ -438,20 +527,108 @@ pub async fn delete_event(c: &GwClient, mcal_seq: &str, sch_seq: &str, range_cod
     .await
 }
 
+/// 참여자 지정(`이름` 또는 `empSeq`) → `Participant`.
+///
+/// 숫자만으로 된 값은 **empSeq로 직행**하고, 그 외는 명부에서 이름을 찾는다.
+/// **못 찾거나 동명이인이면 실패시킨다** — 아무나 골라 남의 일정에 넣는 것보다 낫다.
+/// (`resolve_target`이 캘린더 이름에 대해 취한 태도와 같다.)
+pub async fn resolve_participants(c: &std::sync::Arc<GwClient>, specs: &[String]) -> Result<Vec<Participant>> {
+    let mut out = Vec::new();
+    for spec in specs {
+        let q = spec.trim();
+        if q.is_empty() {
+            continue;
+        }
+        // empSeq 직접 지정 — 명부를 뒤질 필요가 없다.
+        if q.chars().all(|ch| ch.is_ascii_digit()) {
+            let people = crate::modules::org::roster(c).await?;
+            let hit = people
+                .iter()
+                .find(|m| m.get("empSeq").and_then(|v| v.as_str()) == Some(q));
+            let g = |k: &str| {
+                hit.and_then(|m| m.get(k).and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string()
+            };
+            out.push(Participant {
+                emp_seq: q.to_string(),
+                dept_seq: g("deptId"),
+                name: g("name"),
+            });
+            continue;
+        }
+        let people = crate::modules::org::roster(c).await?;
+        let ql = q.to_lowercase();
+        let exact: Vec<&Value> = people
+            .iter()
+            .filter(|m| {
+                m.get("name").and_then(|v| v.as_str()).map(str::to_lowercase) == Some(ql.clone())
+            })
+            .collect();
+        let hits = if exact.is_empty() {
+            people
+                .iter()
+                .filter(|m| {
+                    m.get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&ql)
+                })
+                .collect::<Vec<&Value>>()
+        } else {
+            exact
+        };
+        let g = |m: &Value, k: &str| m.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        match hits.len() {
+            0 => {
+                return Err(InvalidInput::new(format!(
+                    "참여자 '{q}'를 찾지 못했습니다. find_person으로 확인 후 이름이나 empSeq를 지정하세요."
+                ))
+                .into())
+            }
+            1 => out.push(Participant {
+                emp_seq: g(hits[0], "empSeq"),
+                dept_seq: g(hits[0], "deptId"),
+                name: g(hits[0], "name"),
+            }),
+            _ => {
+                // 조용히 하나를 고르지 않는다 — 누구를 넣을지는 호출자가 정해야 한다.
+                let cands: Vec<String> = hits
+                    .iter()
+                    .take(10)
+                    .map(|m| format!("{}({})", g(m, "name"), g(m, "empSeq")))
+                    .collect();
+                return Err(InvalidInput::new(format!(
+                    "참여자 '{q}'가 {}명입니다. empSeq로 지정하세요: {}",
+                    hits.len(),
+                    cands.join(", ")
+                ))
+                .into());
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// 일정 등록 + **read-back 검증**. 대상 캘린더 해석까지 포함한다.
+///
+/// read-back으로 판정하는 것: 제목 · 참여자 수(`partCount`) · 화상회의(`videoYn`).
+/// **비밀메모는 판정하지 못한다** — 조회 응답에 그 필드가 없다. 응답에 그 사실을 드러낸다.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_event_and_verify(
-    c: &GwClient,
+    c: &std::sync::Arc<GwClient>,
     calendar: Option<&str>,
     title: &str,
     start: &str,
     end: &str,
     contents: &str,
     allday: &str,
+    extras: &EventExtras,
 ) -> Result<Value> {
     let target = resolve_target_cal(c, calendar).await?;
     let reg = upsert_event(
-        c, "", &target.mcal_seq, &target.cal_type, title, start, end, contents, allday,
+        c, "", &target.mcal_seq, &target.cal_type, title, start, end, contents, allday, extras,
     )
     .await
     .map_err(|e| anyhow!("일정 등록 실패: {e}"))?;
@@ -461,21 +638,74 @@ pub async fn create_event_and_verify(
         .map(String::from)
         .ok_or_else(|| anyhow!("등록 응답에 schSeq 없음"))?;
 
+    // 기대 참여자 수 = 주최자(본인) + 중복 제거한 참석자. 본인이 목록에 또 있어도 늘지 않는다.
+    let me = c.emp_seq();
+    let mut uniq: Vec<&str> = vec![me.as_str()];
+    for p in &extras.participants {
+        if !uniq.contains(&p.emp_seq.as_str()) {
+            uniq.push(&p.emp_seq);
+        }
+    }
+    let expected_part = uniq.len() as i64;
+
     // read-back: 시작일 기준 재조회로 실제 생성 확인
     let day = &start[..start.len().min(8)];
     let ev = find_event(c, &sch_seq, day).await.ok();
-    let reflected = ev
+    let title_ok = ev
         .as_ref()
         .map(|e| e.get("schTitle").and_then(|v| v.as_str()) == Some(title))
         .unwrap_or(false);
-    Ok(json!({
+    // partCount는 참여자가 1명(본인)뿐일 때 응답에서 0이거나 빠질 수 있다 — 그 경우는 검사하지 않는다.
+    let actual_part = ev.as_ref().and_then(|e| e.get("partCount").and_then(|v| v.as_i64()));
+    let part_ok = match actual_part {
+        Some(n) => n == expected_part,
+        None => expected_part <= 1,
+    };
+    let actual_video = ev
+        .as_ref()
+        .and_then(|e| e.get("videoYn").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let video_ok = !actual_video.is_empty() && (actual_video == "Y") == extras.video;
+    let reflected = title_ok && part_ok && (video_ok || actual_video.is_empty());
+
+    let mut out = json!({
         "ok": reflected,
         "schSeq": sch_seq,
         "title": title,
         "calendar": format!("{}({})", target.title, target.mcal_seq),
         "period": format!("{start}~{end}"),
         "verified_by_readback": reflected
-    }))
+    });
+    let o = out.as_object_mut().expect("위에서 만든 객체");
+    if !extras.participants.is_empty() {
+        o.insert(
+            "participants".into(),
+            json!(
+                extras.participants.iter()
+                    .map(|p| json!({ "empSeq": p.emp_seq, "name": p.name }))
+                    .collect::<Vec<_>>()
+            ),
+        );
+        o.insert(
+            "partCount".into(),
+            json!({ "expected": expected_part, "actual": actual_part }),
+        );
+    }
+    if extras.video {
+        o.insert("video".into(), json!({ "requested": true, "reflected": video_ok }));
+    }
+    if !extras.my_memo.is_empty() {
+        // 조용한 성공 금지 — 보냈다는 것과 반영됐다는 것을 구분해 드러낸다.
+        o.insert(
+            "secretMemo".into(),
+            json!({
+                "sent": true,
+                "verified": false,
+                "note": "조회 응답에 비밀메모 필드가 없어 반영 여부를 확인할 수 없다(아마란스 웹에서 확인할 것)."
+            }),
+        );
+    }
+    Ok(out)
 }
 
 /// 일정 수정 + **소유권 가드 + read-back 검증**. 변경분만 지정한다.
@@ -503,7 +733,8 @@ pub async fn update_event_and_verify(
         title, contents, start, end,
         &g("alldayYn"), &g("startDate"), &g("endDate"),
     );
-    update_event_items(c, sch_seq, &g("mcalSeq"), items)
+    // 원본의 화상회의 설정을 그대로 넘긴다 — 수정이 그것을 꺼뜨리지 않게.
+    update_event_items(c, sch_seq, &g("mcalSeq"), items, &g("videoYn"))
         .await
         .map_err(|e| anyhow!("일정 수정 실패: {e}"))?;
 
@@ -528,13 +759,26 @@ pub async fn update_event_and_verify(
             .unwrap_or("")
             .to_string()
     };
-    Ok(json!({
-        "ok": reflected,
+    // 손대지 않은 필드가 수정에 휩쓸리지 않았는지도 본다 — 화상회의가 실제로 꺼진 적이 있다.
+    let video_kept = g("videoYn").is_empty() || ag("videoYn") == g("videoYn");
+    let mut out = json!({
+        "ok": reflected && video_kept,
         "schSeq": sch_seq,
         "title": ag("schTitle"),
         "period": format!("{}~{}", ag("startDate"), ag("endDate")),
         "verified_by_readback": reflected
-    }))
+    });
+    if !video_kept {
+        out.as_object_mut().expect("위에서 만든 객체").insert(
+            "videoLost".into(),
+            json!({
+                "before": g("videoYn"),
+                "after": ag("videoYn"),
+                "note": "수정이 화상회의 설정을 바꿨다 — 의도한 변경이 아니면 결함이다."
+            }),
+        );
+    }
+    Ok(out)
 }
 
 /// 일정 삭제 + **소유권 가드 + read-back 검증**.
@@ -710,5 +954,82 @@ mod tests {
 
         // createSeq 자체가 없으면 ""와 비교 → 거부
         assert!(check_author(&json!({}), "3166", "삭제").is_err());
+    }
+
+    fn p(seq: &str, name: &str) -> Participant {
+        Participant { emp_seq: seq.into(), dept_seq: "2993".into(), name: name.into() }
+    }
+
+    #[test]
+    fn build_part_emp_list는_참여자가_없으면_본인만_넣는다() {
+        // 확장 이전 동작 보존 — 이게 깨지면 기존 사용자의 일정 등록이 달라진다.
+        let list = build_part_emp_list("1000", &p("3166", "이재학"), &[]);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["empSeq"], "3166");
+        assert_eq!(list[0]["partType"], "M", "본인은 주최자");
+        assert_eq!(list[0]["orgSeq"], "3166", "개인은 orgSeq==empSeq");
+        assert_eq!(list[0]["orgType"], "E");
+    }
+
+    #[test]
+    fn build_part_emp_list는_주최자와_참석자를_구분한다() {
+        let list = build_part_emp_list("1000", &p("3166", "이재학"), &[p("3131", "송학현"), p("3137", "김종명")]);
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0]["partType"], "M");
+        assert_eq!(list[1]["partType"], "W", "참석자는 W (실측)");
+        assert_eq!(list[2]["partType"], "W");
+        assert_eq!(list[1]["empName"], "송학현");
+    }
+
+    #[test]
+    fn build_part_emp_list는_본인이_참석자에_또_있어도_중복시키지_않는다() {
+        let list = build_part_emp_list("1000", &p("3166", "이재학"), &[p("3166", "이재학"), p("3131", "송학현")]);
+        assert_eq!(list.len(), 2, "본인은 한 번만");
+        assert_eq!(list[0]["partType"], "M", "중복 제거 후에도 주최자 자리를 유지한다");
+        assert_eq!(list[1]["empSeq"], "3131");
+    }
+
+    #[test]
+    fn build_part_emp_list는_참석자_중복도_걸러낸다() {
+        let list = build_part_emp_list("1000", &p("3166", "이재학"), &[p("3131", "송학현"), p("3131", "송학현")]);
+        assert_eq!(list.len(), 2);
+    }
+
+    /// ⛔ 회귀 방지 — 여기에 상수 "N"을 되돌려 넣으면 제목만 고쳐도 화상회의가 꺼진다(실측).
+    #[test]
+    fn always_present_items는_화상회의를_원본값으로_되돌린다() {
+        let on = always_present_items("1000", "2993", "3166", "이재학", "1095", "Y");
+        assert_eq!(on[0]["item"], "videoYn");
+        assert_eq!(on[0]["videoYn"], "Y", "켜져 있던 일정은 켜진 채로 남아야 한다");
+
+        let off = always_present_items("1000", "2993", "3166", "이재학", "1095", "N");
+        assert_eq!(off[0]["videoYn"], "N");
+    }
+
+    #[test]
+    fn normalize_video_yn은_빈값을_n으로_본다() {
+        assert_eq!(normalize_video_yn(""), "N");
+        assert_eq!(normalize_video_yn("Y"), "Y");
+        assert_eq!(normalize_video_yn("N"), "N");
+    }
+
+    /// 참여자 item은 "교체"가 아니라 "속성 갱신"이라 본인만 담아도 남이 지워지지 않는다(실측).
+    /// 그 전제가 깨지면 이 테스트가 아니라 **라이브에서** 드러난다 — 여기서는 형태만 고정한다.
+    #[test]
+    fn always_present_items는_참여자_제거목록을_비워둔다() {
+        let items = always_present_items("1000", "2993", "3166", "이재학", "1095", "N");
+        assert_eq!(items[1]["item"], "schParticipants");
+        assert_eq!(items[1]["removeSchPartEmpList"], json!([]), "제거는 이 경로가 하지 않는다");
+        assert_eq!(items[1]["updateSchPartEmpList"][0]["empSeq"], "3166");
+        assert_eq!(items[2]["mailSend"], "N", "수정이 알림을 발송하지 않는다");
+    }
+
+    #[test]
+    fn build_part_emp_list는_각자의_부서를_싣는다() {
+        let mut other = p("3131", "송학현");
+        other.dept_seq = "3040".into();
+        let list = build_part_emp_list("1000", &p("3166", "이재학"), &[other]);
+        assert_eq!(list[0]["deptSeq"], "2993");
+        assert_eq!(list[1]["deptSeq"], "3040", "참여자는 자기 부서 seq를 쓴다");
     }
 }

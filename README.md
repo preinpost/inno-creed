@@ -47,7 +47,7 @@
 | 도구 | 기능 |
 |---|---|
 | `list_calendars` / `list_events` | 캘린더 목록 / 기간 일정 조회 |
-| `create_calendar_event` | 개인 캘린더 일정 등록 |
+| `create_calendar_event` | 일정 등록(참여자·화상회의·비밀메모 지정 가능) |
 | `update_calendar_event` | 일정 제목·내용·시간 수정(본인 작성만) |
 | `delete_calendar_event` | 일정 삭제(본인 작성만, 소프트 삭제) |
 

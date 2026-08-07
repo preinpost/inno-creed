@@ -72,6 +72,29 @@ mod flex {
         }
     }
 
+    /// 선택 문자열 **목록** 인자 — 항목마다 숫자를 받는다(`[3131, "송학현"]` → `["3131","송학현"]`).
+    /// empSeq 목록은 앞 도구(`find_person`)의 출력을 그대로 물리는 자리라 혼용이 실제로 일어난다.
+    pub fn string_vec_opt<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
+        let v = Value::deserialize(d)?;
+        let items = match v {
+            Value::Null => return Ok(None),
+            // 하나만 줄 때 배열로 감싸지 않는 호출자를 받아준다.
+            Value::String(s) => return Ok(Some(vec![s])),
+            Value::Number(n) => return Ok(Some(vec![n.to_string()])),
+            Value::Array(a) => a,
+            other => return Err(coerce_err(&other, "문자열 목록")),
+        };
+        items
+            .into_iter()
+            .map(|x| match x {
+                Value::String(s) => Ok(s),
+                Value::Number(n) => Ok(n.to_string()),
+                other => Err(coerce_err(&other, "문자열")),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
+    }
+
     pub fn int_schema(g: &mut SchemaGenerator) -> Schema {
         widen(<i64 as JsonSchema>::json_schema(g), "integer")
     }
@@ -82,6 +105,18 @@ mod flex {
 
     pub fn str_opt_schema(g: &mut SchemaGenerator) -> Schema {
         widen(<Option<String> as JsonSchema>::json_schema(g), "string")
+    }
+
+    /// 목록 인자의 **항목** 타입을 넓힌다(바깥의 `["array","null"]`은 그대로 둔다).
+    pub fn str_vec_opt_schema(g: &mut SchemaGenerator) -> Schema {
+        let mut s = <Option<Vec<String>> as JsonSchema>::json_schema(g);
+        if let Some(obj) = s.as_object_mut()
+            && let Some(items) = obj.get_mut("items")
+            && let Some(io) = items.as_object_mut()
+        {
+            io.insert("type".into(), serde_json::json!(["string", "integer"]));
+        }
+        s
     }
 
     /// 원래 스키마의 `type`에 짝이 되는 타입을 더한다(설명·기본값 등 나머지는 그대로 둔다).
@@ -97,7 +132,8 @@ mod flex {
 /// 정수 인자에 붙인다: `#[serde(deserialize_with = "…")] #[schemars(schema_with = "…")]`
 pub(super) use flex::{
     i64 as flex_i64, int_schema as flex_int_schema, str_opt_schema as flex_str_opt_schema,
-    str_schema as flex_str_schema, string as flex_string, string_opt as flex_string_opt,
+    str_schema as flex_str_schema, str_vec_opt_schema as flex_str_vec_opt_schema,
+    string as flex_string, string_opt as flex_string_opt, string_vec_opt as flex_string_vec_opt,
 };
 
 pub(super) fn one() -> i64 {
@@ -182,5 +218,46 @@ mod tests {
         let t2 = &serde_json::to_value(rmcp::schemars::schema_for!(resource::CancelArgs)).unwrap()
             ["properties"]["res_seq"]["type"];
         assert_eq!(t2, &json!(["string", "integer"]), "res_seq 스키마: {t2}");
+    }
+
+    /// 참여자 목록은 `find_person`의 empSeq(문자열)와 모델이 쓰기 쉬운 숫자가 섞여 온다.
+    #[test]
+    fn 참여자_목록은_숫자와_문자열을_섞어_받는다() {
+        let a: calendar::CreateEventArgs = serde_json::from_value(json!({
+            "title": "회의", "start": 202608071100i64, "end": "202608071200",
+            "participants": [3131, "송학현", "3137"]
+        }))
+        .expect("숫자 항목이 섞여도 통과해야 한다");
+        assert_eq!(
+            a.participants.unwrap(),
+            vec!["3131".to_string(), "송학현".into(), "3137".into()]
+        );
+    }
+
+    /// 한 명만 넣을 때 배열로 감싸지 않는 호출자를 받아준다.
+    #[test]
+    fn 참여자는_배열이_아니어도_한명으로_받는다() {
+        let a: calendar::CreateEventArgs = serde_json::from_value(json!({
+            "title": "회의", "start": "202608071100", "end": "202608071200",
+            "participants": 3131
+        }))
+        .unwrap();
+        assert_eq!(a.participants.unwrap(), vec!["3131".to_string()]);
+    }
+
+    #[test]
+    fn 참여자_미지정은_없음이다() {
+        let a: calendar::CreateEventArgs = serde_json::from_value(json!({
+            "title": "회의", "start": "202608071100", "end": "202608071200"
+        }))
+        .unwrap();
+        assert!(a.participants.is_none(), "미지정은 기존 동작(본인만) 유지");
+    }
+
+    #[test]
+    fn 참여자_목록_스키마는_항목타입을_넓힌다() {
+        let s = serde_json::to_value(rmcp::schemars::schema_for!(calendar::CreateEventArgs)).unwrap();
+        let t = &s["properties"]["participants"]["items"]["type"];
+        assert_eq!(t, &json!(["string", "integer"]), "participants 항목 스키마: {t}");
     }
 }
