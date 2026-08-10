@@ -196,6 +196,9 @@ claude mcp add inno-creed -- /절대경로/inno-creed        # Windows는 ...\in
 
 등록 후 클라이언트를 재시작하면 도구가 노출됩니다. macOS에서 Chrome 크레덴셜을 쓸 경우 첫 실행 시 키체인(`Chrome Safe Storage`) 접근 허용 프롬프트가 한 번 뜹니다.
 
+> **HTTP 전송은 정식 지원하지 않습니다.** 이 서버는 로그인을 받지 않고 **서버가 도는 머신의 브라우저 쿠키**로 동작하므로, 포트를 여는 순간 거기 닿는 누구나 당신 이름으로 결재를 상신하고(`submit_approval` — 결재선에 실제 알림이 갑니다) 메일을 보내고 근태를 찍을 수 있습니다. 그래서 배포 바이너리에 넣지 않았습니다.
+> stdio를 쓸 수 없는 **로컬** 클라이언트 때문에 꼭 필요하다면, 직접 빌드하는 절차를 [`docs/HTTP.md`](docs/HTTP.md)에 적어두었습니다 — 기존 코드 수정 없이 의존성 2줄과 바이너리 1개면 됩니다. 원격 노출·공용 서버 상주는 하지 마세요.
+
 ## 동작 방식
 
 ```
@@ -224,6 +227,7 @@ inno-creed (Rust MCP 서버, 헤드리스)
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | 아키텍처, 크레덴셜 취득, 서명 규격, 공통 규약 |
 | [docs/api-reference.md](docs/api-reference.md) | 모듈별 확정 API 스키마 |
+| [docs/HTTP.md](docs/HTTP.md) | HTTP 전송을 정식 지원하지 않는 이유와, 그래도 필요할 때 직접 빌드하는 절차 |
 | [tests/live/README.md](tests/live/README.md) | 라이브 스모크 테스트 — 실제 그룹웨어에 붙어 도구를 왕복시키는 하네스(승인 게이트·자동 정리) |
 
 `docs/`에는 **실증으로 확정된 사실만** 담습니다 — 실제로 호출해 응답을 확인한 것만 적습니다. 거기 없는 것은 확정되지 않았다는 뜻입니다.
