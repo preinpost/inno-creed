@@ -139,9 +139,9 @@
    ],
    "entry": "임직원업무관리 > 근태신청 > 근태신청서 > 연차휴가신청서 (KISS 근태폼, formId=36)",
    "requiredBody": [
-    "휴가구분 선택(연차/오전반차/오후반차/반반차)",
+    "휴가구분 선택(연차/오전반차/오후반차/반반차/시간연차)",
     "휴가 기간 선택",
-    "시작/종료 시간 선택(반차·반반차 선택 시 활성화)",
+    "시작/종료 시간 선택(반차는 폼이 자동 세팅, 반반차·시간연차는 직접 지정)",
     "사유(선택)",
     "제목"
    ],
@@ -159,12 +159,19 @@
     "submitTool": "submit_approval",
     "howto": "submit_approval 호출용. hp_application_json = hpApplicationExample를 복사해 fill 필드만 교체(fixed 코드·구조는 그대로 유지). bind_data_json = bindDataExample(화면표시용, 서버로 이중인코딩 전송됨). ⭐ 신원 필드는 submit_approval이 로그인 사용자 값으로 자동 주입한다 — 코드계(coCd/deptCd/empCd)·이름(empNm/korNm)뿐 아니라 **문서에 렌더되는 표시문자열(deptNm/divNm/singleDeptNm/singlePositionNm/singleDutyNm/empNmDutyNm/employees)까지** 조직도 조회값으로 덮어쓴다. 그래서 예시에 박힌 이재학/11097/네이티브 플랫폼팀 값은 그대로 둬도 되고, 신경 쓸 것은 fill 필드뿐이다. (조직도 조회가 실패하면 표시문자열만 예시값이 남는다 — whoami의 profileResolved로 확인 가능.) line_id는 save_approval_line으로 준비한 결재라인 ID.",
     "fixed": {
-     "note": "휴가구분(연차/오전반차/오후반차/반반차)에 따라 atCd/linkAtCd·appDyFg·appTm 상이 — 미캡처."
+     "note": "휴가구분은 atCd로만 갈린다(2026-08-12 브라우저 실측). linkAtCd는 전부 \"1010\", appDyFg는 전부 \"D\", appDy는 전부 \"1\" — 구분 코드가 아니니 건드리지 말 것. 바뀌는 건 atCd·appTm(분)·ycUseCnt(차감일수)·startTm/endTm 넷뿐이다.",
+     "휴가구분별": {
+      "연차": { "atCd": "1101", "appTm": 480, "ycUseCnt": 1, "startTm/endTm": "0900/1800" },
+      "오전반차": { "atCd": "1102", "appTm": 240, "ycUseCnt": 0.5, "startTm/endTm": "0900/1300 (폼이 자동 세팅)" },
+      "오후반차": { "atCd": "1103", "appTm": 240, "ycUseCnt": 0.5, "startTm/endTm": "1400/1800 (폼이 자동 세팅)" },
+      "반반차": { "atCd": "1111", "appTm": 120, "ycUseCnt": 0.25, "startTm/endTm": "임의 2시간 구간 — 폼이 자동 세팅하지 않아 직접 지정(예 0900/1100)" },
+      "시간연차": { "atCd": "1112", "appTm": 60, "ycUseCnt": 0.125, "startTm/endTm": "임의 1시간 구간 — 직접 지정(예 0900/1000)" }
+     }
     },
     "fill": {
-     "휴가구분": "연차/오전반차/오후반차/반반차",
+     "휴가구분": "연차/오전반차/오후반차/반반차/시간연차 — fixed.휴가구분별의 atCd·appTm·ycUseCnt를 세트로 함께 바꿀 것(하나만 바꾸면 화면 표시와 차감이 어긋난다)",
      "startDt/endDt": "기간 YYYYMMDD",
-     "startTm/endTm": "반차·반반차 시 HHMM",
+     "startTm/endTm": "반차·반반차·시간연차 시 HHMM",
      "appRmkDc": "사유(선택)"
     },
     "hpApplicationExample": {
