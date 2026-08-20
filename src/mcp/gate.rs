@@ -108,10 +108,10 @@ impl Gate {
         let html = build_html(tool, kind, summary, rows);
 
         // GUI 우선 → 실패 시 CLI 폴백.
-        let approved = match self.run_gui_popup(&html).await {
-            Ok(approved) => approved,
+        let decision = match self.run_gui_popup(&html).await {
+            Ok(d) => d,
             Err(gui_err) => match self.run_cli_prompt(&ctx).await {
-                Ok(approved) => approved,
+                Ok(d) => d,
                 // GUI도 없고 tty도 없음 — 명시적 거부.
                 Err(cli_err) => {
                     return Err(ErrorData::internal_error(
@@ -122,13 +122,28 @@ impl Gate {
             },
         };
 
-        if approved {
-            Ok(())
-        } else {
-            Err(ErrorData::internal_error(
-                format!("'{tool}' 실행이 사용자에 의해 승인되지 않았습니다"),
+        match decision {
+            Decision::Approve => Ok(()),
+            Decision::Deny(cause) => Err(ErrorData::internal_error(
+                Self::deny_message(tool, cause, inner.timeout.as_secs()),
                 None,
-            ))
+            )),
+        }
+    }
+
+    /// 에이전트가 읽는 거부 메시지 — 재시도 루프를 막도록 사유를 구분하고
+    /// "자동 재시도하지 말 것 / 사용자에게 승인 요청"을 명시적으로 지시한다.
+    fn deny_message(tool: &str, cause: DenyCause, timeout_secs: u64) -> String {
+        match cause {
+            DenyCause::Clicked => format!(
+                "사용자가 '{tool}' 실행을 거부했습니다. 에이전트: 승인 없이는 이 작업을 재시도하지 말고, 사용자에게 직접 허가를 받으세요."
+            ),
+            DenyCause::Closed => format!(
+                "'{tool}' 승인 창이 닫혀 거부 처리되었습니다. 에이전트: 재시도하기 전에 사용자에게 승인 팝업을 다시 띄워달라고 요청하세요."
+            ),
+            DenyCause::Timeout => format!(
+                "'{tool}' 승인이 {timeout_secs}초 안에 완료되지 않아 거부 처리되었습니다. 에이전트: 자동 재시도하지 말고, 사용자에게 승인 팝업을 확인하라고 안내하세요."
+            ),
         }
     }
 
@@ -139,7 +154,7 @@ impl Gate {
     /// stdin으로 `{"type":"html","html":<base64>}`를 보내고,
     /// stdout의 `{"type":"message","data":{...}}`(사용자 버튼)을 기다린다.
     /// ⚠️ **stdin EOF가 창을 닫는다** — HTML 전송 후 stdin을 닫으면 안 된다.
-    async fn run_gui_popup(&self, html: &str) -> Result<bool, ErrorData> {
+    async fn run_gui_popup(&self, html: &str) -> Result<Decision, ErrorData> {
         let inner = &*self.inner;
 
         let mut child = match Command::new(&inner.binary)
@@ -198,10 +213,10 @@ impl Gate {
                             break d;
                         }
                     }
-                    // stdout EOF = 창이 닫힘(메시지 없음) → 거부.
-                    Ok(None) => break Decision::Deny,
-                    // 파이프 깨짐 → 거부(보수적으로).
-                    Err(_) => break Decision::Deny,
+                    // stdout EOF = 창이 닫힘(메시지 없음) → 거부(닫힘).
+                    Ok(None) => break Decision::Deny(DenyCause::Closed),
+                    // 파이프 깨짐 → 거부(보수적으로, 닫힘으로 취급).
+                    Err(_) => break Decision::Deny(DenyCause::Closed),
                 }
             }
         })
@@ -214,16 +229,17 @@ impl Gate {
         let _ = child.kill().await;
         let _ = child.wait().await;
 
-        match decided {
-            Ok(Decision::Approve) => Ok(true),
-            // 거부·창 닫힘·타임아웃(무응답) → 전부 거부.
-            Ok(Decision::Deny) | Err(_) => Ok(false),
-        }
+        let decision = match decided {
+            Ok(d) => d,
+            // 타임아웃(무응답) → 거부.
+            Err(_) => Decision::Deny(DenyCause::Timeout),
+        };
+        Ok(decision)
     }
 
     /// CLI 폴백 — 내용을 stderr로 출력하고 tty에서 y/N 입력을 받는다.
     /// `Ok(true)`=승인, `Ok(false)`=거부·무응답(타임아웃), `Err`=입력 불가(GUI도 없음).
-    async fn run_cli_prompt(&self, ctx: &PromptCtx<'_>) -> Result<bool, ErrorData> {
+    async fn run_cli_prompt(&self, ctx: &PromptCtx<'_>) -> Result<Decision, ErrorData> {
         let inner = &*self.inner;
 
         eprintln!("{}", prompt_text(inner.binary.display(), ctx));
@@ -257,9 +273,17 @@ impl Gate {
             .await;
 
         match answer {
-            Ok(Ok(n)) if n > 0 => Ok(parse_yes_no(&buf)),
-            // EOF(입력 없음)나 오류·타임아웃 → 거부(보수적으로).
-            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => Ok(false),
+            Ok(Ok(n)) if n > 0 => {
+                if parse_yes_no(&buf) {
+                    Ok(Decision::Approve)
+                } else {
+                    Ok(Decision::Deny(DenyCause::Clicked))
+                }
+            }
+            // EOF(입력 없음) → 창 닫힘 취급.
+            Ok(Ok(_)) => Ok(Decision::Deny(DenyCause::Closed)),
+            // 오류·타임아웃 → 거부(타임아웃 취급).
+            Ok(Err(_)) | Err(_) => Ok(Decision::Deny(DenyCause::Timeout)),
         }
     }
 }
@@ -286,26 +310,48 @@ fn parse_yes_no(line: &str) -> bool {
     matches!(t.as_str(), "y" | "yes" | "o" | "ㅇ" | "예")
 }
 
-/// 내장 네이티브 바이너리 경로 (repo 루트 기준). 아키별로 구분한다.
-/// - macOS: `native/macos/glimpse` (arm64 — CI가 교차 빌드)
-/// - Linux: `native/linux/glimpse-<x86_64|aarch64>` (서버가 빌드된 아키 기준)
-/// - Windows: `native/windows/glimpse.exe`
-fn builtin_native_path() -> PathBuf {
-    if cfg!(target_os = "macos") {
-        PathBuf::from("native/macos/glimpse")
+/// 현재 OS/아키에 해당하는 내장 바이너리의 상대 경로 (`native/<os>/...`).
+fn native_rel_path() -> PathBuf {
+    let rel = if cfg!(target_os = "macos") {
+        "macos/glimpse"
     } else if cfg!(target_os = "windows") {
-        PathBuf::from("native/windows/glimpse.exe")
+        "windows/glimpse.exe"
     } else if cfg!(target_os = "linux") {
         if cfg!(target_arch = "x86_64") {
-            PathBuf::from("native/linux/glimpse-x86_64")
+            "linux/glimpse-x86_64"
         } else if cfg!(target_arch = "aarch64") {
-            PathBuf::from("native/linux/glimpse-aarch64")
+            "linux/glimpse-aarch64"
         } else {
-            PathBuf::from("glimpseui")
+            "linux/glimpse"
         }
     } else {
-        PathBuf::from("glimpseui")
+        return PathBuf::from("glimpseui");
+    };
+    PathBuf::from(rel)
+}
+
+/// 내장 네이티브 바이너리 경로 탐색.
+/// MCP 클라이언트가 임의의 CWD에서 서버를 띄워도 동작해야 하므로 CWD에 의존하지 않는다.
+/// 1. 실행 파일(exe_dir) 옆의 `native/` — 배포 레이아웃: `<bin>/inno-creed` + `<bin>/native/<os>/…`
+/// 2. exe_dir의 상위 `native/` (cargo `target/debug|release` 레이아웃: repo 루트)
+/// 3. 현재 디렉토리의 `native/` (repo 루트에서 실행)
+/// 어디서도 못 찾으면 3번 경로를 기본값으로 돌려준다(에러 메시지가 경로를 보여주도록).
+fn builtin_native_path() -> PathBuf {
+    let rel = native_rel_path();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // 배포: <bin>/native/<os>/… , cargo 레이아웃: <repo>/target/<profile>/… 에서
+            // repo 루트는 2단계 위. 모두 후보에 넣는다.
+            candidates.push(dir.join("native").join(&rel));
+            candidates.push(dir.join("..").join("native").join(&rel));
+            candidates.push(dir.join("../..").join("native").join(&rel));
+        }
     }
+    candidates.push(PathBuf::from("native").join(&rel));
+    candidates.into_iter().find(|c| c.exists()).unwrap_or_else(|| {
+        PathBuf::from("native").join(rel)
+    })
 }
 
 /// 네이티브 프로토콜 `html` 명령: `{"type":"html","html":<base64>}\n`.
@@ -315,10 +361,21 @@ fn html_command(html: &str) -> String {
     format!(r#"{{"type":"html","html":"{b64}"}}"#) + "\n"
 }
 
+/// 거부 사유 — 에이전트가 읽는 메시지를 구분한다.
+#[derive(PartialEq, Debug, Clone, Copy)]
+enum DenyCause {
+    /// 사용자가 거부 버튼을 눌렀다.
+    Clicked,
+    /// 승인 창이 닫혔다(메시지 없이).
+    Closed,
+    /// 대기 시간 내 무응답.
+    Timeout,
+}
+
 #[derive(PartialEq, Debug)]
 enum Decision {
     Approve,
-    Deny,
+    Deny(DenyCause),
 }
 
 /// 팝업에서 온 stdout JSONL 한 줄을 파싱. 네이티브 형식은
@@ -333,7 +390,7 @@ fn parse_decision(line: &str) -> Option<Decision> {
     };
     match action {
         "approve" => Some(Decision::Approve),
-        "deny" => Some(Decision::Deny),
+        "deny" => Some(Decision::Deny(DenyCause::Clicked)),
         _ => None,
     }
 }
@@ -472,7 +529,7 @@ mod tests {
         );
         assert_eq!(
             parse_decision(r#"{"type":"message","data":{"action":"deny"}}"#),
-            Some(Decision::Deny)
+            Some(Decision::Deny(DenyCause::Clicked))
         );
         assert_eq!(
             parse_decision(r#"{"type":"ready","screen":{}}"#),
@@ -606,7 +663,9 @@ mod tests {
             "#!/bin/sh\nread _line\necho '{\"type\":\"message\",\"data\":{\"action\":\"deny\"}}'\n",
         );
         let err = gate_with_binary(p).approve("t", "k", "s", &[]).await.unwrap_err();
-        assert!(err.message.contains("승인되지 않았습니다"), "{}", err.message);
+        // 거부 사유(참여) + 에이전트 재시도 금지 지시가 담긴다.
+        assert!(err.message.contains("거부했습니다"), "{}", err.message);
+        assert!(err.message.contains("재시도하지 말"), "{}", err.message);
     }
 
     #[cfg(unix)]

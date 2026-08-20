@@ -28,9 +28,17 @@ impl Amaranth {
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
-    #[tool(description = "받은메일함 최근 20통을 조회한다. 메일함 번호는 계정마다 달라 이름(INBOX)으로 해석한다. ⚠️ 응답은 서버 원본 봉투 그대로다 — 메일 배열은 `Records`(다른 목록 도구처럼 정규화돼 있지 않음), 각 항목의 `muid`가 read_mail/delete_mail 키, `attach`(bool)가 첨부 유무.")]
+    #[tool(description = "받은메일함 최근 20통을 조회한다. 메일함 번호는 계정마다 달라 이름(INBOX)으로 해석한다. ⚠️ 응답은 서버 원본 봉투 그대로다 — 메일 배열은 `Records`(다른 목록 도구처럼 정규화돼 있지 않음), 각 항목의 `muid`가 read_mail/delete_mail 키, `attach`(bool)가 첨부 유무. ⚠️ 서버가 `--approval on`(기본)이면 이 조회도 **승인 팝업**을 띄운다(에이전트가 수신함을 가져오기 전 확인) — 사용자에게 팝업 안내를 할 것.")]
     async fn list_mail_inbox(&self) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
+        // 승인 게이트웨이 — 데이터 조회도 에이전트가 가져가기 전에 사람 확인을 받는다(기본 ON).
+        self.approve(
+            "list_mail_inbox",
+            "메일 수신함 조회",
+            "에이전트가 메일 수신함(최근 20통)을 가져오려 합니다. 허용할까요?",
+            &[("조회 범위".into(), "받은메일함(INBOX) 최근 20통".into())],
+        )
+        .await?;
         let data = modules::mail::list_inbox(&self.client, 1, 20)
             .await
             .map_err(map_domain_err)?;
