@@ -13,7 +13,7 @@ use rmcp::{
 };
 
 use crate::client::GwClient;
-use crate::mcp::gate::Gate;
+use crate::mcp::gate::GateConfig;
 
 pub mod args;
 pub mod gate;
@@ -61,28 +61,16 @@ fn is_caller_fault(e: &anyhow::Error) -> bool {
 #[derive(Clone)]
 pub struct Amaranth {
     client: Arc<GwClient>,
-    /// 승인 게이트웨이 — 부작용 도구 실행 전 사용자 승인 팝업.
-    gate: Arc<Gate>,
+    /// 승인 게이트 설정 — 도구 핸들러가 `Gate::approve(&self.gate_config, ...)`로 쓴다.
+    pub(crate) gate_config: GateConfig,
 }
 
 impl Amaranth {
-    pub fn new(client: GwClient, gate: Gate) -> Self {
+    pub fn new(client: GwClient, gate_config: GateConfig) -> Self {
         Self {
             client: Arc::new(client),
-            gate: Arc::new(gate),
+            gate_config,
         }
-    }
-
-    /// 게이트 대상 도구 핸들러에서 사용: 실행 전 승인 팝업.
-    /// 비활성 게이트는 즉시 통과시킨다(`Gate::approve` 내부 판단).
-    pub(crate) async fn approve(
-        &self,
-        tool: &str,
-        kind: &str,
-        summary: &str,
-        rows: &[(String, String)],
-    ) -> Result<(), ErrorData> {
-        self.gate.approve(tool, kind, summary, rows).await
     }
 
     /// 도메인별 라우터 12개를 합성한 전체 도구 표면.
@@ -161,6 +149,7 @@ impl ServerHandler for Amaranth {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::gate::Gate;
 
     /// 도구 목록 스냅샷. 의도적으로 도구를 추가/삭제했다면 이 목록을 함께 고치면 된다
     /// (그때 README·docs 도구표도 같이 갱신할 것).

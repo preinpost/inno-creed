@@ -5,7 +5,7 @@
 
 use rmcp::{handler::server::wrapper::Parameters, model::{CallToolResult, ContentBlock}, tool, tool_router, ErrorData};
 
-use crate::mcp::{gate::fmt_ts, map_domain_err, Amaranth};
+use crate::mcp::{gate::{fmt_ts, Gate}, map_domain_err, Amaranth};
 use crate::mcp::args::resource::*;
 use crate::modules;
 
@@ -98,7 +98,8 @@ impl Amaranth {
             }
             r
         };
-        self.approve(
+        Gate::approve(
+            &self.gate_config,
             "reserve_resource",
             "회의실 예약 등록",
             "이 예약이 반영됩니다 — 아래 내용이 맞는지 확인해 주세요.",

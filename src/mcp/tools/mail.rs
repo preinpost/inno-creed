@@ -5,7 +5,7 @@
 
 use rmcp::{handler::server::wrapper::Parameters, model::{CallToolResult, ContentBlock}, tool, tool_router, ErrorData};
 
-use crate::mcp::{map_domain_err, map_domain_err_ctx, Amaranth};
+use crate::mcp::{gate::Gate, map_domain_err, map_domain_err_ctx, Amaranth};
 use crate::client::GwClient;
 use crate::mcp::args::mail::*;
 use crate::modules;
@@ -32,7 +32,8 @@ impl Amaranth {
     async fn list_mail_inbox(&self) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
         // 승인 게이트웨이 — 데이터 조회도 에이전트가 가져가기 전에 사람 확인을 받는다(기본 ON).
-        self.approve(
+        Gate::approve(
+            &self.gate_config,
             "list_mail_inbox",
             "메일 수신함 조회",
             "에이전트가 메일 수신함(최근 20통)을 가져오려 합니다. 허용할까요?",
