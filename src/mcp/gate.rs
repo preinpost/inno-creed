@@ -93,13 +93,13 @@ impl Gate {
     /// - 활성 + 거부·무응답·창 닫힘: `Err` (도구 실행 안 됨)
     /// - 활성 + GUI도 CLI도 불가: `Err` (명시적, 조용히 통과하지 않음)
     pub async fn approve(
-        cfg: &GateConfig,
+        ctx: &GateConfig,
         tool: &str,
         kind: &str,
         summary: &str,
         rows: &[(String, String)],
     ) -> Result<(), ErrorData> {
-        if !cfg.enabled {
+        if !ctx.enabled {
             return Ok(());
         }
         // 승인 직렬화 — 먼저 띄운 승인창/프롬프트가 끝날 때까지 대기.
@@ -108,7 +108,7 @@ impl Gate {
             .await
             .map_err(|_| ErrorData::internal_error("승인 게이트웨이 오류: 세마포어 획득 실패", None))?;
 
-        let ctx = PromptCtx {
+        let prompt_ctx = PromptCtx {
             tool,
             kind,
             summary,
@@ -117,9 +117,9 @@ impl Gate {
         let html = build_html(tool, kind, summary, rows);
 
         // GUI 우선 → 실패 시 CLI 폴백.
-        let decision = match Self::run_gui_popup(cfg, &html).await {
+        let decision = match Self::run_gui_popup(ctx, &html).await {
             Ok(d) => d,
-            Err(gui_err) => match Self::run_cli_prompt(cfg, &ctx).await {
+            Err(gui_err) => match Self::run_cli_prompt(ctx, &prompt_ctx).await {
                 Ok(d) => d,
                 // GUI도 없고 tty도 없음 — 명시적 거부.
                 Err(cli_err) => {
@@ -134,7 +134,7 @@ impl Gate {
         match decision {
             Decision::Approve => Ok(()),
             Decision::Deny(cause) => Err(ErrorData::internal_error(
-                Self::deny_message(tool, cause, cfg.timeout.as_secs()),
+                Self::deny_message(tool, cause, ctx.timeout.as_secs()),
                 None,
             )),
         }
@@ -161,8 +161,8 @@ impl Gate {
     /// stdin으로 `{"type":"html","html":<base64>}`를 보내고,
     /// stdout의 `{"type":"message","data":{...}}`(사용자 버튼)을 기다린다.
     /// ⚠️ **stdin EOF가 창을 닫는다** — HTML 전송 후 stdin을 닫으면 안 된다.
-    async fn run_gui_popup(cfg: &GateConfig, html: &str) -> Result<Decision, ErrorData> {
-        let mut child = match Command::new(&cfg.binary)
+    async fn run_gui_popup(ctx: &GateConfig, html: &str) -> Result<Decision, ErrorData> {
+        let mut child = match Command::new(&ctx.binary)
             .args(["--auto-close", "--floating", "--frameless"])
             .args(["--width", "560", "--height", "620"])
             .arg("--title")
@@ -177,7 +177,7 @@ impl Gate {
                 return Err(ErrorData::internal_error(
                     format!(
                         "GUI 승인 팝업 실행 실패({}): {e} — CLI 폴백으로 전환",
-                        cfg.binary.display()
+                        ctx.binary.display()
                     ),
                     None,
                 ))
@@ -210,7 +210,7 @@ impl Gate {
         stdin.flush().await.ok();
 
         let mut lines = BufReader::new(&mut stdout).lines();
-        let decided = timeout(cfg.timeout, async {
+        let decided = timeout(ctx.timeout, async {
             loop {
                 match lines.next_line().await {
                     Ok(Some(line)) => {
@@ -244,8 +244,8 @@ impl Gate {
 
     /// CLI 폴백 — 내용을 stderr로 출력하고 tty에서 y/N 입력을 받는다.
     /// `Ok(true)`=승인, `Ok(false)`=거부·무응답(타임아웃), `Err`=입력 불가(GUI도 없음).
-    async fn run_cli_prompt(cfg: &GateConfig, ctx: &PromptCtx<'_>) -> Result<Decision, ErrorData> {
-        eprintln!("{}", prompt_text(cfg.binary.display(), ctx));
+    async fn run_cli_prompt(ctx: &GateConfig, prompt_ctx: &PromptCtx<'_>) -> Result<Decision, ErrorData> {
+        eprintln!("{}", prompt_text(ctx.binary.display(), prompt_ctx));
 
         // 터미널 입력: Unix /dev/tty, Windows CONIN$ — 도구를 실행한 MCP 서버의
         // stdin/stdout은 프로토콜이라 터미널에서 직접 읽는다.
@@ -272,7 +272,7 @@ impl Gate {
         let mut reader = BufReader::new(tty);
         // 프롬프트 한 번 출력 후 한 줄 읽기. 타임아웃·EOF(입력 없음)면 거부.
         let mut buf = String::new();
-        let answer = timeout(cfg.timeout, async { reader.read_line(&mut buf).await })
+        let answer = timeout(ctx.timeout, async { reader.read_line(&mut buf).await })
             .await;
 
         match answer {
@@ -700,23 +700,23 @@ mod tests {
 
     #[tokio::test]
     async fn 비활성이면_승인_없이_통과() {
-        let cfg = GateConfig {
+        let ctx = GateConfig {
             enabled: false,
             binary: PathBuf::from("/nonexistent/glimpse"),
             timeout: DEFAULT_TIMEOUT,
         };
-        assert!(Gate::approve(&cfg, "t", "k", "s", &[]).await.is_ok());
+        assert!(Gate::approve(&ctx, "t", "k", "s", &[]).await.is_ok());
     }
 
     #[tokio::test]
     async fn 활성인데_바이너리_없고_tty도_없으면_명시적_에러() {
         // CI 환경(테스트)에는 tty가 없음 → GUI 실패 후 CLI 폴백도 실패 → 에러.
-        let cfg = GateConfig {
+        let ctx = GateConfig {
             enabled: true,
             binary: PathBuf::from("/nonexistent/glimpse"),
             timeout: Duration::from_secs(2),
         };
-        let err = Gate::approve(&cfg, "t", "k", "s", &[]).await.unwrap_err();
+        let err = Gate::approve(&ctx, "t", "k", "s", &[]).await.unwrap_err();
         // tty가 없는 CI에서는 "폴백 실패", 터미널에서 실행하면 입력 대기 후 타임아웃 거부.
         let m = err.message.clone();
         assert!(
@@ -806,8 +806,8 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn 실제_팝업_수동_데모() {
-        let cfg = Gate::new(true, Duration::from_secs(120));
-        let result = Gate::approve(&cfg, 
+        let ctx = Gate::new(true, Duration::from_secs(120));
+        let result = Gate::approve(&ctx, 
                 "reserve_resource",
                 "회의실 예약 등록",
                 "이 예약이 반영됩니다 — 아래 내용이 맞는지 확인해 주세요.",
