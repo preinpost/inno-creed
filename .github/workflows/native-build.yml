@@ -135,10 +135,11 @@ jobs:
             -v /tmp/glimpse:/glimpse -w /glimpse/src/linux \
             -v "$GITHUB_WORKSPACE/native/linux:/out" \
             fedora:41 bash -c '
-              dnf install -y gcc gcc-c++ pkgconf-pkg-config git rustup \
+              dnf install -y gcc gcc-c++ pkgconf-pkg-config git curl ca-certificates \
                 gtk4-devel webkitgtk6.0-devel gtk4-layer-shell-devel \
               && dnf clean all \
-              && rustup toolchain install stable --profile minimal \
+              && curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs |
+                   sh -s -- -y --profile minimal \
               && export PATH="$HOME/.cargo/bin:$PATH" \
               && git config --global url."https://github.com/".insteadOf "git@github.com:" \
               && export CARGO_NET_GIT_FETCH_WITH_CLI=true \
