@@ -550,7 +550,6 @@ fn build_html(tool: &str, kind: &str, summary: &str, rows: &[(String, String)]) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::Amaranth;
 
     #[test]
     fn 프롬프트_상수가_빈_문구면_안_된다() {
@@ -705,12 +704,15 @@ mod tests {
 
     #[cfg(unix)]
     fn script(content: &str) -> PathBuf {
+        // 호출마다 **유일한** 임시 디렉터리(원자 카운터)를 쓴다.
+        // (콘텐츠 길이로 키를 만들면 approve/deny처럼 같은 길이의 스크립트가
+        //  서로 같은 경로를 공유해, 병렬 테스트에서 파일이 덮여 교차 오염된다.)
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "inno-creed-gate-test-{}-{}",
-            std::process::id(),
-            content.len()
-        ));
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("inno-creed-gate-test-{pid}-{n}"));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("fake-glimpse.sh");
         std::fs::write(&p, content).unwrap();
@@ -757,6 +759,28 @@ mod tests {
         // 메시지 없이 종료 → stdout EOF → 거부.
         let p = script("#!/bin/sh\nread _line\nexit 0\n");
         assert!(Gate::approve(&gate_with_binary(p), "t", "k", "s", &[]).await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn 무응답이면_타임아웃_거부된다() {
+        // 바이너리가 승인을 뒤늦게(3초 후) 내보내지만, 게이트 대기 시간(0.5초)이
+        // 먼저 끝나 → Timeout 거부. 사용자가 팝업을 안 본 상황과 동일하다.
+        let p = script(
+            "#!/bin/sh\nsleep 3\necho '{\"type\":\"message\",\"data\":{\"action\":\"approve\"}}'\n",
+        );
+        let ctx = GateContext {
+            enabled: true,
+            binary: p,
+            timeout: Duration::from_millis(500),
+        };
+        let err = Gate::approve(&ctx, "t", "k", "s", &[]).await.unwrap_err();
+        assert!(err.message.contains("완료되지 않아"), "{}", err.message);
+        assert!(
+            err.message.contains(Prompt::AgentNoRetry.text()),
+            "재시도 금지 지시 누락: {}",
+            err.message
+        );
     }
 
     /// 수동 데모(무시됨): 실제 내장 팝업을 띄우고 사용자 승인을 받는다.
