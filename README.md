@@ -94,6 +94,7 @@
 | `attendance_clock_in` / `attendance_clock_out` | 출근·퇴근 기록 — ⚠️ 실제 근태 punch, 기존 기록은 덮어쓰지 않음 |
 | `find_person` | **사람 찾기** — 이름·ID·이메일 → `empSeq`/부서/직책/연락처 |
 | `org_chart` | 부서 트리 / 부서별 사원·직책 |
+| `person_group` · `save_person_group` · `delete_person_group` | 사람 그룹 — 아마란스에 없는 그룹메일을 대신한다. 메일 수신자·참조, 일정 참여자에 재사용 |
 | `whoami` | 로그인한 본인 정보(`empSeq`·부서·이메일 + 근태용 `empCd` + 부서명·직책·직급) |
 
 > 결재선 구성·회의 참석자·메일 수신자는 전부 `empSeq`를 요구합니다. `find_person`이 그 진입점이고, 본인 값은 `whoami`로 얻습니다.
@@ -209,7 +210,7 @@ inno-creed (Rust MCP 서버, 헤드리스)
  ├─ client   세션 lazy 취득(10분 TTL 캐시) · 헤더 주입 · POST · 응답 파싱
  ├─ modules  자원 · 일정 · 메일 · 게시판 · 전자결재 · 근태 · 조직
  │           API 래퍼 + 파생 조회 + 소유권 가드 · read-back 검증
- └─ mcp      rmcp stdio 서버 — tools/(도구 49개, 도메인별) · args/(인자 스키마) · 에러 변환
+ └─ mcp      rmcp stdio 서버 — tools/(도구 52개, 도메인별) · args/(인자 스키마) · 에러 변환
 ```
 
 크레덴셜만 브라우저에서 빌려오고, 실행은 전부 순수 HTTP입니다. 서명·세션 규격은 [architecture.md](docs/architecture.md)에 정리돼 있습니다.

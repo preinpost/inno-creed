@@ -7,8 +7,10 @@ use crate::client::GwClient;
 use crate::error::InvalidInput;
 use crate::modules::board::{collapse_ws, html_to_text, json_str};
 
-pub const INBOX: i64 = 26986;
-pub const SENT: i64 = 26989;
+/// 메일함 **이름**. seq는 계정마다 다르므로 상수로 박지 않고 이름으로 해석한다 —
+/// 자세한 이유는 `mbox_seq` 참조.
+pub const INBOX: &str = "INBOX";
+pub const DRAFTS: &str = "DRAFTS";
 
 /// 메일함(폴더) 목록 — `mail000A01`
 pub async fn list_mailboxes(c: &GwClient) -> Result<Value> {
@@ -39,10 +41,6 @@ pub async fn list_mails(c: &GwClient, mbox_seq: i64, page: i64, page_size: i64) 
     .await
 }
 
-/// 임시보관함 메일함 이름. `INBOX`/`SENT`처럼 seq를 상수로 박지 않는다 —
-/// **메일함 seq는 계정마다 다르므로** 이름으로 해석해야 다른 계정에서도 맞는 함을 본다.
-pub const DRAFTS: &str = "DRAFTS";
-
 /// `list_mailboxes` 응답에서 이름이 `want`인 메일함의 `mboxSeq`를 찾는다.
 ///
 /// 응답이 중첩 구조로 올 수 있어(계정·서버 버전차) 키 존재로 노드를 판별하며 트리를 훑는다.
@@ -67,11 +65,22 @@ fn find_mbox_seq(node: &Value, want: &str) -> Option<i64> {
 }
 
 /// 메일함 이름 → `mboxSeq`. 못 찾으면 어느 이름을 찾았는지 밝힌 에러.
+///
+/// ⚠️ **`mboxSeq`를 상수로 박지 말 것.** 계정마다 값이 다르다. 예전에 `INBOX = 26986`
+/// (개발자 계정의 값)을 박아둔 탓에 **다른 계정 전원이 받은메일함 조회에 실패**했다
+/// (`resultCode=-1 msg=not Box : <메일주소> -> boxSeq(26986)`, 2026-08-20 제보로 발견).
+/// 단일 계정 테스트로는 구조적으로 못 잡는 종류라, 새 메일함을 다룰 때도 반드시 이 함수를 거친다.
 pub async fn mbox_seq(c: &GwClient, name: &str) -> Result<i64> {
     let boxes = list_mailboxes(c).await?;
     find_mbox_seq(&boxes, name).ok_or_else(|| {
         anyhow!("메일함 '{name}' 을 찾지 못했다 — list_mailboxes 응답에 그 이름의 mboxSeq가 없다")
     })
+}
+
+/// 받은메일함(INBOX) 목록 — 이름으로 seq를 해석한 뒤 `list_mails`.
+pub async fn list_inbox(c: &GwClient, page: i64, page_size: i64) -> Result<Value> {
+    let seq = mbox_seq(c, INBOX).await?;
+    list_mails(c, seq, page, page_size).await
 }
 
 /// 임시보관함(DRAFTS) 목록 — 이름으로 seq를 해석한 뒤 `list_mails`.
@@ -90,10 +99,15 @@ fn has_muid(list: &Value, muid: &str) -> bool {
 
 /// 작성폼 초기화 — `mail014A01`. 발송(A04)·임시저장(A14)에 필요한 `sessionKey`/`fileDir`을
 /// 확보하기 위해 선행 호출. 응답에는 재저장 때 되돌려줘야 하는 `mailkey`도 들어 있다.
+/// ⚠️ `mailKind`는 **`"plain"`**(= 브라우저의 `메일쓰기`)이다.
+/// 예전에는 `"me"`를 보냈는데, 실측 결과 `"me"`는 **`내게쓰기`** 모드였다 — 받는사람 칸에 본인을
+/// 미리 채워주는 화면이다(`analyze/15` §부수 관측). 실제 배달은 폼의 `to`가 정하므로 `"me"`로도
+/// 동작해 왔지만, 참조(cc/bcc)를 싣기 시작하면 서버가 모드별로 폼을 다르게 처리할 여지가 있어
+/// 브라우저와 같은 경로로 맞췄다.
 pub async fn compose_init(c: &GwClient) -> Result<Value> {
     c.call(
         "/mail/mail014A01",
-        &json!({ "mainApiCode": "mail014A01", "mailKind": "me" }),
+        &json!({ "mainApiCode": "mail014A01", "mailKind": "plain" }),
     )
     .await
 }
@@ -114,7 +128,13 @@ struct ComposeForm {
     neobiz_addr: String,
     neobiz_inted_addr: String,
     neobiz_org: String,
+    /// 폼의 `to`. **여러 명이면 콤마로 이어 붙인 하나의 문자열**이다(실측 `analyze/15`).
+    /// 표시형(`이름 <주소>`)과 순수 주소를 섞어도 된다.
     to: String,
+    /// 폼의 `cc`(참조). 형식은 `to`와 같다. 비우면 참조 없음.
+    cc: String,
+    /// 폼의 `bcc`(숨은참조). 형식은 `to`와 같다. 비우면 숨은참조 없음.
+    bcc: String,
     subject: String,
     html: String,
     /// 폼의 `fwFile`. 신규 발송·임시저장은 항상 빈 값이고, **초안 발송이 첨부를 승계할 때만**
@@ -122,7 +142,7 @@ struct ComposeForm {
     fw_file: String,
     /// 폼의 `muid`. 신규 발송·임시저장은 `"0"`, **초안 발송만** 그 초안의 muid를 싣는다.
     muid: String,
-    /// 폼의 `mail_kind`. 신규는 `"me"`, 초안 발송은 `"draft"`.
+    /// 폼의 `mail_kind`. 신규는 `"plain"`(브라우저 `메일쓰기`와 동일), 초안 발송은 `"draft"`.
     mail_kind: String,
     /// 폼의 `mimeHeader`. 신규는 빈 값, 초안 발송은 그 초안의 mime 헤더 JSON.
     mime_header: String,
@@ -167,14 +187,27 @@ impl ComposeForm {
             neobiz_inted_addr: gm("groupMailIntedAddr"),
             neobiz_org: gm("groupMailOrg"),
             to: to.to_string(),
+            // 참조는 기본이 "없음"이다 — 실을 때만 `with_carbon_copy`로 덮어쓴다.
+            cc: String::new(),
+            bcc: String::new(),
             subject: subject.to_string(),
             html: html.to_string(),
             // 아래 4개의 기본값 = 신규 발송/임시저장의 실측값. 초안 발송만 덮어쓴다.
             fw_file: String::new(),
             muid: "0".to_string(),
-            mail_kind: "me".to_string(),
+            mail_kind: "plain".to_string(),
             mime_header: String::new(),
         }
+    }
+
+    /// 참조(`cc`)·숨은참조(`bcc`)를 싣는다. 여러 명이면 **콤마로 이어 붙인 하나의 문자열**이다.
+    ///
+    /// 값을 해석하지 않고 그대로 싣는다 — 브라우저도 칩 목록을 콤마로 이어 붙일 뿐이다(실측).
+    /// 그래서 표시형(`이름 <주소>`)과 순수 주소가 섞여 있어도 안전하다.
+    fn with_carbon_copy(mut self, cc: &str, bcc: &str) -> Self {
+        self.cc = cc.trim().to_string();
+        self.bcc = bcc.trim().to_string();
+        self
     }
 
     /// 초안 발송 좌표를 싣는다 — 브라우저가 임시보관 메일을 보낼 때 신규 발송과 달라지는 값이다.
@@ -204,8 +237,8 @@ impl ComposeForm {
             ("from", self.email.clone()),
             ("fromName", c.emp_name()),
             ("to", self.to.clone()),
-            ("cc", String::new()),
-            ("bcc", String::new()),
+            ("cc", self.cc.clone()),
+            ("bcc", self.bcc.clone()),
             ("htmlContents", self.html.clone()),
             ("email", self.email.clone()),
             ("fileDir", self.filedir.clone()),
@@ -260,10 +293,13 @@ async fn attachment_fields(c: &GwClient, attachments: &[String]) -> Result<(Stri
 /// 메일 발송 — `mail014A01`(작성폼 초기화) → `mail014A04`(multipart) 2단계.
 /// A01 응답에서 sessionKey/filedir/email/externalSendLimit/bigFileDay/groupMailOption을 동적 취득.
 /// ⚠️ 발송은 헤더 서명 + **body 내 authToken**(형식 `loginId|groupSeq|empSeq|secret`)을 함께 요구.
-/// `to`는 표시형("이름 <email>") 또는 이메일. 실측 FormData 전 필드를 그대로 재현.
+/// `to`/`cc`/`bcc`는 표시형("이름 <email>") 또는 이메일이고, **여러 명이면 콤마로 잇는다**
+/// (실측 `analyze/15`). 실측 FormData 전 필드를 그대로 재현.
 pub async fn send_mail(
     c: &GwClient,
     to: &str,
+    cc: &str,
+    bcc: &str,
     subject: &str,
     html: &str,
     attachments: &[String],
@@ -271,7 +307,8 @@ pub async fn send_mail(
     let init = compose_init(c).await?;
     // 첨부: 로컬 파일을 mail014A06(multipart `file[]`)로 업로드 → uidAuthList 조립.
     let (uid_auth_list, big_file_cnt) = attachment_fields(c, attachments).await?;
-    let cf = ComposeForm::new(&init, to, subject, html, uid_auth_list, big_file_cnt);
+    let cf = ComposeForm::new(&init, to, subject, html, uid_auth_list, big_file_cnt)
+        .with_carbon_copy(cc, bcc);
 
     // 폼을 "만드는 방법"으로 넘긴다 — 401 재취득 재시도 때 클라이언트가 재조립해야 하기 때문
     // (`multipart::Form`은 Clone이 아니고 전송이 소비한다). 호출당 최대 2회 평가된다.
@@ -292,7 +329,12 @@ pub async fn send_mail(
 /// 뒤집힌 것처럼 보이지만 서버가 그 값을 기대하므로 그대로 재현한다.
 const DRAFT_FIELDS: &[(&str, &str)] = &[
     ("autoMUID", ""),
-    ("beforeMailType", "me"), // compose_init이 mailKind:"me"로 연 폼이다
+    // compose_init이 연 폼의 종류(그래서 `mailKind`와 같이 움직인다).
+    // ⚠️ 브라우저는 여기에 **문자열 `"undefined"`**를 싣는다(실측 `analyze/15` — 프론트의
+    // 미초기화 변수가 그대로 새어나온 값이다). 남의 버그를 재현하는 대신 실제로 연 모드를 적는다.
+    // 예전 값 `"me"`로 임시저장이 성공해 온 것은 확인돼 있으나, 서버가 이 필드를 보기는 하는지
+    // 자체가 미확인이다 — `"plain"`은 회귀 점검의 save_mail_draft로 검증한다.
+    ("beforeMailType", "plain"),
     ("beforeMUID", ""),
     ("mailKey", ""),
     ("isFirst", "0"),
@@ -313,6 +355,8 @@ const DRAFT_READBACK_PAGE: i64 = 20;
 pub async fn save_mail_draft(
     c: &GwClient,
     to: &str,
+    cc: &str,
+    bcc: &str,
     subject: &str,
     html: &str,
     attachments: &[String],
@@ -325,7 +369,8 @@ pub async fn save_mail_draft(
     } else {
         subject
     };
-    let cf = ComposeForm::new(&init, to, subject, html, uid_auth_list, big_file_cnt);
+    let cf = ComposeForm::new(&init, to, subject, html, uid_auth_list, big_file_cnt)
+        .with_carbon_copy(cc, bcc);
     let form = || {
         DRAFT_FIELDS
             .iter()
@@ -433,8 +478,8 @@ async fn delete_draft_original(c: &GwClient, mail_key: &str, draft_muid: &str) -
 /// 3. **첨부는 승계하되 미실측 경로는 거부** — `mail014A08`로 발송용 `fileId`를 받아 승계한다.
 ///    파일명에 콤마가 있거나 동명 파일이 둘 이상이거나 대용량 첨부(`bigFile`)면 중단한다
 ///    (자세한 이유는 `inherit_draft_attachments`).
-/// 4. **참조(cc/bcc) 걸린 초안 거부** — 폼이 `cc`/`bcc`를 빈 값으로 보내 참조가 조용히 빠진다
-///    (`refuse_if_carbon_copy`).
+/// 4. **참조(cc/bcc)는 승계한다** — 초안에 저장된 값을 되읽어 그대로 싣는다(`draft_carbon_copy`).
+///    읽어내지 못하면 "참조 없음"이 아니라 중단이다.
 /// 5. **발송 성공 ≠ 정리 성공** — 원본 삭제가 실패해도 발송은 성공으로 보고하되
 ///    `draft_deleted:false`와 안내를 함께 실어 중복 발송을 사람이 막을 수 있게 한다.
 ///
@@ -478,6 +523,7 @@ pub async fn send_mail_from_draft(
         uid_auth_list,
         big_file_cnt,
     )
+    .with_carbon_copy(&plan.cc, &plan.bcc)
     .with_draft(draft_muid, plan.mime_header.clone())
     .with_fw_file(fw_file);
     let v = c.call_multipart("/mail/mail014A04", || cf.build(c)).await?;
@@ -500,6 +546,8 @@ pub async fn send_mail_from_draft(
         "sent": true,
         "draft_muid": draft_muid,
         "to": plan.to,
+        "cc": plan.cc,
+        "bcc": plan.bcc,
         "subject": plan.subject,
         "attachments": plan.files.len(),
         "draft_deleted": draft_deleted,
@@ -532,6 +580,10 @@ fn ensure_draft_exists(drafts: &Value, draft_muid: &str) -> Result<DraftExists> 
 /// 초안 발송에 실을 값. `plan_draft_send`가 낸다.
 struct DraftSendPlan {
     to: String,
+    /// 초안에서 승계한 참조. 없으면 빈 문자열.
+    cc: String,
+    /// 초안에서 승계한 숨은참조. 없으면 빈 문자열.
+    bcc: String,
     subject: String,
     html: String,
     mime_header: String,
@@ -548,7 +600,7 @@ struct DraftSendPlan {
 /// 막는 것(전부 "조용히 잘못 나가는" 경우다):
 /// - **첨부 목록을 못 읽음** → 첨부 없음이 아니라 판정 불가
 /// - **본문·제목이 빔** → 내용이 텅 빈 메일 발송
-/// - **참조(cc/bcc)가 걸림** → 참조 수신자 누락(`refuse_if_carbon_copy`)
+/// - **참조(cc/bcc)를 읽지 못함** → 참조 수신자 누락(`draft_carbon_copy`)
 /// - **수신자가 없거나 주소로 보이지 않음** → 엉뚱한 곳으로 나가거나 실패
 fn plan_draft_send(
     _found: DraftExists,
@@ -604,9 +656,8 @@ fn plan_draft_send(
         header.to_string()
     };
 
-    // 참조(cc/bcc)가 걸린 초안은 거부한다 — 폼은 `cc`/`bcc`를 **항상 빈 값으로** 보내므로
-    // (`ComposeForm::fields`) 그대로 발송하면 참조 수신자가 조용히 빠진다.
-    refuse_if_carbon_copy(init, draft_muid)?;
+    // 참조(cc/bcc)는 초안에서 승계한다. 읽어내지 못하면 "참조 없음"이 아니라 중단이다.
+    let (cc, bcc) = draft_carbon_copy(init, draft_muid)?;
 
     // 수신자: 인자 우선, 없으면 초안에 저장된 값.
     let to = if to_override.trim().is_empty() {
@@ -623,6 +674,8 @@ fn plan_draft_send(
 
     Ok(DraftSendPlan {
         to,
+        cc,
+        bcc,
         subject,
         html,
         mime_header,
@@ -680,45 +733,65 @@ fn draft_recipient(init: &Value, draft_muid: &str) -> Result<String> {
     Ok(decoded)
 }
 
-/// 초안에 **참조(cc/bcc)가 걸려 있으면 발송을 거부**한다.
+/// 초안에 걸린 **참조(cc)·숨은참조(bcc)를 발송 폼에 실을 형태로 꺼낸다.** 없으면 빈 문자열.
 ///
-/// 발송 폼은 `cc`/`bcc`를 항상 빈 값으로 보낸다 — 초안에 참조가 있어도 읽지 않는다. 그대로
-/// 보내면 참조 수신자가 조용히 빠진 채 나가고 회수할 수 없다(빈 본문·첨부 누락과 같은 부류다).
+/// 예전에는 참조가 걸린 초안을 **거부**했다. 폼이 `cc`/`bcc`를 늘 빈 값으로 보내던 시절에는
+/// 그대로 발송하면 참조 수신자가 조용히 빠졌기 때문이다. 실측(`analyze/15`)으로 **초안이 참조를
+/// 저장하고 되읽기 응답이 그것을 돌려준다**는 것이 확인돼 승계로 바꿨다.
 ///
-/// 참조가 실려 올 수 있는 자리는 둘이다 — `mailInfo.mime.header`(원본 헤더)와
-/// `mailInfo.decodeMime`(서버가 디코드해준 값). **하나도 읽을 수 없으면 "참조 없음"이 아니라
-/// 판정 불가**로 보고 중단한다(실측: 참조 없는 초안도 `mailInfo.mime.header.cc`를 빈 문자열로
-/// 들고 오므로 정상 초안은 늘 판정 가능하다).
-/// 최상위 `paramCc`/`paramBcc`는 **응답에 존재하지 않아**(양쪽 초안 실측) 보지 않는다.
+/// **정본은 `mailInfo.decodeMime`**다 — `mime.header` 쪽은 RFC 2822 줄접기(`,\r\n `)가 살아 있고
+/// 표시명이 `=?UTF-8?B?...?=`로 MIME 인코딩돼 있어 그대로 실으면 깨진다(`draft_recipient`와 같은 이유).
+/// 값에는 HTML 엔티티(`&lt;`)가 남아 있어 `unescape_entities`를 태운다.
 ///
-/// ⚠️ **`bcc`는 관측된 응답 어디에도 키가 없었다** — 원래 메시지 헤더에 남지 않는 필드다.
-/// 실려 오기만 하면 cc와 같은 기준으로 막지만, "bcc가 있는데 응답에 실리지 않는" 경우는
-/// 이 검사로 잡을 수 없다(미실측 잔여 위험 — docs에 남겨두었다).
-fn refuse_if_carbon_copy(init: &Value, draft_muid: &str) -> Result<()> {
-    let mut readable = false;
-    for (kind, paths) in [
-        ("cc", ["/mailInfo/mime/header/cc", "/mailInfo/decodeMime/cc"]),
-        ("bcc", ["/mailInfo/mime/header/bcc", "/mailInfo/decodeMime/bcc"]),
-    ] {
-        for p in paths {
-            let Some(v) = init.pointer(p) else { continue };
-            readable = true;
-            if !is_blank(v) {
-                return Err(InvalidInput(format!(
-                    "참조({kind})가 걸린 초안은 아직 발송할 수 없다(참조 승계 미구현 — 그대로 보내면 \
-                     참조 수신자가 조용히 빠진다) — 아마란스 웹에서 그 초안을 열어 발송할 것"
-                ))
-                .into());
-            }
-        }
-    }
-    if !readable {
+/// **판정 불가는 중단이다** — 다만 그 판정의 기준은 `cc` 하나다.
+///
+/// ⚠️ **`cc`와 `bcc`의 "키 없음"은 뜻이 다르다**(둘 다 실측):
+/// - `cc`는 **참조가 없어도 `mime.header.cc`가 빈 문자열로 실려 온다.** 그래서 이 키가 아예
+///   없다는 것은 "참조가 없다"가 아니라 **응답 모양이 예상과 다르다**는 뜻이라 중단한다.
+/// - `bcc`는 **숨은참조가 없으면 키 자체가 오지 않는다.** 반대로 숨은참조가 걸린 초안은
+///   `header`·`decodeMime` **양쪽에 실려 온다**(`analyze/15` §③). 그래서 `cc`로 응답 모양이
+///   이미 확인된 뒤라면 `bcc` 키의 부재는 "숨은참조 없음"으로 읽어도 된다.
+///
+/// 이 비대칭을 `cc`에 맞춰 일반화하면(둘 다 키를 요구하면) **참조 없는 정상 초안이 전부 거부되고**,
+/// `bcc`에 맞춰 일반화하면(둘 다 부재를 허용하면) 응답 모양이 바뀌었을 때 참조를 조용히 빠뜨린다.
+///
+/// 최상위 `paramCc`/`paramBcc`는 **응답에 존재하지 않아**(실측) 보지 않는다.
+///
+/// ⚠️ **구분자가 왕복하며 달라진다** — 보낼 때는 `,`(공백 없음), 되읽으면 `, `(공백 포함, 실측).
+/// 서버가 양쪽을 받으므로 되읽은 값을 그대로 되싣는다. 값을 쪼개거나 다시 잇지 않는다.
+fn draft_carbon_copy(init: &Value, draft_muid: &str) -> Result<(String, String)> {
+    // ① 응답 모양 확인 — `cc` 자리는 참조가 없어도 존재해야 한다.
+    if init.pointer("/mailInfo/decodeMime/cc").is_none()
+        && init.pointer("/mailInfo/mime/header/cc").is_none()
+    {
         bail!(
-            "초안(draft_muid={draft_muid})의 참조(cc/bcc)를 응답 어디에서도 읽지 못해 참조 유무를 \
+            "초안(draft_muid={draft_muid})의 참조(cc)를 응답 어디에서도 읽지 못해 참조 유무를 \
              판정할 수 없다 — 참조를 빠뜨린 채 보낼 위험이 있어 발송하지 않는다"
         );
     }
-    Ok(())
+
+    // ② 값 회수. 정본은 decodeMime 이고, 거기 없는데 header 에만 값이 있으면 승계 경로가
+    //    없는 형태(미실측)이므로 조용히 빠뜨리는 대신 중단한다.
+    let pick = |kind: &str, decoded_path: &str, header_path: &str| -> Result<String> {
+        let decoded = init.pointer(decoded_path);
+        if let Some(v) = decoded
+            && !is_blank(v)
+        {
+            return Ok(unescape_entities(&json_str(Some(v))));
+        }
+        if init.pointer(header_path).is_some_and(|v| !is_blank(v)) {
+            bail!(
+                "초안(draft_muid={draft_muid})의 참조({kind})가 원본 헤더에는 있는데 \
+                 디코드된 자리(mailInfo.decodeMime.{kind})에는 없다 — 그대로 실으면 주소가 \
+                 깨질 수 있어 발송하지 않는다. 아마란스 웹에서 그 초안을 열어 발송할 것"
+            );
+        }
+        Ok(String::new())
+    };
+
+    let cc = pick("cc", "/mailInfo/decodeMime/cc", "/mailInfo/mime/header/cc")?;
+    let bcc = pick("bcc", "/mailInfo/decodeMime/bcc", "/mailInfo/mime/header/bcc")?;
+    Ok((cc, bcc))
 }
 
 /// JSON 어딘가에 그 키가 **비어 있지 않은 값**으로 들어 있는지(정확한 키 이름 일치).
@@ -1064,6 +1137,11 @@ pub async fn read_mail(c: &GwClient, muid: &str) -> Result<Value> {
         "subject": html_to_text(&json_str(dm.get("subject"))),
         "from": html_to_text(&json_str(dm.get("from"))),
         "to": html_to_text(&json_str(dm.get("to"))),
+        // 참조. 받은 메일에는 `cc`만 실려 온다 — `bcc`는 원래 수신자에게 보이지 않는 필드라
+        // 대개 빈 문자열이다(보낸 사본에는 실릴 수 있다). 키는 **항상 낸다** — 없는 것과
+        // 안 보이는 것을 호출자가 구분하려면 자리가 늘 있어야 한다.
+        "cc": html_to_text(&json_str(dm.get("cc"))),
+        "bcc": html_to_text(&json_str(dm.get("bcc"))),
         "date": json_str(dm.get("date")),
         "body": body,
         "attachments": attachments,
@@ -1227,7 +1305,9 @@ mod tests {
         assert_eq!(f["neobizOrg"], "조직");
         assert_eq!(f["uidAuthList"], "[]");
         assert_eq!(f["bigFileCnt"], "2");
-        assert_eq!(f["mail_kind"], "me");
+        // ⚠️ `"me"`가 아니다 — `"me"`는 **내게쓰기** 모드다(실측 `analyze/15` §부수 관측).
+        // 신규 발송은 브라우저의 `메일쓰기`와 같은 `"plain"`으로 연다.
+        assert_eq!(f["mail_kind"], "plain");
         assert_eq!(f["muid"], "0"); // 0 = 신규(답장/전달이 아님)
         assert_eq!(f["immediately"], "false");
         assert_eq!(f["expirationDate"], "Invalid date");
@@ -1262,6 +1342,19 @@ mod tests {
         assert_eq!(find_mbox_seq(&boxes, "SENT"), Some(26989)); // mboxSeq가 문자열이어도 흡수
         assert_eq!(find_mbox_seq(&boxes, "drafts"), Some(26992)); // 대소문자 무시
         assert_eq!(find_mbox_seq(&boxes, "ARCHIVE"), None); // 없는 함은 None(엉뚱한 함 금지)
+    }
+
+    /// 회귀: INBOX seq를 개발자 계정 값(26986)으로 박아둔 탓에 다른 계정 전원이
+    /// 받은메일함 조회에 실패했다(`not Box : … -> boxSeq(26986)`). 응답에 실린 값을
+    /// 그대로 따라가는지 — **다른 계정의 seq**로 못박는다.
+    #[test]
+    fn 받은메일함_seq는_계정마다_다른_응답값을_따른다() {
+        let 다른_계정 = json!({
+            "mailboxList": [
+                { "fullname": "INBOX", "name": "INBOX", "mboxSeq": 25750, "exists": "12" }
+            ]
+        });
+        assert_eq!(find_mbox_seq(&다른_계정, "INBOX"), Some(25750));
     }
 
     /// 이름이 `name`에만 있고 `fullname`이 비어도 찾아야 한다(함마다 어느 키에 오는지 다르다).
@@ -1507,53 +1600,55 @@ mod tests {
         json!({ "mailInfo": { "mime": { "header": { "to": "", "cc": "", "subject": "=?UTF-8?B?...?=" } } } })
     }
 
-    /// 참조가 걸린 초안은 **보내지 않는다** — 폼이 `cc`/`bcc`를 빈 값으로 보내 조용히 빠지기 때문이다.
+    /// 초안의 참조는 **승계한다**(실측 `analyze/15`: 초안이 cc/bcc를 저장하고 되읽기가 돌려준다).
     #[test]
-    fn 참조가_걸린_초안은_발송을_거부한다() {
-        // 참조 없는 초안은 통과한다(cc 키가 빈 값으로 읽힌다).
-        assert!(refuse_if_carbon_copy(&init_without_cc(), "1").is_ok());
+    fn 초안의_참조를_승계한다() {
+        // 참조 없는 초안 → 빈 값 두 개. 거부가 아니다.
+        assert_eq!(draft_carbon_copy(&init_without_cc(), "1").unwrap(), (String::new(), String::new()));
 
-        // cc가 실려 올 수 있는 두 자리 어디에서든 값이 있으면 거부.
-        for init in [
-            json!({ "mailInfo": { "mime": { "header": { "cc": "누군가 <x@y.z>" } } } }),
-            json!({ "mailInfo": { "mime": { "header": { "cc": "" } },
-                                  "decodeMime": { "cc": "누군가 &lt;x@y.z&gt;" } } }),
-        ] {
-            assert!(refuse_if_carbon_copy(&init, "1").is_err(), "cc가 있으면 막아야 한다: {init}");
-        }
+        // 정본은 decodeMime — 엔티티를 풀어 싣는다. 되읽기 구분자(`, `)를 건드리지 않는다.
+        let init = json!({ "mailInfo": {
+            "mime": { "header": { "cc": "a@x.com,\r\n b@x.com", "bcc": "c@x.com" } },
+            "decodeMime": { "cc": "홍길동 &lt;a@x.com&gt;, b@x.com", "bcc": "c@x.com" } } });
+        assert_eq!(
+            draft_carbon_copy(&init, "1").unwrap(),
+            ("홍길동 <a@x.com>, b@x.com".to_string(), "c@x.com".to_string()),
+            "MIME 인코딩·줄접기가 남은 header 쪽을 쓰면 안 된다"
+        );
 
-        // bcc도 같은 기준이다 — 실려 오기만 하면 막는다.
-        for init in [
-            json!({ "mailInfo": { "mime": { "header": { "cc": "", "bcc": "x@y.z" } } } }),
-            json!({ "mailInfo": { "mime": { "header": { "cc": "" } },
-                                  "decodeMime": { "bcc": "x@y.z" } } }),
-        ] {
-            assert!(refuse_if_carbon_copy(&init, "1").is_err(), "bcc가 있으면 막아야 한다: {init}");
-        }
-
-        // ⚠️ 최상위 `decodeMime`·`paramCc`는 **응답에 없는 자리**다. 거기 값이 있어도 참조가 있다는
-        // 뜻이 아니므로 정본(`mailInfo.mime.header.cc`)이 비어 있으면 그대로 통과해야 한다.
-        assert!(refuse_if_carbon_copy(
-            &json!({ "mailInfo": { "mime": { "header": { "cc": "" } } },
-                     "decodeMime": { "cc": "누군가" }, "paramCc": "x@y.z" }), "1").is_ok());
-
-        // 참조를 **어디에서도 읽지 못하면** "참조 없음"이 아니라 판정 불가 → 중단.
-        assert!(refuse_if_carbon_copy(&json!({}), "1").is_err());
+        // ⚠️ 비대칭을 못박는다: `cc` 자리가 아예 없으면 판정 불가 → 중단.
+        assert!(draft_carbon_copy(&json!({}), "1").is_err());
         assert!(
-            refuse_if_carbon_copy(&json!({ "mailInfo": { "mime": { "header": { "to": "" } } } }), "1")
+            draft_carbon_copy(&json!({ "mailInfo": { "mime": { "header": { "to": "" } } } }), "1")
                 .is_err()
+        );
+        // 그러나 `bcc` 키의 부재는 "숨은참조 없음"이다 — 참조 없는 정상 초안의 실측 모양이
+        // 그렇다(`init_without_cc`에 bcc 키가 없다). 여기를 cc와 같은 기준으로 만들면
+        // **참조 없는 초안이 전부 발송 거부된다.**
+        assert!(init_without_cc().pointer("/mailInfo/mime/header/bcc").is_none());
+        assert_eq!(draft_carbon_copy(&init_without_cc(), "1").unwrap().1, "");
+
+        // header 에는 참조가 있는데 디코드된 자리에 없으면 승계 경로가 없다 → 중단(조용히 빠뜨리지 않는다).
+        assert!(
+            draft_carbon_copy(&json!({ "mailInfo": { "mime": { "header": { "cc": "x@y.z" } },
+                                                     "decodeMime": { "cc": "" } } }), "1").is_err()
         );
     }
 
-    /// 발송 폼은 `cc`/`bcc`를 **항상 빈 값으로** 보낸다 — 위 거부가 필요한 이유 그 자체라
-    /// 여기서 함께 못박는다(누가 폼에 cc를 채우면 그 거부는 과잉 차단이 된다).
+    /// 폼에 실린 참조가 그대로 나가는지 — 값을 해석·재조립하지 않는다(콤마 구분 문자열 통째로).
     #[test]
-    fn 발송_폼은_참조를_싣지_않는다() {
+    fn 발송_폼은_참조를_받은_그대로_싣는다() {
         let cf = ComposeForm::new(&sample_init(), "to", "제목", "본문", String::new(), "0".into())
-            .with_draft("13542607", "{}".into());
+            .with_carbon_copy(" a@x.com,b@x.com ", "c@x.com");
         let f = fields_of(&cf);
-        assert_eq!(f["cc"], "");
-        assert_eq!(f["bcc"], "");
+        assert_eq!(f["cc"], "a@x.com,b@x.com", "바깥 공백만 다듬고 구분자는 그대로");
+        assert_eq!(f["bcc"], "c@x.com");
+
+        // 참조를 싣지 않으면 빈 값이다(신규 발송의 기본).
+        let plain = ComposeForm::new(&sample_init(), "to", "제목", "본문", String::new(), "0".into());
+        let p = fields_of(&plain);
+        assert_eq!(p["cc"], "");
+        assert_eq!(p["bcc"], "");
     }
 
     /// 수신자 복원 — 브라우저가 싣는 값과 같은 형태를 내야 하고, 여럿이어도 통째로 옮겨야 한다.
@@ -1744,7 +1839,9 @@ mod tests {
         assert_eq!(v["isFirst"], "0", "첫 저장은 '0'이다(프론트 삼항이 뒤집혀 있다)");
         assert_eq!(v["draftType"], "true");
         assert_eq!(v["autoDraftType"], "false");
-        assert_eq!(v["beforeMailType"], "me");
+        // compose_init이 여는 모드와 같이 움직인다(`mailKind`도 "plain").
+        // 브라우저는 여기에 문자열 "undefined"를 싣지만 그 버그는 재현하지 않는다 — DRAFT_FIELDS 주석 참조.
+        assert_eq!(v["beforeMailType"], "plain");
         // 신규 저장이므로 직전 draft 좌표는 전부 빈 값
         assert!(["autoMUID", "beforeMUID", "mailKey"]
             .iter()

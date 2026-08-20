@@ -180,7 +180,7 @@ pub async fn suggest_line(c: &GwClient, doc_type: &str, trip: &str) -> Result<Va
     let selected = select_branches(&branches, my_grade, trip)?;
 
     // ── 부서 트리(상대 직책 L_* 해석용) 1콜 ────────────────────────────────
-    let tree = org::dept_tree(c, "0").await?;
+    let tree = org::dept_tree(c).await?;
     let depts = tree.get("depts").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let dept_by_id = |id: &str| depts.iter().find(|d| d.get("deptId").and_then(|v| v.as_str()) == Some(id)).cloned();
     // 기안자 부서의 조상 dept_id(가까운 상위부터). path 예: "1000|1000|2986|2987|2989|2993|"

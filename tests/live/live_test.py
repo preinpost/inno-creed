@@ -151,6 +151,10 @@ class Mcp:
         )
         self.id = 0
         self.called: set[str] = set()
+        # whoami 로 채운다. 비어 있는 동안에는 cc/bcc 지정이 전부 거부된다(안전한 기본값).
+        self.self_email: str = ""
+        self.self_emp_seq: str = ""
+        self.self_name: str = ""
         self._rpc("initialize", {
             "protocolVersion": "2024-11-05", "capabilities": {},
             "clientInfo": {"name": "inno-creed-live", "version": "1"},
@@ -178,23 +182,37 @@ class Mcp:
         m = self._rpc("tools/list", {})
         return sorted(t["name"] for t in m["result"]["tools"])
 
-    def call(self, name, **args):
-        """(상태, 값[, 길이]) — 상태는 'OK' | 'ERR'."""
+    def call(self, _tool, **args):
+        """(상태, 값[, 길이]) — 상태는 'OK' | 'ERR'.
+
+        ⚠️ 도구 이름 파라미터가 `_tool` 인 이유: 도구 인자 중에 **`name` 이 있다**
+        (person_group 계열). `name` 으로 두면 `call("person_group", name=...)` 가
+        TypeError 로 죽는다.
+        """
         blocked = dict(FORBIDDEN)
         if not submit_enabled():
             blocked.update(SUBMIT_TOOLS)
-        if name in blocked:
+        if _tool in blocked:
             # ② 물리 차단. 이 예외는 잡지 않는다 — 테스트를 즉시 죽이는 것이 의도다.
-            raise AssertionError(f"금지 도구 호출 시도: {name} ({blocked[name]})")
-        if name in ("send_mail", "send_mail_from_draft", "save_mail_draft") and args.get("to"):
-            # send_mail_from_draft 는 to 를 안 주면 **초안에 저장된 수신자**로 나간다.
-            # 점검이 만드는 초안은 수신자가 본인이므로, to 를 막으면 남에게 갈 경로가 없다.
-            # ⚠️ `save_mail_draft` 도 막는 이유: 발송 목적지를 정하는 것은 **초안에 저장된 수신자**다.
-            #    여기를 열어두면 남 앞으로 저장된 초안이 만들어지고, 그걸 발송하는 쪽은 `to` 를
-            #    주지 않으므로 위 차단을 그대로 통과한다 — 차단이 한 칸 뒤에 있으면 소용이 없다.
-            raise AssertionError(f"{name} 은 본인 앞으로만 보낸다 — to 를 지정할 수 없다")
-        self.called.add(name)
-        m = self._rpc("tools/call", {"name": name, "arguments": args})
+            raise AssertionError(f"금지 도구 호출 시도: {_tool} ({blocked[_tool]})")
+        if _tool in ("send_mail", "send_mail_from_draft", "save_mail_draft"):
+            if args.get("to"):
+                # send_mail_from_draft 는 to 를 안 주면 **초안에 저장된 수신자**로 나간다.
+                # 점검이 만드는 초안은 수신자가 본인이므로, to 를 막으면 남에게 갈 경로가 없다.
+                # ⚠️ `save_mail_draft` 도 막는 이유: 발송 목적지를 정하는 것은 **초안에 저장된 수신자**다.
+                #    여기를 열어두면 남 앞으로 저장된 초안이 만들어지고, 그걸 발송하는 쪽은 `to` 를
+                #    주지 않으므로 위 차단을 그대로 통과한다 — 차단이 한 칸 뒤에 있으면 소용이 없다.
+                raise AssertionError(f"{_tool} 은 본인 앞으로만 보낸다 — to 를 지정할 수 없다")
+            # ⚠️ 참조도 같은 문을 열어준다 — cc/bcc 로도 남에게 메일이 나간다.
+            #    to 만 막고 여기를 열어두면 차단이 우회된다. **본인 주소만** 허용한다.
+            for k in ("cc", "bcc"):
+                v = (args.get(k) or "").strip()
+                if v and v != self.self_email:
+                    raise AssertionError(
+                        f"{_tool} 의 {k} 는 본인 주소({self.self_email or '미확인'})만 허용한다 — 받은 값: {v!r}"
+                    )
+        self.called.add(_tool)
+        m = self._rpc("tools/call", {"name": _tool, "arguments": args})
         if m.get("error"):
             e = m["error"]
             return ("ERR", f"rpc {e.get('code')} {str(e.get('message', ''))[:120]}")
@@ -307,6 +325,24 @@ def _find_mail(mcp: Mcp, subject: str):
                        if subject in str(m.get("subject", ""))), None)
 
 
+def _await_mail(mcp: Mcp, subject: str, tries: int = MAIL_POLL_TRIES):
+    """배달을 기다리며 받은메일함에서 그 제목을 찾는다 — `("OK"|"ERR", 항목|None)`.
+
+    ⚠️ **발송 직후 한 번만 보고 판단하지 말 것.** 서버가 아직 배달하지 않아 안 보이는 것을
+    "없다"로 읽으면 실제로는 도착한 메일을 놓친다(참조 승계 점검이 이걸로 한 번 오탐했다).
+    """
+    hit = None
+    for i in range(tries):
+        st, hit = _find_mail(mcp, subject)
+        if st == "ERR":
+            return "ERR", hit
+        if hit:
+            return "OK", hit
+        if i < tries - 1:
+            time.sleep(MAIL_POLL_INTERVAL)
+    return "OK", hit
+
+
 def undo_mail(mcp: Mcp, ref: dict, marker: str):
     """⚠️ 발송 직후에는 서버가 아직 배달하지 않아 받은메일함에서 안 보일 수 있다.
     '안 보임 = 정리 완료'로 낙관하면 잠시 후 도착한 메일이 그대로 남는다 → 기다렸다 다시 본다."""
@@ -317,15 +353,9 @@ def undo_mail(mcp: Mcp, ref: dict, marker: str):
     settled = age > MAIL_SETTLED_SEC
     tries = 1 if settled else MAIL_POLL_TRIES
 
-    hit = None
-    for i in range(tries):
-        st, hit = _find_mail(mcp, ref["subject"])
-        if st == "ERR":
-            return False, hit
-        if hit:
-            break
-        if i < tries - 1:
-            time.sleep(MAIL_POLL_INTERVAL)
+    st, hit = _await_mail(mcp, ref["subject"], tries)
+    if st == "ERR":
+        return False, hit
 
     if hit is None:
         if settled:
@@ -483,10 +513,26 @@ def undo_approval(mcp: Mcp, ref: dict, marker: str):
     return False, "취소는 실행됐으나 삭제가 확인되지 않음"
 
 
+def undo_person_group(mcp: Mcp, ref: dict, marker: str):
+    """그룹 정의 삭제. 로컬 설정 파일만 건드리며 사람·메일·일정에는 영향이 없다.
+    ⚠️ 마커 없는 이름은 **사용자가 만든 진짜 그룹**이므로 절대 지우지 않는다."""
+    name = ref["name"]
+    if marker not in name:
+        return False, "마커 없는 그룹이라 건드리지 않음"
+    r = mcp.call("delete_person_group", name=name)
+    if r[0] == "ERR":
+        # 이미 없으면 정리된 것이다(삭제 시나리오가 먼저 지웠을 수 있다).
+        return ("그룹이 없다" in str(r[1])), f"삭제 실패: {r[1]}"
+    after = mcp.call("person_group")  # read-back — 삭제 응답만 믿지 않는다
+    gone = after[0] != "ERR" and name not in [g["name"] for g in after[1].get("groups", [])]
+    return gone, "삭제됨(재조회 확인)" if gone else "삭제 호출은 됐으나 목록에 아직 남음"
+
+
 UNDO = {
     "reservation": undo_reservation,
     "event": undo_event,
     "approval_line": undo_approval_line,
+    "person_group": undo_person_group,
     "mail": undo_mail,
     "mail_draft": undo_mail_draft,
     "approval": undo_approval,
@@ -515,18 +561,19 @@ def cleanup(mcp: Mcp, marker: str, label: str) -> list[dict]:
 R: list[tuple[str, str, str]] = []
 
 
-def run(mcp: Mcp, name, check, **args):
-    st = mcp.call(name, **args)
+def run(mcp: Mcp, _tool, check, **args):
+    """⚠️ 첫 인자가 `_tool` 인 이유는 `Mcp.call` 과 같다 — 도구 인자에 `name` 이 있다."""
+    st = mcp.call(_tool, **args)
     if st[0] == "ERR":
-        R.append(("FAIL", name, st[1]))
+        R.append(("FAIL", _tool, st[1]))
         return None
     data, size = st[1], st[2]
     try:
         ok, extra = check(data)
     except Exception as e:
-        R.append(("FAIL", name, f"검증 예외 {type(e).__name__}: {e}"))
+        R.append(("FAIL", _tool, f"검증 예외 {type(e).__name__}: {e}"))
         return data
-    R.append(("PASS" if ok else "FAIL", name, f"{size}자 · {extra}"))
+    R.append(("PASS" if ok else "FAIL", _tool, f"{size}자 · {extra}"))
     return data
 
 
@@ -683,6 +730,13 @@ def body(mcp: Mcp, fx: dict, marker: str):
         f"empSeq={d['empSeq']} {d['deptName']}/{d['duty']}"))
     if not me:
         raise RuntimeError("whoami 실패 — 크레덴셜(브라우저 로그인)을 확인할 것")
+    # cc/bcc 안전 가드의 기준값. 여기서 채우기 전에는 어떤 참조 지정도 거부된다.
+    mcp.self_email = str(me.get("email") or "")
+    if not mcp.self_email:
+        raise RuntimeError("whoami 가 email 을 주지 않았다 — 참조(cc/bcc) 점검의 안전 기준을 세울 수 없다")
+    # 그룹 점검이 쓰는 본인 값(그룹에는 본인 한 명만 넣는다).
+    mcp.self_emp_seq = str(me.get("empSeq") or "")
+    mcp.self_name = str(me.get("empName") or "")
 
     run(mcp, "list_resources", lambda d: (
         any(str(r.get("resSeq")) == room for r in d["resultList"]),
@@ -968,7 +1022,9 @@ def body(mcp: Mcp, fx: dict, marker: str):
         # 저장이 실패하면 조회할 대상이 없다. 건너뛴 사실을 남겨야 도구_커버리지가 정직해진다.
         skip("list_mail_drafts", "save_mail_draft 실패 — 조회할 draft가 없음")
 
+    person_group_scenario(mcp, marker)
     draft_send_scenario(mcp, marker)
+    draft_carbon_copy_scenario(mcp, marker)
     draft_attachment_scenario(mcp, marker)
 
     submit_scenario(mcp, fx, marker)
@@ -1037,6 +1093,136 @@ def draft_send_scenario(mcp: Mcp, marker: str):
                f"메일함에서 제목 '{subj}' 삭제")
     ok, note = undo_mail(mcp, ml["ref"], marker)
     R.append(("PASS" if ok else "FAIL", "send_mail_from_draft(정리)", note))
+    if ok:
+        untrack(ml)
+
+
+def person_group_scenario(mcp: Mcp, marker: str):
+    """사람 그룹 저장 → 조회 → 수정 → 삭제. **본인 한 명만** 넣는다.
+
+    그룹은 로컬 설정 파일(`~/.config/inno-creed/person_groups.json`)이라 아마란스에 아무것도
+    남기지 않는다. 그래도 사용자의 진짜 그룹과 섞이면 안 되므로 이름에 마커를 박고,
+    정리는 **마커가 있을 때만** 실행한다(`undo_person_group`).
+
+    핵심은 "저장됐다"가 아니라 **소비처가 쓸 재료가 실제로 나오는가**다 —
+    `empSeqs`(캘린더 참여자) · `emails`(메일 수신자)가 조직도 명부로 풀려야 한다.
+    """
+    name = f"{marker} 그룹점검"
+    me_seq, me_name, me_email = mcp.self_emp_seq, mcp.self_name, mcp.self_email
+
+    # ① 이름으로 저장 — 사용자가 "이 사람들 묶어줘" 하는 경로.
+    st = mcp.call("save_person_group", name=name, members=[me_name], note="라이브 점검용")
+    if st[0] == "ERR":
+        R.append(("FAIL", "save_person_group", st[1]))
+        return
+    gl = track("person_group", {"name": name}, f"person_group 파일에서 '{name}' 그룹 삭제")
+    R.append((("PASS" if st[1].get("memberCount") == 1 else "FAIL"), "save_person_group",
+              f"이름으로 저장 · members={st[1].get('members')}"))
+
+    # ② 조회 — 명부로 풀어 소비처가 쓸 재료가 나오는가. 여기가 이 기능의 존재 이유다.
+    def chk_get(d):
+        seqs, mails, missing = d.get("empSeqs"), d.get("emails"), d.get("missing")
+        ok = seqs == [me_seq] and mails == [me_email] and not missing
+        return ok, (f"empSeqs={seqs} emails={mails}"
+                    f"{'' if not missing else f' ⚠️missing={missing}'} · note={d.get('note')!r}")
+
+    run(mcp, "person_group", chk_get, name=name)
+
+    # ③ add 는 중복을 만들지 않는다 — 같은 사람을 empSeq로 다시 넣어 본다.
+    #    (여기가 틀리면 그룹 메일이 같은 사람에게 두 번 나간다.)
+    st = mcp.call("save_person_group", name=name, members=[me_seq], mode="add")
+    R.append((("PASS" if st[0] != "ERR" and st[1].get("memberCount") == 1 else "FAIL"),
+              "save_person_group(add·중복)",
+              st[1] if st[0] == "ERR" else f"memberCount={st[1].get('memberCount')}(1이어야 한다)"))
+
+    # ④ 명부에 없는 사람은 **저장 자체를 막아야** 한다 — 통과시키면 나중에 그 사람만 조용히 빠진다.
+    st = mcp.call("save_person_group", name=name, members=["존재하지않는사람XYZ"], mode="add")
+    R.append((("PASS" if st[0] == "ERR" else "FAIL"), "save_person_group(없는 사람 거부)",
+              str(st[1])[:80] if st[0] == "ERR" else "⚠️ 없는 사람이 저장됐다"))
+
+    # ⑤ 정리 = delete_person_group 점검을 겸한다.
+    ok, note = undo_person_group(mcp, gl["ref"], marker)
+    R.append((("PASS" if ok else "FAIL"), "delete_person_group", note))
+    if ok:
+        untrack(gl)
+
+
+def draft_carbon_copy_scenario(mcp: Mcp, marker: str):
+    """참조(cc)·숨은참조(bcc)를 건 초안을 발송하고 **도착한 메일의 헤더로 승계를 확인**한다.
+
+    왜 따로 두나 — `cc`/`bcc` 는 오랫동안 폼에 **빈 문자열로 박혀** 나갔고, 초안 발송은 참조가
+    보이면 아예 거부했다. 그 둘을 실측(`analyze/15`)에 맞춰 "싣는다 + 승계한다"로 바꿨는데,
+    이 경로는 참조 없는 초안으로는 **한 줄도 실행되지 않는다.**
+
+    ⚠️ **호출이 성공했다는 것으로는 아무것도 증명되지 않는다.** 아마란스는 모르는 파라미터를
+    조용히 버리므로(이 저장소의 알려진 실패 양상), 200 OK 를 받고도 참조만 빠져 나갈 수 있다.
+    그래서 판정은 **도착한 메일에서 cc 를 실제로 읽어내는 것**으로 한다.
+
+    수신자·참조 모두 본인이다(`Mcp.call` 이 본인 주소가 아닌 cc/bcc 를 물리적으로 막는다).
+    """
+    me = mcp.self_email
+    before = mailbox_counts(mcp)
+    base_drafts, base_sent = before.get("DRAFT"), before.get("SENT")
+    sent_at = datetime.now()
+    subj = f"{marker} 참조승계 점검 {sent_at.strftime('%Y%m%d-%H%M%S')}"
+
+    sd = mcp.call("save_mail_draft", subject=subj, cc=me, bcc=me,
+                  html="<p>inno-creed 라이브 점검(참조 승계). 자동 삭제됩니다.</p>")
+    if sd[0] == "ERR" or not (sd[1] or {}).get("draft_muid"):
+        skip("send_mail_from_draft(참조)", f"참조 걸린 초안을 만들지 못함: {sd[1] if sd[0] == 'ERR' else 'draft_muid 없음'}")
+        return
+    muid = str(sd[1]["draft_muid"])
+    dl = track("mail_draft", {"muid": muid, "subject": subj, "beforeExists": base_drafts},
+               f"메일 임시보관함에서 제목 '{subj}' 삭제")
+
+    # ① 초안이 참조를 **저장했는지** 먼저 본다. 저장 자체가 안 됐으면 승계는 볼 것도 없다.
+    rm = mcp.call("read_mail", muid=muid)
+    stored = json.dumps(rm[1], ensure_ascii=False) if rm[0] == "OK" else ""
+    R.append(("PASS" if me in stored else "FAIL", "save_mail_draft(참조 저장)",
+              f"초안 muid={muid} 에 cc/bcc 로 준 주소가 {'실려 있음' if me in stored else '❌없음(조용히 버려짐)'}"))
+
+    st = mcp.call("send_mail_from_draft", draft_muid=muid)
+    if st[0] == "ERR":
+        R.append(("FAIL", "send_mail_from_draft(참조)", st[1]))
+        ok, note = undo_mail_draft(mcp, dl["ref"], marker)
+        if ok:
+            untrack(dl)
+        else:
+            R.append(("FAIL", "send_mail_from_draft(참조·정리)", note))
+        return
+    d = st[1]
+    after = mailbox_counts(mcp)
+    now_sent, now_drafts = after.get("SENT"), after.get("DRAFT")
+    # 도구가 무엇을 실었다고 보고하는가 — 승계가 일어났다면 cc 가 비어 있으면 안 된다.
+    cc_reported = str(d.get("cc") or "")
+    sent_ok = d.get("sent") is True
+    grew = now_sent is not None and base_sent is not None and now_sent == base_sent + 1
+    gone = d.get("draft_deleted") is True and now_drafts is not None and now_drafts == base_drafts
+    R.append(("PASS" if (sent_ok and grew and gone and me in cc_reported) else "FAIL",
+              "send_mail_from_draft(참조)",
+              f"muid={muid} · 보낸메일함 {base_sent}→{now_sent} · "
+              f"cc 보고값={cc_reported or '❌빈값(승계 안 됨)'} · "
+              f"임시보관함 {base_drafts}→{now_drafts}{'(원본 삭제 확인)' if gone else ' ⚠️원본 잔존'}"))
+    untrack(dl)
+    ml = track("mail", {"subject": subj, "sentAt": sent_at.strftime("%Y-%m-%d %H:%M:%S")},
+               f"메일함에서 제목 '{subj}' 삭제")
+
+    # ② ⭐ 진짜 판정 — **도착한 메일**에서 cc 를 읽는다. 도구의 보고가 아니라 서버가 실제로
+    #    참조를 실어 보냈는지를 본다(조용히 버려졌다면 여기서만 드러난다).
+    st, hit = _await_mail(mcp, subj)   # ⚠️ 배달 대기 — 한 번만 보면 아직 안 온 것을 "없다"로 읽는다
+    if st != "OK" or not hit:
+        R.append(("FAIL", "참조승계_수신확인", f"발송한 메일을 받은메일함에서 찾지 못함({st})"))
+    else:
+        rd = mcp.call("read_mail", muid=str(hit["muid"]))
+        # ⚠️ 응답 전체를 문자열로 훑지 말 것 — to/from 에도 본인 주소가 들어 있어 cc 가 통째로
+        #    빠져도 통과한다. **cc 필드 하나만** 본다.
+        got_cc = str((rd[1] or {}).get("cc", "")) if rd[0] == "OK" else ""
+        cc_arrived = me in got_cc
+        R.append(("PASS" if cc_arrived else "FAIL", "참조승계_수신확인",
+                  f"도착 메일의 cc={got_cc or '❌빈값 — 서버가 참조를 버렸다'}"))
+
+    ok, note = undo_mail(mcp, ml["ref"], marker)
+    R.append(("PASS" if ok else "FAIL", "send_mail_from_draft(참조·정리)", note))
     if ok:
         untrack(ml)
 

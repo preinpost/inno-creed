@@ -3,6 +3,7 @@
 #![recursion_limit = "512"]
 
 pub mod client;
+pub mod config;
 pub mod creds;
 pub mod error;
 pub mod mcp;

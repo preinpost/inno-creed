@@ -8,6 +8,7 @@ pub mod board;
 pub mod calendar;
 pub mod mail;
 pub mod org;
+pub mod person_group;
 pub mod resource;
 pub mod search;
 pub mod submission_guide;

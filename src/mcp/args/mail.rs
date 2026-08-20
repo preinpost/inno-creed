@@ -9,9 +9,17 @@ use serde::Deserialize;
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct SendMailArgs {
-    /// 받는사람 (표시형 "이름 <email>" 또는 email). 미지정 시 본인에게 발송.
+    /// 받는사람 (표시형 "이름 <email>" 또는 email). **여러 명이면 콤마로 잇는다** — 예:
+    /// `"홍길동 <hong@innogrid.com>,kim@innogrid.com"`. 미지정 시 본인에게 발송.
     #[serde(default)]
     pub to: Option<String>,
+    /// 참조(cc, 선택). 형식은 to와 같다(콤마 구분). 비우면 참조 없음.
+    #[serde(default)]
+    pub cc: Option<String>,
+    /// 숨은참조(bcc, 선택). 형식은 to와 같다(콤마 구분). 비우면 숨은참조 없음.
+    /// ⚠️ 숨은참조는 다른 수신자에게 보이지 않지만 **발송 자체는 되돌릴 수 없다.**
+    #[serde(default)]
+    pub bcc: Option<String>,
     /// 제목
     pub subject: String,
     /// 본문 HTML(선택)
@@ -25,9 +33,18 @@ pub struct SendMailArgs {
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct SaveMailDraftArgs {
-    /// 받는사람 (표시형 "이름 <email>" 또는 email). 미지정 시 본인.
+    /// 받는사람 (표시형 "이름 <email>" 또는 email). **여러 명이면 콤마로 잇는다** — 예:
+    /// `"홍길동 <hong@innogrid.com>,kim@innogrid.com"`. 미지정 시 본인.
     #[serde(default)]
     pub to: Option<String>,
+    /// 참조(cc, 선택). 형식은 to와 같다(콤마 구분). 비우면 참조 없음.
+    /// 여기 넣어두면 send_mail_from_draft가 **그대로 승계해** 발송한다.
+    #[serde(default)]
+    pub cc: Option<String>,
+    /// 숨은참조(bcc, 선택). 형식은 to와 같다(콤마 구분). 비우면 숨은참조 없음.
+    /// 여기 넣어두면 send_mail_from_draft가 **그대로 승계해** 발송한다.
+    #[serde(default)]
+    pub bcc: Option<String>,
     /// 제목. 비워두면 "(제목없음)"으로 저장된다.
     pub subject: String,
     /// 본문 HTML(선택)

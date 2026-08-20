@@ -2,7 +2,7 @@
 //!
 //! 이 파일에 남는 것은 **서버 골격**뿐이다 — 핸들러 상태(`Amaranth`), 세션 보장, 에러 매핑,
 //! 라우터 합성, `ServerHandler`(도구 전체를 아우르는 instructions).
-//! 도구 정의는 `tools/`(도메인 11개), 인자 스키마는 `args/`(도메인 8개)에 있다.
+//! 도구 정의는 `tools/`(도메인 12개), 인자 스키마는 `args/`(도메인 9개)에 있다.
 
 use std::sync::Arc;
 
@@ -23,7 +23,7 @@ pub mod tools;
 /// 분류한다 — 서버/네트워크 실패가 아니라 잘못된 대상·인자를 준 것이기 때문이다(리팩터 전 동작 보존).
 /// 문자열 매칭이 아니라 타입(`downcast_ref`)으로 판별한다.
 ///
-/// ⚠️ **도메인 모듈(`modules::*`)에서 올라온 `anyhow::Error`는 도메인 11개 라우터 전부가
+/// ⚠️ **도메인 모듈(`modules::*`)에서 올라온 `anyhow::Error`는 도메인 12개 라우터 전부가
 /// 이 함수(또는 `map_domain_err_ctx`)를 지난다.** 새 도구를 추가할 때 `ErrorData::internal_error`를
 /// 직접 부르면 그 자리만 조용히 분류를 놓친다 — 컴파일러도 스냅샷 테스트도 잡지 못한다.
 /// (도구 층에서 자체 판단한 인자 오류 — JSON 파싱 실패·없는 doc_type 등 — 만 `invalid_params`를 직접 쓴다.)
@@ -85,7 +85,7 @@ impl Amaranth {
         self.gate.approve(tool, kind, summary, rows).await
     }
 
-    /// 도메인별 라우터 11개를 합성한 전체 도구 표면.
+    /// 도메인별 라우터 12개를 합성한 전체 도구 표면.
     /// 각 `*_router()`는 `tools/<도메인>.rs`의 `#[tool_router(router = …, vis = "pub(crate)")]`가
     /// 생성한다. `ToolRouter`의 `Add`가 rmcp가 의도한 합성 방식이다(`handler/server/router/tool.rs`).
     /// ⚠️ 도메인 파일을 추가하면 **여기에도 더해야** 도구가 노출된다 — 빠뜨려도 컴파일은 되고
@@ -100,6 +100,7 @@ impl Amaranth {
             + Self::approval_submit_router()
             + Self::approval_meta_router()
             + Self::org_router()
+            + Self::person_group_router()
             + Self::attendance_router()
             + Self::search_router()
     }
@@ -130,6 +131,9 @@ impl ServerHandler for Amaranth {
              - '언제 회의실이 비나'는 `find_free_rooms`(빈 구간 계산 완료본). 예약 목록을 직접 훑어 계산하지 말 것.\n\
              - 사람의 empSeq가 필요하면 `find_person`, 본인 값은 `whoami`. \
                결재선·참석자·수신자가 전부 empSeq를 요구한다.\n\
+             - 사용자가 **여러 사람을 이름 붙여 묶어 부르면**(팀·주간보고 수신자 등) `person_group`. \
+               아마란스에 그룹메일이 없어 이 서버가 대신 갖는다 — `save_person_group`으로 만들고(이름/empSeq를 그대로 주면 된다), \
+               쓸 때 `person_group(name)`이 `empSeqs`(→ 일정 참여자)와 `emails`(→ 콤마로 이어 메일 수신자·참조)를 준다.\n\
              - 내 예약을 고치거나 취소하려면 `my_reservations`로 seqNum/resIdx를 먼저 얻는다.\n\
              \n\
              주의:\n\
@@ -150,7 +154,7 @@ impl ServerHandler for Amaranth {
 
 /// 도구 표면(이름·개수) 스냅샷.
 ///
-/// 도메인 라우터 11개의 합성 결과(`Amaranth::all_tools()`)를 검사한다 — 도메인 파일을
+/// 도메인 라우터 12개의 합성 결과(`Amaranth::all_tools()`)를 검사한다 — 도메인 파일을
 /// `all_tools()`에 더하는 것을 빠뜨리면 그 도메인 도구가 통째로 사라지는데 컴파일러는 못 잡는다.
 /// 목적은 커버리지가 아니라 **회귀 기준선**이다 — 파일 분해(단일 `mcp.rs` → `args/`+`tools/`)처럼
 /// 코드를 옮기는 작업에서 도구가 사라지거나 이름이 바뀌는 것을 컴파일러가 못 잡기 때문이다.
@@ -163,15 +167,16 @@ mod tests {
     const EXPECTED_TOOLS: &[&str] = &[
         "approval_counts", "attendance_clock_in", "attendance_clock_out", "attendance_month",
         "cancel_approval", "cancel_reservation", "create_calendar_event", "delete_approval_line",
-        "delete_calendar_event", "delete_mail", "delete_temp_approval", "download_mail_attachment",
-        "download_notice_attachment", "find_free_rooms", "find_person", "get_approval_line_schema",
+        "delete_calendar_event", "delete_mail", "delete_person_group", "delete_temp_approval",
+        "download_mail_attachment", "download_notice_attachment", "find_free_rooms", "find_person", "get_approval_line_schema",
         "get_approval_submission_guide", "get_attendance_today", "list_approval_line_schemas",
         "list_approval_lines", "list_approval_submission_guides", "list_approvals",
         "list_calendars", "list_events", "list_mail_drafts", "list_mail_inbox", "list_mailboxes",
         "list_notice_attachments", "list_notices", "list_reservations", "list_resources",
-        "my_reservations", "org_chart", "pending_approvals", "read_approval", "read_approval_line",
-        "read_mail", "read_notice", "reserve_resource", "save_approval_line", "save_mail_draft",
-        "search", "send_mail", "send_mail_from_draft", "submit_approval", "suggest_approval_line",
+        "my_reservations", "org_chart", "pending_approvals", "person_group", "read_approval",
+        "read_approval_line", "read_mail", "read_notice", "reserve_resource", "save_approval_line", "save_mail_draft",
+        "save_person_group", "search", "send_mail", "send_mail_from_draft", "submit_approval",
+        "suggest_approval_line",
         "update_calendar_event", "update_reservation", "whoami",
     ];
 
