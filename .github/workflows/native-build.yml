@@ -2,15 +2,18 @@ name: native-embed
 
 # 내장 Glimpse 네이티브 바이너리 빌드 & 커밋
 #
-# 작업 대상            파일                                   빌드 방식
-# linux x86_64   →  native/linux/glimpse-x86_64   Docker (linux/amd64)
-# linux aarch64  →  native/linux/glimpse-aarch64  Docker (linux/arm64, QEMU)
-# windows x86_64 →  native/windows/glimpse.exe    dotnet publish (Windows 전용 TFM)
-# macOS arm64    →  native/macos/glimpse          swiftc -target arm64 (macOS 러너에서 크로스)
+# upstream(https://github.com/hazat/glimpse)을 v0.8.1(pinned)으로 clone해서
+# 저장소의 빌드 스크립트(npm run build:*)로 각 플랫폼 바이너리를 만들고 커밋한다.
+#
+# 작업 대상            파일                                   빌드 방식                     요구 사항
+# macOS arm64    →  native/macos/glimpse            swiftc -target arm64 (직접)         Xcode CLT
+# linux x86_64   →  native/linux/glimpse-x86_64     npm run build:linux (cargo)       GTK4/WebKitGTK 6.0 + gtk4-layer-shell
+# linux aarch64  →  native/linux/glimpse-aarch64    npm run build:linux (cargo)       GTK4/WebKitGTK 6.0 + gtk4-layer-shell
+# windows x86_64 →  native/windows/glimpse.exe      npm run build:windows (dotnet)    .NET 8 SDK
 #
 # 실행 조건:
 #   - workflow_dispatch (수동) — 바이너리가 이미 커밋돼 있으면 force 없이는 스킵
-#   - native/src 등 소스 변경 push
+#   - .github/workflows 또는 native/ 아래 소산물 변경 push
 # 결과: native/ 아래에 바이너리 커밋 (GITHUB_TOKEN, contents: write)
 
 on:
@@ -22,13 +25,15 @@ on:
         default: false
   push:
     paths:
-      - "native/src/**"
-      - "native/windows/**"
-      - "native/docker/**"
       - ".github/workflows/**"
+      - "native/**"
 
 permissions:
   contents: write
+
+env:
+  # upstream 고정 커밋 (v0.8.1)
+  GLIMPSE_UPSTREAM_SHA: 4b50cbb4312b56f2a2170131c8634351c1c12122
 
 jobs:
   macos:
@@ -48,7 +53,11 @@ jobs:
           fi
 
       - if: steps.skip.outputs.skip != 'true'
-        run: swiftc -target arm64-apple-macos12 -O native/src/glimpse.swift -o native/macos/glimpse
+        run: |
+          git clone https://github.com/hazat/glimpse.git /tmp/glimpse
+          git -C /tmp/glimpse checkout $GLIMPSE_UPSTREAM_SHA
+          mkdir -p native/macos
+          swiftc -target arm64-apple-macos12 -O /tmp/glimpse/src/glimpse.swift -o native/macos/glimpse
 
       - if: steps.skip.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
@@ -58,7 +67,7 @@ jobs:
           if-no-files-found: error
 
   linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -66,13 +75,14 @@ jobs:
           - platform: linux/amd64
             arch: x86_64
             target_file: native/linux/glimpse-x86_64
+            docker_needed: "false"
           - platform: linux/arm64
             arch: aarch64
             target_file: native/linux/glimpse-aarch64
+            docker_needed: "true"
     steps:
       - uses: actions/checkout@v4
 
-      # 이미 바이너리가 커밋돼 있고 강제가 아니면 스킵 ("있으면 안 돌게")
       - id: skip
         run: |
           if [ "${{ inputs.force }}" = "true" ]; then echo "force — 빌드 진행"; echo "skip=false" >> "$GITHUB_OUTPUT"; exit 0; fi
@@ -84,17 +94,55 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - if: steps.skip.outputs.skip != 'true'
-        uses: docker/setup-qemu-action@v3
-
-      - if: steps.skip.outputs.skip != 'true'
-        run: docker build --platform ${{ matrix.platform }} -f native/docker/linux-build.Dockerfile -t glimpse-linux-build .
-
+      # upstream clone (모든 아키 공용)
       - if: steps.skip.outputs.skip != 'true'
         run: |
-          mkdir -p native/linux
-          docker run --rm -e CARGO_NET_GIT_FETCH_WITH_CLI=true \
-            -v "$PWD/native/src/linux:/build" -v "$PWD/native/linux:/out" glimpse-linux-build
+          git clone https://github.com/hazat/glimpse.git /tmp/glimpse
+          git -C /tmp/glimpse checkout $GLIMPSE_UPSTREAM_SHA
+
+      # x86_64: 러너에서 직접 (GTK4/WebKitGTK 6.0 + gtk4-layer-shell 소스 빌드 필요)
+      - if: steps.skip.outputs.skip != 'true' && matrix.arch == 'x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libgtk-4-dev libwebkitgtk-6.0-dev \
+            libsoup-3.0-dev libgraphene-1.0-dev libssl-dev \
+            meson ninja-build libwayland-dev gobject-introspection libgirepository1.0-dev
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git clone --depth 1 https://github.com/wmww/gtk4-layer-shell.git /tmp/ls
+          meson setup /tmp/ls/build /tmp/ls -Dexamples=false -Dtests=false -Ddocs=false -Dvapi=false
+          sudo ninja -C /tmp/ls/build install
+          sudo ldconfig
+
+      - if: steps.skip.outputs.skip != 'true' && matrix.arch == 'x86_64'
+        uses: dtolnay/rust-toolchain@stable
+
+      - if: steps.skip.outputs.skip != 'true' && matrix.arch == 'x86_64'
+        run: |
+          export CARGO_NET_GIT_FETCH_WITH_CLI=true
+          cargo build --release --manifest-path /tmp/glimpse/src/linux/Cargo.toml
+          mkdir -p "$GITHUB_WORKSPACE/native/linux"
+          cp /tmp/glimpse/src/linux/target/release/glimpse "$GITHUB_WORKSPACE/${{ matrix.target_file }}"
+          chmod +x "$GITHUB_WORKSPACE/${{ matrix.target_file }}"
+
+      # arm64: Fedora 컨테이너(QEMU) — gtk4-layer-shell-devel 시스템 패키지 제공
+      - if: steps.skip.outputs.skip != 'true' && matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+
+      - if: steps.skip.outputs.skip != 'true' && matrix.docker_needed == 'true'
+        run: |
+          docker run --platform linux/arm64 --rm \
+            -e CARGO_NET_GIT_FETCH_WITH_CLI=true \
+            -v /tmp/glimpse:/glimpse -w /glimpse/src/linux \
+            -v "$GITHUB_WORKSPACE/native/linux:/out" \
+            fedora:41 bash -c '
+              dnf install -y gcc gcc-c++ pkgconf-pkg-config git rust cargo \
+                gtk4-devel webkitgtk6.0-devel gtk4-layer-shell-devel \
+              && dnf clean all \
+              && git config --global url."https://github.com/".insteadOf "git@github.com:" \
+              && export CARGO_NET_GIT_FETCH_WITH_CLI=true \
+              && cargo build --release \
+              && cp target/release/glimpse /out/glimpse
+            '
           mv native/linux/glimpse "${{ matrix.target_file }}"
           chmod +x "${{ matrix.target_file }}"
           echo "빌드 완료: ${{ matrix.target_file }}"
@@ -105,6 +153,7 @@ jobs:
           name: glimpse-linux-${{ matrix.arch }}
           path: ${{ matrix.target_file }}
           if-no-files-found: error
+
 
   windows:
     runs-on: windows-latest
@@ -129,10 +178,14 @@ jobs:
           dotnet-version: "8.0.x"
 
       - if: steps.skip.outputs.skip != 'true'
-        run: dotnet publish native/windows/Glimpse.Windows.csproj -c Release -r win-x64 --self-contained -o bin
-
-      - if: steps.skip.outputs.skip != 'true'
-        run: copy bin\glimpse.exe native\windows\glimpse.exe
+        shell: bash
+        run: |
+          git clone https://github.com/hazat/glimpse.git /tmp/glimpse
+          git -C /tmp/glimpse checkout $GLIMPSE_UPSTREAM_SHA
+          cd /tmp/glimpse
+          npm run build:windows
+          mkdir -p native/windows
+          cp native/windows/bin/glimpse.exe "$GITHUB_WORKSPACE/native/windows/glimpse.exe"
 
       - if: steps.skip.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
@@ -170,6 +223,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "변경 없음 — 커밋 생략"
           else
-            git commit -m "build(native): Glimpse 네이티브 바이너리 재빌드"
+            git commit -m "build(native): Glimpse 네이티브 바이너리 재빌드 (upstream v0.8.1)"
             git push origin HEAD:${{ github.ref_name }}
           fi
