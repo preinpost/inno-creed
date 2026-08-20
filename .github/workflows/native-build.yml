@@ -25,6 +25,7 @@ on:
       - "native/src/**"
       - "native/windows/**"
       - "native/docker/**"
+      - ".github/workflows/**"
 
 permissions:
   contents: write
@@ -47,7 +48,7 @@ jobs:
           fi
 
       - if: steps.skip.outputs.skip != 'true'
-        run: swiftc -target arm64-apple-macos11 -O native/src/glimpse.swift -o native/macos/glimpse
+        run: swiftc -target arm64-apple-macos12 -O native/src/glimpse.swift -o native/macos/glimpse
 
       - if: steps.skip.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
