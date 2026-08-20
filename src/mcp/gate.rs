@@ -511,14 +511,16 @@ fn build_html(tool: &str, kind: &str, summary: &str, rows: &[(String, String)]) 
   tr:last-child td {{ border-bottom: none; }}
   td.k {{ color: #8b90a8; width: 110px; white-space: nowrap; }}
   td.v {{ color: #e8e8f0; word-break: break-all; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }}
-  .footer {{ margin-top: auto; font-size: 11.5px; color: #6d7289; }}
-  .buttons {{ display: flex; gap: 10px; }}
-  button {{ flex: 1; padding: 13px; font-size: 14px; font-weight: 700; border: none; border-radius: 10px; cursor: pointer; transition: transform .12s; }}
-  button:hover {{ transform: scale(1.02); }}
+  .footer {{ margin-top: auto; font-size: 12px; color: #9aa0b5; }}
+  .buttons {{ display: flex; gap: 12px; }}
+  button {{ flex: 1; padding: 14px; font-size: 15px; font-weight: 700; border: none; border-radius: 12px; cursor: pointer; transition: transform .12s; display: flex; align-items: center; justify-content: center; gap: 9px; text-shadow: 0 1px 2px rgba(0,0,0,.35); }}
+  button:hover {{ transform: scale(1.02); filter: brightness(1.06); }}
   button:active {{ transform: scale(.97); }}
-  .approve {{ background: linear-gradient(135deg, #2ec4b6, #1f9d92); color: #fff; }}
-  .deny {{ background: rgba(255,255,255,.09); color: #b9becf; }}
-  .kbd {{ font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; border: 1px solid #3a3f55; border-radius: 4px; padding: 1px 5px; color: #9aa0b5; }}
+  .approve {{ background: linear-gradient(135deg, #2ec4b6, #1f9d92); color: #fff; box-shadow: 0 3px 12px rgba(46,196,182,.28); }}
+  .deny {{ background: #31314a; color: #fff; border: 1px solid #55556f; box-shadow: 0 3px 12px rgba(0,0,0,.35); }}
+  .deny:hover {{ background: #3b3b59; }}
+  /* 키캡: 검은 칩 + 흰 글자 — 틸/그레이 모든 버튼 배경 위에서 뚜렷한 대비 */
+  .kbd {{ font-family: ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 6px; background: #0f0f17; color: #fff; border: 1px solid rgba(255,255,255,.5); border-bottom-width: 3px; line-height: 1.2; }}
 </style>
 </head>
 <body>
