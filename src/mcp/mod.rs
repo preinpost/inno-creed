@@ -13,8 +13,10 @@ use rmcp::{
 };
 
 use crate::client::GwClient;
+use crate::mcp::gate::Gate;
 
 pub mod args;
+pub mod gate;
 pub mod tools;
 
 /// 모듈 에러 → MCP 에러 매핑. **호출자 잘못(`NotOwner`·`InvalidInput`)만 `invalid_params`**로
@@ -59,13 +61,28 @@ fn is_caller_fault(e: &anyhow::Error) -> bool {
 #[derive(Clone)]
 pub struct Amaranth {
     client: Arc<GwClient>,
+    /// 승인 게이트웨이 — 부작용 도구 실행 전 사용자 승인 팝업.
+    gate: Arc<Gate>,
 }
 
 impl Amaranth {
-    pub fn new(client: GwClient) -> Self {
+    pub fn new(client: GwClient, gate: Gate) -> Self {
         Self {
             client: Arc::new(client),
+            gate: Arc::new(gate),
         }
+    }
+
+    /// 게이트 대상 도구 핸들러에서 사용: 실행 전 승인 팝업.
+    /// 비활성 게이트는 즉시 통과시킨다(`Gate::approve` 내부 판단).
+    pub(crate) async fn approve(
+        &self,
+        tool: &str,
+        kind: &str,
+        summary: &str,
+        rows: &[(String, String)],
+    ) -> Result<(), ErrorData> {
+        self.gate.approve(tool, kind, summary, rows).await
     }
 
     /// 도메인별 라우터 11개를 합성한 전체 도구 표면.
@@ -174,7 +191,7 @@ mod tests {
     /// `GwClient::new(None)` 은 필드 초기화만 한다.
     #[test]
     fn 핸들러는_크레덴셜_없이_만들어진다() {
-        let a = Amaranth::new(GwClient::new(None));
+        let a = Amaranth::new(GwClient::new(None), Gate::disabled());
         drop(a);
         assert_eq!(Amaranth::all_tools().list_all().len(), EXPECTED_TOOLS.len());
     }

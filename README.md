@@ -16,7 +16,7 @@
 
 - **헤드리스** — Playwright 같은 브라우저 자동화 없이 순수 HTTP + HMAC 서명(`wehago-sign`)으로 호출합니다. 서버가 `Origin`/`Referer`를 검사하지 않고 쿠키도 필수가 아니라, 헤더 4종만 맞추면 인증이 통과합니다.
 - **로그인 불필요** — 아이디/비밀번호를 요구하지 않습니다. 이미 브라우저에 로그인돼 있으면 그 쿠키를 복호화해 크레덴셜(`authToken` / `signKey`)만 가져옵니다.
-- **안전 규약 내장** — 모든 쓰기 작업은 read-back으로 실제 반영을 검증하고, 남의 데이터 수정은 사전에 차단합니다(아래 [안전 규약](#안전-규약)).
+- **안전 규약 내장** — 모든 쓰기 작업은 read-back으로 실제 반영을 검증하고, 남의 데이터 수정은 사전에 차단합니다. 부작용 도구는 `--approval on`으로 켜면 **실행 전 승인 팝업**까지 받습니다(아래 [안전 규약](#안전-규약)과 [승인 게이트웨이](#승인-게이트웨이-실험)).
 
 ## 할 수 있는 것
 
@@ -220,6 +220,35 @@ inno-creed (Rust MCP 서버, 헤드리스)
 - **소유권 가드** — 쓰기 도구는 대상의 소유자(예약은 `empSeq`, 일정은 `createSeq`)가 본인일 때만 실행하고, 아니면 명시적 에러를 냅니다. 서버도 남의 데이터 수정을 무시하지만, MCP에서 먼저 걸러 원인을 분명히 알려줍니다. 이 두 규약은 도구 층이 아니라 **각 도메인 모듈의 mutation 함수(`*_and_verify`) 안**에 있어 어떤 호출자도 우회할 수 없습니다.
 - **부작용 있는 도구는 명시** — 근태 punch(`attendance_clock_in`/`attendance_clock_out`), 상신(`submit_approval`), 게시글 열람(`read_notice`, 조회수 증가)은 실제 기록이 남습니다. 사용자가 명시적으로 지시할 때만 호출하세요. 메일 발송은 되돌릴 수 없어 한 단계 더 두었습니다 — 지시받았더라도 `save_mail_draft`로 초안을 만들어 `list_mail_drafts`로 확인받은 뒤 `send_mail_from_draft`로 **그 초안을 그대로** 보냅니다(확인받은 형상과 발송물이 어긋나지 않고, 원본 초안 정리까지 그 도구가 합니다). 사용자가 즉시 발송을 지시하면 그때만 `send_mail`로 곧바로 보냅니다.
 - **서버 자동 결재선 불신** — 서버가 채워주는 기본 결재선은 위임전결 규정과 일치하지 않습니다. `get_approval_line_schema`로 직책 기반 스키마를 받고, `org_chart`로 담당자를 해석한 뒤 사람이 확인하고 상신하세요.
+
+### 승인 게이트웨이 (실험)
+
+`--approval on`으로 서버를 띄우면 게이트 대상 도구(`reserve_resource` 등) 호출 시 **네이티브 승인 팝업**이 뜨고, 도구명·인자·적용 내용을 보여준 뒤 사용자 **승인/거부**를 받습니다.
+
+- 팝업은 내장 Glimpse 네이티브 바이너리(`native/<os>/glimpse`) — **추가 런타임(Node 등) 불필요**. 바이너리는 GitHub Actions(`.github/workflows/native-build.yml`)가 빌드해 커밋한다.
+- **거부·무응답(타임아웃 기본 60초)·창 닫힘은 전부 실행 차단** — 규약이 instructions가 아니라 기계적으로 강제됩니다.
+- **기본값은 ON** — 별도 인자 없이 부작용 도구 호출 시 팝업 승인을 받습니다. GUI 없는 머신(헤드리스/CI)에서는 `--approval off`로 꺼야 합니다.
+
+```sh
+./inno-creed                       # 기본: 승인 게이트웨이 ON
+./inno-creed --approval off        # 완전 통과 모드(헤드리스용)
+./inno-creed --approval-timeout 120
+```
+
+| 인자 | 기본 | 설명 |
+|---|---|---|
+| `--approval on\|off` | **`on`** | 승인 게이트웨이 — `off`면 부작용 도구가 팝업 없이 즉시 실행 |
+| `--approval-timeout <초>` | `60` | 승인 대기 시간. 초과 시 거부 처리 |
+| `GLIMPSE_BINARY_PATH` | 내장 경로 | 네이티브 바이너리 경로 오버라이드(테스트/개발용) |
+
+**내장 바이너리** (서버가 빌드된 OS/아키에 맞는 것을 자동 선택):
+
+| 파일 | 대상 | 빌드 방법 |
+|---|---|---|
+| `native/macos/glimpse` | macOS arm64 | GitHub Actions(`native-build.yml`) |
+| `native/linux/glimpse-x86_64` | Linux x86_64 | GitHub Actions(`native-build.yml`) |
+| `native/linux/glimpse-aarch64` | Linux arm64 | GitHub Actions(`native-build.yml`) |
+| `native/windows/glimpse.exe` | Windows x86_64 | GitHub Actions(`native-build.yml`) |
 
 ## 문서
 

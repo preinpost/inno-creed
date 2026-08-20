@@ -9,3 +9,4 @@
 /tests/live/leaks.json
 /tests/live/out/
 __pycache__/
+/native/src/linux/target

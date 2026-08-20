@@ -77,6 +77,25 @@ claude mcp add inno-creed -- /절대경로/inno-creed          # Windows: ...\in
 
 등록 후 **클라이언트를 재시작**하면 도구가 노출됩니다.
 
+> **승인 게이트웨이(기본 ON)** — 부작용 도구(`reserve_resource` 등)는 실행 전 **내장 Glimpse 팝업**으로 승인을 받습니다. 팝업에서 도구명·인자·적용 내용을 보고 승인/거부합니다. 거부·무응답(기본 60초)·창 닫힘은 실행 차단. GUI가 없는 머신(헤드리스/CI)에서 도구를 바로 실행해야 한다면 `--approval off`를 추가하세요.
+>
+> ```json
+> {
+>   "mcpServers": {
+>     "inno-creed": {
+>       "command": "/절대경로/inno-creed",
+>       "args": []
+>     },
+>     "inno-creed-auto": {
+>       "command": "/절대경로/inno-creed",
+>       "args": ["--approval", "off"]
+>     }
+>   }
+> }
+> ```
+>
+> 📦 배포 바이너리에는 승인 팝업 네이티브 바이너리(`native/macos/glimpse`·`native/linux/glimpse-x86_64`·`native/linux/glimpse-aarch64`·`native/windows/glimpse.exe`)가 함께 포함돼야 합니다. 바이너리는 GitHub Actions(`.github/workflows/native-build.yml`)가 빌드해 커밋하며, 없으면 수동으로 실행(`Run workflow` → force)하면 생성됩니다. 네이티브 바이너리가 없으면 `--approval on` 상태에서 도구 호출이 **명시적 에러**로 거부됩니다(조용히 진행되지는 않음).
+
 ---
 
 ## 4. 로그인 & 확인
