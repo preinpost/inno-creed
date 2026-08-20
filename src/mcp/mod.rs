@@ -13,7 +13,7 @@ use rmcp::{
 };
 
 use crate::client::GwClient;
-use crate::mcp::gate::GateConfig;
+use crate::mcp::gate::GateContext;
 
 pub mod args;
 pub mod gate;
@@ -61,15 +61,15 @@ fn is_caller_fault(e: &anyhow::Error) -> bool {
 #[derive(Clone)]
 pub struct Amaranth {
     client: Arc<GwClient>,
-    /// 승인 게이트 설정 — 도구 핸들러가 `Gate::approve(&self.gate_config, ...)`로 쓴다.
-    pub(crate) gate_config: GateConfig,
+    /// 승인 게이트 설정 — 도구 핸들러가 `Gate::approve(&self.gate_ctx, ...)`로 쓴다.
+    pub(crate) gate_ctx: GateContext,
 }
 
 impl Amaranth {
-    pub fn new(client: GwClient, gate_config: GateConfig) -> Self {
+    pub fn new(client: GwClient, gate_ctx: GateContext) -> Self {
         Self {
             client: Arc::new(client),
-            gate_config,
+            gate_ctx,
         }
     }
 

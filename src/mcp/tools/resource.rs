@@ -99,7 +99,7 @@ impl Amaranth {
             r
         };
         Gate::approve(
-            &self.gate_config,
+            &self.gate_ctx,
             "reserve_resource",
             "회의실 예약 등록",
             "이 예약이 반영됩니다 — 아래 내용이 맞는지 확인해 주세요.",

@@ -1,6 +1,6 @@
 //! 승인 게이트웨이 — 부작용 도구 실행 전 사용자 승인.
 //!
-//! 1. 게이트 대상 도구 핸들러가 `Gate::approve(&self.gate_config, ...)` 호출
+//! 1. 게이트 대상 도구 핸들러가 `Gate::approve(&self.gate_ctx, ...)` 호출
 //! 2. 활성화 상태면 **GUI 팝업**(내장 Glimpse 네이티브 바이너리, JSONL 프로토콜) 시도
 //! 3. GUI 바이너리가 없으면(spawn 실패) **CLI 폴백** — stderr에 내용을 출력하고
 //!    `/dev/tty`(Windows: CONIN$)에서 y/N 입력을 받는다
@@ -25,15 +25,15 @@ use tokio::time::timeout;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 게이트가 걸린 도구 목록 — 여기가 단일 기준점(single source of truth).
-/// 새 도구에 `Gate::approve(&self.gate_config, ...)`를 넣으면 **반드시 이 목록에도 추가**해야 한다
+/// 새 도구에 `Gate::approve(&self.gate_ctx, ...)`를 넣으면 **반드시 이 목록에도 추가**해야 한다
 /// (테스트가 실제 호출 지점 수와 대조해 어긋나면 실패시킨다).
 #[allow(dead_code)] // 테스트(`게이트_대상_목록은_실제_호출_지점과_일치한다`)가 유일한 소비자.
 pub(crate) const GATED_TOOLS: &[&str] = &["reserve_resource", "list_mail_inbox"];
 
 /// 승인 게이트 설정 — 값 타입 하나로 들고 다닌다(Arc 불필요).
-/// `Amaranth`는 이걸 필드로 보관하고, 도구 핸들러는 `Gate::approve(&self.gate_config, ...)`로 쓴다.
+/// `Amaranth`는 이걸 필드로 보관하고, 도구 핸들러는 `Gate::approve(&self.gate_ctx, ...)`로 쓴다.
 #[derive(Clone, Debug)]
-pub struct GateConfig {
+pub struct GateContext {
     pub enabled: bool,
     pub binary: PathBuf,
     pub timeout: Duration,
@@ -50,7 +50,7 @@ fn approval_sem() -> &'static Semaphore {
     APPROVAL_SEM.get_or_init(|| Semaphore::new(1))
 }
 
-impl GateConfig {
+impl GateContext {
     pub fn enabled(&self) -> bool {
         self.enabled
     }
@@ -66,7 +66,7 @@ struct PromptCtx<'a> {
 
 impl Gate {
     /// 게이트 비활성(통과 모드). 기본값.
-    pub fn disabled() -> GateConfig {
+    pub fn disabled() -> GateContext {
         Gate::new(false, DEFAULT_TIMEOUT)
     }
 
@@ -75,11 +75,11 @@ impl Gate {
     ///
     /// 내장 경로: repo 루트 기준 — macOS `native/macos/glimpse`,
     /// Linux `native/linux/glimpse-<x86_64|aarch64>`, Windows `native/windows/glimpse.exe`.
-    pub fn new(enabled: bool, timeout: Duration) -> GateConfig {
+    pub fn new(enabled: bool, timeout: Duration) -> GateContext {
         let binary = std::env::var("GLIMPSE_BINARY_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|_| builtin_native_path());
-        GateConfig {
+        GateContext {
             enabled,
             binary,
             timeout,
@@ -93,7 +93,7 @@ impl Gate {
     /// - 활성 + 거부·무응답·창 닫힘: `Err` (도구 실행 안 됨)
     /// - 활성 + GUI도 CLI도 불가: `Err` (명시적, 조용히 통과하지 않음)
     pub async fn approve(
-        ctx: &GateConfig,
+        ctx: &GateContext,
         tool: &str,
         kind: &str,
         summary: &str,
@@ -161,7 +161,7 @@ impl Gate {
     /// stdin으로 `{"type":"html","html":<base64>}`를 보내고,
     /// stdout의 `{"type":"message","data":{...}}`(사용자 버튼)을 기다린다.
     /// ⚠️ **stdin EOF가 창을 닫는다** — HTML 전송 후 stdin을 닫으면 안 된다.
-    async fn run_gui_popup(ctx: &GateConfig, html: &str) -> Result<Decision, ErrorData> {
+    async fn run_gui_popup(ctx: &GateContext, html: &str) -> Result<Decision, ErrorData> {
         let mut child = match Command::new(&ctx.binary)
             .args(["--auto-close", "--floating", "--frameless"])
             .args(["--width", "560", "--height", "620"])
@@ -244,7 +244,7 @@ impl Gate {
 
     /// CLI 폴백 — 내용을 stderr로 출력하고 tty에서 y/N 입력을 받는다.
     /// `Ok(true)`=승인, `Ok(false)`=거부·무응답(타임아웃), `Err`=입력 불가(GUI도 없음).
-    async fn run_cli_prompt(ctx: &GateConfig, prompt_ctx: &PromptCtx<'_>) -> Result<Decision, ErrorData> {
+    async fn run_cli_prompt(ctx: &GateContext, prompt_ctx: &PromptCtx<'_>) -> Result<Decision, ErrorData> {
         eprintln!("{}", prompt_text(ctx.binary.display(), prompt_ctx));
 
         // 터미널 입력: Unix /dev/tty, Windows CONIN$ — 도구를 실행한 MCP 서버의
@@ -700,7 +700,7 @@ mod tests {
 
     #[tokio::test]
     async fn 비활성이면_승인_없이_통과() {
-        let ctx = GateConfig {
+        let ctx = GateContext {
             enabled: false,
             binary: PathBuf::from("/nonexistent/glimpse"),
             timeout: DEFAULT_TIMEOUT,
@@ -711,7 +711,7 @@ mod tests {
     #[tokio::test]
     async fn 활성인데_바이너리_없고_tty도_없으면_명시적_에러() {
         // CI 환경(테스트)에는 tty가 없음 → GUI 실패 후 CLI 폴백도 실패 → 에러.
-        let ctx = GateConfig {
+        let ctx = GateContext {
             enabled: true,
             binary: PathBuf::from("/nonexistent/glimpse"),
             timeout: Duration::from_secs(2),
@@ -761,8 +761,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn gate_with_binary(p: PathBuf) -> GateConfig {
-        GateConfig {
+    fn gate_with_binary(p: PathBuf) -> GateContext {
+        GateContext {
             enabled: true,
             binary: p,
             timeout: Duration::from_secs(5),

@@ -33,7 +33,7 @@ impl Amaranth {
         self.ensure_session().await?;
         // 승인 게이트웨이 — 데이터 조회도 에이전트가 가져가기 전에 사람 확인을 받는다(기본 ON).
         Gate::approve(
-            &self.gate_config,
+            &self.gate_ctx,
             "list_mail_inbox",
             "메일 수신함 조회",
             "에이전트가 메일 수신함(최근 20통)을 가져오려 합니다. 허용할까요?",
