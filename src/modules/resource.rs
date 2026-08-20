@@ -6,11 +6,11 @@
 //! 검증 없는 raw 래퍼(`create_reservation`/`update_reservation`/`delete_reservation`)도 남아 있지만,
 //! **새 호출부는 `*_and_verify`를 쓸 것.**
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 
 use crate::client::GwClient;
-use crate::error::NotOwner;
+use crate::error::{InvalidInput, NotOwner};
 
 /// 자원(회의실) 목록 — `rs121A01`
 pub async fn list_resources(c: &GwClient) -> Result<Value> {
@@ -38,7 +38,136 @@ fn subscriber_self(c: &GwClient) -> Value {
     })
 }
 
+/// 참석자(`resSubscriberList`) 목록을 만든다 — **본인이 항상 첫 항목**이고 뒤에 지정한 사람들이 붙는다.
+///
+/// `specs`는 **이름 또는 empSeq**(person_group 의 `empSeqs` 를 그대로 넘기면 된다).
+/// `deptSeq`는 사람마다 다르므로 명부(`org::roster`, 30분 캐시)에서 각자 값을 채운다 —
+/// 예약자 부서를 돌려쓰면 남의 부서가 틀리게 박힌다.
+///
+/// ⚠️ **타인을 넣는 것은 바깥으로 나가는 행위다**(`analyze/06` 경고). 이 함수는 값만 만들고,
+/// 호출 여부 판단은 도구 설명과 사용자 지시에 맡긴다.
+///
+/// 명부에서 못 찾은 사람은 **조용히 빼지 않고 거부**한다 — 참석자가 소리 없이 빠지면
+/// 그 사람만 회의를 모른 채 지나간다.
+pub async fn resolve_subscribers(
+    c: &std::sync::Arc<GwClient>,
+    specs: &[String],
+) -> Result<Vec<Value>> {
+    let mut out = vec![subscriber_self(c)];
+    let cleaned: Vec<&str> = specs.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    if cleaned.is_empty() {
+        return Ok(out);
+    }
+
+    let people = crate::modules::org::roster(c).await?;
+    let g = |m: &Value, k: &str| m.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    // 본인은 이미 들어 있다 — 다시 지정해도 중복으로 넣지 않는다.
+    let mut seen: std::collections::HashSet<String> = [c.emp_seq()].into_iter().collect();
+
+    for q in cleaned {
+        let hit = if q.chars().all(|ch| ch.is_ascii_digit()) {
+            people.iter().find(|m| g(m, "empSeq") == q).cloned().ok_or_else(|| {
+                InvalidInput::new(format!(
+                    "참석자 empSeq '{q}' 를 조직도 명부에서 찾지 못했습니다. find_person 으로 확인하세요."
+                ))
+            })?
+        } else {
+            let ql = q.to_lowercase();
+            let exact: Vec<&Value> = people.iter().filter(|m| g(m, "name").to_lowercase() == ql).collect();
+            let hits = if exact.is_empty() {
+                people.iter().filter(|m| g(m, "name").to_lowercase().contains(&ql)).collect::<Vec<_>>()
+            } else {
+                exact
+            };
+            match hits.len() {
+                0 => {
+                    return Err(InvalidInput::new(format!(
+                        "참석자 '{q}' 를 찾지 못했습니다. find_person 으로 확인 후 이름이나 empSeq를 지정하세요."
+                    ))
+                    .into())
+                }
+                1 => hits[0].clone(),
+                _ => {
+                    // 조용히 하나를 고르지 않는다 — 엉뚱한 사람을 회의에 넣는 것은 되돌리기 어렵다.
+                    let cands: Vec<String> = hits
+                        .iter()
+                        .take(10)
+                        .map(|m| format!("{}({}, {})", g(m, "name"), g(m, "empSeq"), g(m, "deptName")))
+                        .collect();
+                    return Err(InvalidInput::new(format!(
+                        "참석자 '{q}' 가 {}명입니다. empSeq로 지정하세요: {}",
+                        hits.len(),
+                        cands.join(", ")
+                    ))
+                    .into());
+                }
+            }
+        };
+        let emp_seq = g(&hit, "empSeq");
+        if seen.insert(emp_seq.clone()) {
+            out.push(json!({
+                "groupSeq": c.group_seq(),
+                "compSeq": c.comp_seq(),
+                // ⚠️ 예약자 부서가 아니라 **그 사람의 부서**다.
+                "deptSeq": g(&hit, "deptId"),
+                "empSeq": emp_seq
+            }));
+        }
+    }
+    Ok(out)
+}
+
+/// 상세(`rs121A10`)의 `subscriberList`를 **쓰기 API가 요구하는 4키로 투영**한다.
+///
+/// 실측(2026-08-20): 상세 응답이 참석자를 그대로 돌려준다 —
+/// `[{compSeq, deptName, deptSeq, empName, empSeq, groupSeq, loginId, useYn}]`.
+/// 쓰기(`rs121A06`/`A12`)가 받는 것은 그중 `{groupSeq, compSeq, deptSeq, empSeq}` 4개다.
+fn project_subscribers(list: &[Value]) -> Vec<Value> {
+    let g = |m: &Value, k: &str| m.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    list.iter()
+        .filter(|m| !g(m, "empSeq").is_empty())
+        .map(|m| json!({
+            "groupSeq": g(m, "groupSeq"),
+            "compSeq": g(m, "compSeq"),
+            "deptSeq": g(m, "deptSeq"),
+            "empSeq": g(m, "empSeq")
+        }))
+        .collect()
+}
+
+/// 수정 시 참석자를 **지정하지 않았을 때** 기존 참석자를 그대로 유지한다.
+///
+/// ⚠️ **이 함수가 없으면 수정이 참석자를 조용히 날린다.** 쓰기 API는 `resSubscriberList`를
+/// 통째로 덮어쓰므로, 예전처럼 `[본인]`을 고정으로 보내면 예약명만 고쳐도 참석자 전원이 빠진다
+/// (그 사람들에게는 아무 통지도 가지 않는다).
+///
+/// 상세에서 참석자를 **읽지 못하면 중단**한다 — "참석자 없음"으로 넘기면 위와 같은 사고가 난다.
+fn keep_subscribers(detail: &Value) -> Result<Vec<Value>> {
+    let Some(list) = detail.get("subscriberList").and_then(|v| v.as_array()) else {
+        bail!(
+            "예약 상세에서 참석자(subscriberList)를 읽지 못해 기존 참석자를 유지할 수 없다 — \
+             그대로 수정하면 참석자가 조용히 빠지므로 중단한다. attendees 인자로 참석자를 \
+             명시하면 진행할 수 있다"
+        );
+    };
+    Ok(project_subscribers(list))
+}
+
+/// 예약 상세에서 참석자를 사람이 읽을 형태로(이름 목록). read-back 보고용.
+fn subscriber_names(detail: &Value) -> Vec<String> {
+    detail
+        .get("subscriberList")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.get("empName").and_then(|v| v.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// 예약 등록 — `rs121A06`. 날짜는 `YYYYMMDDHHmm`. 반환에 `seqNum`/`resIdx`.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_reservation(
     c: &GwClient,
     res_seq: &str,
@@ -46,6 +175,7 @@ pub async fn create_reservation(
     start: &str,
     end: &str,
     desc: &str,
+    subscribers: &[Value],
 ) -> Result<Value> {
     c.call(
         "/schres/rs121A06",
@@ -58,7 +188,7 @@ pub async fn create_reservation(
             "startDate": start,
             "endDate": end,
             "descText": desc,
-            "resSubscriberList": [subscriber_self(c)],
+            "resSubscriberList": subscribers,
             "uidList": "",
             "repeatType": "10",
             "repeatEndDay": "",
@@ -82,6 +212,7 @@ pub async fn update_reservation(
     start_date_pk: &str,
     create_date_pk: &str,
     res_name: &str,
+    subscribers: &[Value],
 ) -> Result<Value> {
     c.call(
         "/schres/rs121A12",
@@ -98,7 +229,7 @@ pub async fn update_reservation(
             "startDate": start,
             "endDate": end,
             "descText": desc,
-            "resSubscriberList": [subscriber_self(c)],
+            "resSubscriberList": subscribers,
             "uidList": "",
             "repeatType": "10",
             "repeatEndDay": "",
@@ -594,15 +725,18 @@ fn merge_update(
 }
 
 /// 예약 등록 + **read-back 검증**. 등록 응답의 successTf를 믿지 않고 재조회로 확인한다.
+#[allow(clippy::too_many_arguments)]
 pub async fn reserve_and_verify(
-    c: &GwClient,
+    c: &std::sync::Arc<GwClient>,
     res_seq: &str,
     req_text: &str,
     start: &str,
     end: &str,
     desc: &str,
+    attendees: &[String],
 ) -> Result<Value> {
-    let reg = create_reservation(c, res_seq, req_text, start, end, desc)
+    let subscribers = resolve_subscribers(c, attendees).await?;
+    let reg = create_reservation(c, res_seq, req_text, start, end, desc, &subscribers)
         .await
         .map_err(|e| anyhow!("예약 등록 실패: {e}"))?;
 
@@ -622,16 +756,29 @@ pub async fn reserve_and_verify(
     // ⚠️ `reqText`는 **요청값이 아니라 재조회로 읽은 실제 저장값**을 싣는다. 요청값을 그대로
     // 되돌려주면 서버가 다르게 저장했을 때(`ok:false`) 응답만 보고는 무엇이 저장됐는지 알 수 없다.
     // 수정(`update_and_verify`)도 같은 규칙이다.
+    // 참석자는 **재조회한 subscriberList**로 확인한다 — 요청값 echo가 아니다.
+    // 아마란스는 모르는 값을 조용히 버리므로 "보냈다"가 "들어갔다"의 근거가 못 된다.
+    let stored_att = subscriber_names(&detail);
+    let att_ok = stored_att.len() == subscribers.len();
     let mut msg = json!({
-        "ok": reflected,
+        "ok": reflected && att_ok,
         "seqNum": seq_num,
         "resIdx": res_idx,
         "resSeq": res_seq,
         "reqText": stored,
         "displayTitle": display_title(d("empName"), d("resName")),
         "period": format!("{start}~{end}"),
-        "verified_by_readback": reflected
+        "attendees": stored_att,
+        "attendeesVerified": att_ok,
+        "verified_by_readback": reflected && att_ok
     });
+    if !att_ok {
+        msg["attendeesWarning"] = json!(format!(
+            "참석자 {}명을 보냈는데 재조회에는 {}명이다 — 서버가 일부를 받지 않았다. \
+             아마란스 웹에서 예약을 열어 참석자를 확인할 것",
+            subscribers.len(), stored_att.len()
+        ));
+    }
     if let Some(w) = lunch_warning(start, end) {
         msg["lunchWarning"] = json!(w);
     }
@@ -643,7 +790,7 @@ pub async fn reserve_and_verify(
 /// 그래서 read-back은 요청에 쓴 값이 아니라 **응답이 준 새 ID**로 한다.
 #[allow(clippy::too_many_arguments)]
 pub async fn update_and_verify(
-    c: &GwClient,
+    c: &std::sync::Arc<GwClient>,
     res_seq: &str,
     seq_num: i64,
     res_idx: Option<&str>,
@@ -651,6 +798,7 @@ pub async fn update_and_verify(
     start: Option<&str>,
     end: Option<&str>,
     desc: Option<&str>,
+    attendees: Option<&[String]>,
 ) -> Result<Value> {
     let res_idx = res_idx.unwrap_or("1");
     let detail = get_reservation(c, res_seq, seq_num, res_idx)
@@ -659,10 +807,15 @@ pub async fn update_and_verify(
     check_owner(&detail, &c.emp_seq(), "수정")?;
 
     let f = merge_update(&detail, req_text, start, end, desc);
+    let subscribers = match attendees {
+        Some(specs) => resolve_subscribers(c, specs).await?,
+        None => keep_subscribers(&detail)?,
+    };
     let upd = update_reservation(
         c, res_seq, seq_num, res_idx,
         &f.req_text, &f.start, &f.end, &f.desc,
         &f.orig_start, &f.create_date, &f.res_name,
+        &subscribers,
     )
     .await
     .map_err(|e| anyhow!("예약 수정 실패: {e}"))?;
@@ -676,8 +829,11 @@ pub async fn update_and_verify(
     let ag = |k: &str| after.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
     let reflected = ag("startDate") == f.start && ag("endDate") == f.end && ag("reqText") == f.req_text;
 
+    // 참석자도 재조회로 확인한다 — 특히 **미지정 수정이 기존 참석자를 지키는지**가 여기서 드러난다.
+    let stored_att = subscriber_names(&after);
+    let att_ok = stored_att.len() == subscribers.len();
     let mut msg = json!({
-        "ok": reflected,
+        "ok": reflected && att_ok,
         "seqNum": new_seq,
         "resIdx": new_idx,
         "prev_seqNum": seq_num,
@@ -685,8 +841,17 @@ pub async fn update_and_verify(
         "reqText": ag("reqText"),
         "displayTitle": display_title(&ag("empName"), &ag("resName")),
         "period": format!("{}~{}", ag("startDate"), ag("endDate")),
-        "verified_by_readback": reflected
+        "attendees": stored_att,
+        "attendeesVerified": att_ok,
+        "verified_by_readback": reflected && att_ok
     });
+    if !att_ok {
+        msg["attendeesWarning"] = json!(format!(
+            "참석자 {}명을 보냈는데 재조회에는 {}명이다 — 수정 과정에서 참석자가 빠졌을 수 있다. \
+             아마란스 웹에서 예약을 열어 확인할 것",
+            subscribers.len(), stored_att.len()
+        ));
+    }
     if let Some(w) = lunch_warning(&f.start, &f.end) {
         msg["lunchWarning"] = json!(w);
     }
@@ -908,6 +1073,58 @@ mod tests {
         assert_eq!(attr_filter("hq"), Some("1"));
         assert_eq!(attr_filter("구로"), Some("3"));
         assert_eq!(attr_filter("7"), Some("7"));
+    }
+
+    /// 상세 응답의 참석자를 **쓰기 API가 받는 4키로만** 투영하는지.
+    /// 여분 키(deptName/empName/loginId/useYn)를 그대로 실어 보내면 서버 동작이 미실측 영역이 된다.
+    #[test]
+    fn 참석자_투영은_쓰기_4키만_남긴다() {
+        let list = vec![json!({
+            "compSeq": "1000", "deptName": "네이티브 플랫폼팀", "deptSeq": "2993",
+            "empName": "이재학", "empSeq": "3166", "groupSeq": "G1",
+            "loginId": "jaehak.lee", "useYn": "Y"
+        })];
+        let out = project_subscribers(&list);
+        assert_eq!(out.len(), 1);
+        let keys: Vec<&String> = out[0].as_object().unwrap().keys().collect();
+        assert_eq!(keys, vec!["compSeq", "deptSeq", "empSeq", "groupSeq"]);
+        assert_eq!(out[0]["deptSeq"], "2993");
+        assert_eq!(out[0]["empSeq"], "3166");
+
+        // empSeq 없는 항목은 버린다(그대로 보내면 서버가 뭘 할지 모른다).
+        assert!(project_subscribers(&[json!({ "empName": "누구" })]).is_empty());
+    }
+
+    /// ⭐ **수정이 참석자를 조용히 날리지 않는지.** 예전 구현은 `[본인]`을 고정으로 보내서
+    /// 예약명만 고쳐도 참석자 전원이 빠졌다(그 사람들에게는 통지도 가지 않는다).
+    #[test]
+    fn 참석자_미지정_수정은_기존_참석자를_지킨다() {
+        let detail = json!({ "subscriberList": [
+            { "compSeq": "1000", "deptSeq": "2993", "empSeq": "3166", "groupSeq": "G1" },
+            { "compSeq": "1000", "deptSeq": "2986", "empSeq": "3137", "groupSeq": "G1" },
+        ]});
+        let kept = keep_subscribers(&detail).unwrap();
+        assert_eq!(kept.len(), 2, "기존 참석자가 그대로 유지돼야 한다");
+        assert_eq!(kept[1]["empSeq"], "3137");
+        // ⚠️ 각자의 부서가 보존돼야 한다 — 예약자 부서로 덮으면 남의 부서가 틀리게 박힌다.
+        assert_eq!(kept[1]["deptSeq"], "2986");
+
+        // 읽지 못하면 "참석자 없음"이 아니라 **중단**이다.
+        assert!(keep_subscribers(&json!({})).is_err());
+        assert!(keep_subscribers(&json!({ "subscriberList": null })).is_err());
+        // 빈 배열은 읽은 것이다(참석자가 실제로 없음) — 중단이 아니다.
+        assert!(keep_subscribers(&json!({ "subscriberList": [] })).unwrap().is_empty());
+    }
+
+    /// read-back 보고용 이름 추출.
+    #[test]
+    fn 참석자_이름은_상세에서_뽑는다() {
+        let detail = json!({ "subscriberList": [
+            { "empName": "이재학", "empSeq": "3166" },
+            { "empName": "홍길동", "empSeq": "3137" },
+        ]});
+        assert_eq!(subscriber_names(&detail), vec!["이재학", "홍길동"]);
+        assert!(subscriber_names(&json!({})).is_empty());
     }
 
     /// 74필드 원본 → 슬림 형태. 후속 조회에 필요한 seqNum/resIdx가 반드시 남아야 한다.

@@ -26,6 +26,12 @@ pub struct ReserveArgs {
     /// 내용(선택)
     #[serde(default)]
     pub desc: String,
+    /// 참석자(선택) — 본인 외. **이름 또는 empSeq** 목록(person_group의 empSeqs를 그대로 넘겨도 된다).
+    /// 본인은 항상 예약자로 들어가므로 넣지 않아도 된다.
+    #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string_vec_opt")]
+    #[schemars(schema_with = "super::flex_str_vec_opt_schema")]
+    pub attendees: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
@@ -78,6 +84,12 @@ pub struct UpdateArgs {
     /// 새 내용 (미지정 시 기존 유지)
     #[serde(default)]
     pub desc: Option<String>,
+    /// 새 참석자 목록 — **이름 또는 empSeq**. 미지정 시 기존 참석자를 유지한다.
+    /// ⚠️ 지정하면 **통째로 교체**된다(빼려면 남길 사람만 나열).
+    #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string_vec_opt")]
+    #[schemars(schema_with = "super::flex_str_vec_opt_schema")]
+    pub attendees: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]

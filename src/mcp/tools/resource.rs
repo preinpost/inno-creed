@@ -69,7 +69,7 @@ impl Amaranth {
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
-    #[tool(description = "회의실을 예약한다(등록 후 재조회로 실제 생성 확인). 시각은 YYYYMMDDHHmm. ⚠️ **13:00~14:00은 점심시간** — 예약 구간이 여기 걸치면 응답에 lunchWarning이 실린다. 막지는 않으니 그 경우 사용자에게 의도한 것인지 확인할 것. 응답의 reqText=예약명, displayTitle=아마란스 화면에 실제로 찍히는 문구(`[예약자] 자원명`) — **화면은 예약명을 표시하지 않으므로**, 사용자가 \"예약명이 다르게 보인다\"고 하면 이 차이로 설명할 것.")]
+    #[tool(description = "회의실을 예약한다(등록 후 재조회로 실제 생성 확인). 시각은 YYYYMMDDHHmm. ⚠️ **13:00~14:00은 점심시간** — 예약 구간이 여기 걸치면 응답에 lunchWarning이 실린다. 막지는 않으니 그 경우 사용자에게 의도한 것인지 확인할 것. 응답의 reqText=예약명, displayTitle=아마란스 화면에 실제로 찍히는 문구(`[예약자] 자원명`) — **화면은 예약명을 표시하지 않으므로**, 사용자가 \"예약명이 다르게 보인다\"고 하면 이 차이로 설명할 것. attendees에 **이름 또는 empSeq** 목록을 주면 참석자로 등록된다(person_group의 empSeqs를 그대로 넘겨도 된다). 본인은 항상 예약자로 들어가므로 넣지 않아도 된다. ⚠️ **참석자에 타인을 넣는 것은 바깥으로 나가는 행위**다 — 그 사람의 예약 목록에 뜨고 알림이 갈 수 있다(발송 여부 미실측). send_mail·submit_approval과 같은 급으로 다루고, 사용자가 명시적으로 지시할 때만 지정할 것. 응답의 attendees/attendeesVerified로 실제 반영을 확인한다(서버가 일부를 버리면 attendeesWarning이 실린다).")]
     async fn reserve_resource(
         &self,
         Parameters(a): Parameters<ReserveArgs>,
@@ -77,6 +77,7 @@ impl Amaranth {
         self.ensure_session().await?;
         let data = modules::resource::reserve_and_verify(
             &self.client, &a.res_seq, &a.req_text, &a.start, &a.end, &a.desc,
+            a.attendees.as_deref().unwrap_or(&[]),
         )
         .await
         .map_err(map_domain_err)?;
@@ -84,7 +85,7 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "회의실 예약을 수정한다(본인 소유만; 변경분만 지정, 수정 후 재조회로 확인). 시각은 YYYYMMDDHHmm. ⚠️ 바꾼 시간이 **점심시간 13:00~14:00**에 걸치면 응답에 lunchWarning이 실린다 — 사용자에게 확인할 것."
+        description = "회의실 예약을 수정한다(본인 소유만; 변경분만 지정, 수정 후 재조회로 확인). 시각은 YYYYMMDDHHmm. ⚠️ 바꾼 시간이 **점심시간 13:00~14:00**에 걸치면 응답에 lunchWarning이 실린다 — 사용자에게 확인할 것. 참석자(attendees)는 **미지정 시 기존 참석자를 그대로 유지**하고, 지정하면 **통째로 교체**된다(빼려면 남길 사람만 나열). ⚠️ 참석자에 **타인을 넣는 것은 바깥으로 나가는 행위**다 — 그 사람의 예약 목록에 뜨고 알림이 갈 수 있으니(발송 여부 미실측) 사용자가 명시적으로 지시할 때만 지정할 것. 응답의 attendees/attendeesVerified로 실제 반영을 확인한다."
     )]
     async fn update_reservation(
         &self,
@@ -100,6 +101,7 @@ impl Amaranth {
             a.start.as_deref(),
             a.end.as_deref(),
             a.desc.as_deref(),
+            a.attendees.as_deref(),
         )
         .await
         .map_err(map_domain_err)?;

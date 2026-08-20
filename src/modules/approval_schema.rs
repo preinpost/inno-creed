@@ -15,12 +15,9 @@ fn bundled() -> Value {
     serde_json::from_str(BUNDLED).expect("번들 결재라인 스키마 JSON 파싱 실패")
 }
 
-/// override 파일 경로: XDG_CONFIG_HOME 우선, 없으면 ~/.config.
+/// override 파일 경로. 경로 규칙은 `crate::config`가 갖는다(설정 파일이 둘 이상이라 공용이다).
 fn override_path() -> Option<std::path::PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
-    Some(base.join("inno-creed").join("approval_line.json"))
+    crate::config::file("approval_line.json")
 }
 
 /// override 파일의 `overrides` 오브젝트(없으면 Null).
