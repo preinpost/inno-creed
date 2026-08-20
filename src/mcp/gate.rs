@@ -24,6 +24,11 @@ use tokio::time::timeout;
 /// 기본 승인 대기 시간.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// 게이트가 걸린 도구 목록 — 여기가 단일 기준점(single source of truth).
+/// 새 도구에 `self.approve(...)`를 넣으면 **반드시 이 목록에도 추가**해야 한다
+/// (테스트가 실제 호출 지점 수와 대조해 어긋나면 실패시킨다).
+pub(crate) const GATED_TOOLS: &[&str] = &["reserve_resource", "list_mail_inbox"];
+
 /// 승인 게이트웨이. `Arc` 안의 `GateInner`를 공유한다.
 #[derive(Clone)]
 pub struct Gate {
@@ -551,6 +556,7 @@ fn build_html(tool: &str, kind: &str, summary: &str, rows: &[(String, String)]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::Amaranth;
 
     #[test]
     fn 프롬프트_상수가_빈_문구면_안_된다() {
@@ -584,6 +590,40 @@ mod tests {
                 m.contains(Prompt::AgentNoRetry.text()),
                 "공통 지시 누락: {m}"
             );
+        }
+    }
+
+    #[test]
+    fn 게이트_대상_목록은_실제_호출_지점과_일치한다() {
+        // src/mcp/tools/ 아래 모든 .rs에서 self.approve( 호출 수를 센다.
+        // GATED_TOOLS와 어긋나면(누락·빠뜨림) 실패 — 게이트 도구 추가 시 여기 목록을 갱신해야 한다.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/mcp/tools");
+        let mut calls = 0usize;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let pth = entry.unwrap().path();
+            if pth.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&pth).unwrap();
+            calls += src.matches("self.approve(").count();
+        }
+        assert_eq!(
+            calls,
+            GATED_TOOLS.len(),
+            "self.approve( 호출 수가 GATED_TOOLS 목록과 다르다 — gate.rs 목록 갱신 필요"
+        );
+    }
+
+    #[test]
+    fn 게이트_대상은_실제_도구다() {
+        let names: Vec<String> = Amaranth::all_tools()
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        for gated in GATED_TOOLS {
+            assert!(names.iter().any(|n| n == gated), "{gated} 도구가 없는데 게이트 목록에 있다");
         }
     }
 
