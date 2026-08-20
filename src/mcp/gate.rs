@@ -134,17 +134,15 @@ impl Gate {
     /// 에이전트가 읽는 거부 메시지 — 재시도 루프를 막도록 사유를 구분하고
     /// "자동 재시도하지 말 것 / 사용자에게 승인 요청"을 명시적으로 지시한다.
     fn deny_message(tool: &str, cause: DenyCause, timeout_secs: u64) -> String {
-        match cause {
-            DenyCause::Clicked => format!(
-                "사용자가 '{tool}' 실행을 거부했습니다. 에이전트: 승인 없이는 이 작업을 재시도하지 말고, 사용자에게 직접 허가를 받으세요."
-            ),
-            DenyCause::Closed => format!(
-                "'{tool}' 승인 창이 닫혀 거부 처리되었습니다. 에이전트: 재시도하기 전에 사용자에게 승인 팝업을 다시 띄워달라고 요청하세요."
-            ),
+        // 사유별 머리말 — 꼬리(재시도 금지 지시)는 Prompt 공통 상수를 쓴다.
+        let head = match cause {
+            DenyCause::Clicked => format!("사용자가 '{tool}' 실행을 거부했습니다."),
+            DenyCause::Closed => format!("'{tool}' 승인 창이 닫혀 거부 처리되었습니다."),
             DenyCause::Timeout => format!(
-                "'{tool}' 승인이 {timeout_secs}초 안에 완료되지 않아 거부 처리되었습니다. 에이전트: 자동 재시도하지 말고, 사용자에게 승인 팝업을 확인하라고 안내하세요."
+                "'{tool}' 승인이 {timeout_secs}초 안에 완료되지 않아 거부 처리되었습니다."
             ),
-        }
+        };
+        format!("{head} {}", Prompt::AgentNoRetry.text())
     }
 
     /// GUI 팝업 실행 → 결정 대기. `Ok(true)`=승인, `Ok(false)`=거부·닫힘·무응답.
@@ -289,18 +287,67 @@ impl Gate {
 }
 
 /// CLI 폴백 프롬프트 텍스트.
+/// 승인 게이트웨이가 사용자·에이전트에게 노출하는 문구 모음.
+/// 문구가 바뀌면 여기만 고치면 팝업/CLI 폴백/거부 메시지가 함께 따라온다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Prompt {
+    /// 팝업 상단 배지
+    BadgeNeedApproval,
+    /// 승인 버튼 라벨
+    ApproveButton,
+    /// 거부 버튼 라벨
+    DenyButton,
+    /// 팝업 하단 안내(무응답=자동 거부). HTML 포함.
+    PopupFooter,
+    /// CLI 폴백 배너 첫 줄
+    CliBanner,
+    /// CLI 폴백 라벨: 도구
+    CliToolLabel,
+    /// CLI 폴백 라벨: 동작
+    CliActionLabel,
+    /// CLI 폴백 라벨: 내용
+    CliContentLabel,
+    /// CLI 폴백 질문 접미사
+    CliQuestion,
+    /// 에이전트 재시도 금지 공통 지시 — 모든 거부 사유에 함께 붙는다
+    AgentNoRetry,
+}
+
+impl Prompt {
+    pub(crate) fn text(self) -> &'static str {
+        use Prompt::*;
+        match self {
+            BadgeNeedApproval => "승인 필요",
+            ApproveButton => "✅ 승인",
+            DenyButton => "✕ 거부",
+            PopupFooter =>
+                "이 작업이 맞으면 <b>승인</b>, 아니면 <b>거부</b>를 누르세요. 무응답 시 자동으로 거부 처리됩니다.",
+            CliBanner => "========== [inno-creed] 승인 게이트웨이 (CLI 폴백) ==========",
+            CliToolLabel => "도구",
+            CliActionLabel => "동작",
+            CliContentLabel => "내용",
+            CliQuestion => "위 작업을 실행할까요? [y/N] ",
+            AgentNoRetry =>
+                "에이전트: 승인 없이는 자동 재시도하지 말고, 사용자에게 승인을 요청하세요.",
+        }
+    }
+}
+
 fn prompt_text(binary: impl std::fmt::Display, ctx: &PromptCtx<'_>) -> String {
     let mut s = String::new();
-    s.push_str("\n========== [inno-creed] 승인 게이트웨이 (CLI 폴백) ==========\n");
+    s.push('\n');
+    s.push_str(Prompt::CliBanner.text());
+    s.push('\n');
     s.push_str(&format!("GUI 바이너리를 찾을 수 없습니다: {binary}\n"));
-    s.push_str(&format!("도구: {}\n", ctx.tool));
-    s.push_str(&format!("동작: {}\n", ctx.kind));
-    s.push_str(&format!("내용: {}\n", ctx.summary));
+    s.push_str(&format!("{}: {}\n", Prompt::CliToolLabel.text(), ctx.tool));
+    s.push_str(&format!("{}: {}\n", Prompt::CliActionLabel.text(), ctx.kind));
+    s.push_str(&format!("{}: {}\n", Prompt::CliContentLabel.text(), ctx.summary));
     for (k, v) in ctx.rows {
         s.push_str(&format!("  - {k}: {v}\n"));
     }
-    s.push_str("============================================================\n");
-    s.push_str("위 작업을 실행할까요? [y/N] ");
+    s.push_str(&"=".repeat(60));
+    s.push('\n');
+    s.push_str(Prompt::CliQuestion.text());
     s
 }
 
@@ -426,6 +473,16 @@ fn build_html(tool: &str, kind: &str, summary: &str, rows: &[(String, String)]) 
     let tool = esc(tool);
     let kind = esc(kind);
     let summary = esc(summary);
+    let badge = Prompt::BadgeNeedApproval.text();
+    let approve_btn = format!(
+        "{} <span class=\"kbd\">Enter</span>",
+        Prompt::ApproveButton.text()
+    );
+    let deny_btn = format!(
+        "{} <span class=\"kbd\">Esc</span>",
+        Prompt::DenyButton.text()
+    );
+    let footer = Prompt::PopupFooter.text();
     let rows_html: String = rows
         .iter()
         .map(|(k, v)| {
@@ -467,16 +524,16 @@ fn build_html(tool: &str, kind: &str, summary: &str, rows: &[(String, String)]) 
 </head>
 <body>
   <div class="head">
-    <span class="badge">승인 필요</span>
+    <span class="badge">{badge}</span>
     <span class="tool">{tool}</span>
   </div>
   <h2>{kind}</h2>
   <p class="summary">{summary}</p>
   <table>{rows_html}</table>
-  <div class="footer">이 작업이 맞으면 <b>승인</b>, 아니면 <b>거부</b>를 누르세요. 무응답 시 자동으로 거부 처리됩니다.</div>
+  <div class="footer">{footer}</div>
   <div class="buttons">
-    <button class="approve" onclick="approve()">✅ 승인 <span class="kbd">Enter</span></button>
-    <button class="deny" onclick="deny()">✕ 거부 <span class="kbd">Esc</span></button>
+    <button class="approve" onclick="approve()">{approve_btn}</button>
+    <button class="deny" onclick="deny()">{deny_btn}</button>
   </div>
   <script>
     function approve() {{ window.glimpse.send({{ action: 'approve' }}); }}
@@ -494,6 +551,41 @@ fn build_html(tool: &str, kind: &str, summary: &str, rows: &[(String, String)]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 프롬프트_상수가_빈_문구면_안_된다() {
+        let all = [
+            Prompt::BadgeNeedApproval,
+            Prompt::ApproveButton,
+            Prompt::DenyButton,
+            Prompt::PopupFooter,
+            Prompt::CliBanner,
+            Prompt::CliToolLabel,
+            Prompt::CliActionLabel,
+            Prompt::CliContentLabel,
+            Prompt::CliQuestion,
+            Prompt::AgentNoRetry,
+        ];
+        for p in all {
+            assert!(!p.text().is_empty(), "{p:?} 빈 문구");
+        }
+    }
+
+    #[test]
+    fn 거부_메시지는_공통_재시도금지_지시를_붙인다() {
+        for (cause, expect_head) in [
+            (DenyCause::Clicked, "거부했습니다"),
+            (DenyCause::Closed, "창이 닫혀"),
+            (DenyCause::Timeout, "완료되지 않아"),
+        ] {
+            let m = Gate::deny_message("reserve_resource", cause, 30);
+            assert!(m.contains(expect_head), "{m}");
+            assert!(
+                m.contains(Prompt::AgentNoRetry.text()),
+                "공통 지시 누락: {m}"
+            );
+        }
+    }
 
     #[test]
     fn html_이스케이프_한다() {
