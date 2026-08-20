@@ -147,7 +147,8 @@ jobs:
               && cp target/release/glimpse /out/glimpse
             '
           mv native/linux/glimpse "${{ matrix.target_file }}"
-          chmod +x "${{ matrix.target_file }}"
+          # 컨테이너가 root로 생성한 파일이라 runner 유저는 sudo 로만 권한 변경 가능
+          sudo chmod a+x "${{ matrix.target_file }}"
           echo "빌드 완료: ${{ matrix.target_file }}"
 
       - if: steps.skip.outputs.skip != 'true'
